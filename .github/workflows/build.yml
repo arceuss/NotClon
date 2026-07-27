@@ -1,0 +1,142 @@
+name: build
+
+# Produces the same bundle the release is cut from: two static-CRT binaries,
+# SDL3.dll, a static ffmpeg.exe, and the assets/docs/templates beside them.
+#
+# Pushing a v* tag additionally publishes that bundle as a GitHub release.
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # BtbN's static Windows build. GPL rather than LGPL on purpose: the LGPL one
+  # has no libx264, and x264 is NotClon's default encoder, so an LGPL bundle
+  # would ship a --enc default that cannot work. See licenses/ in the bundle.
+  FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+
+jobs:
+  windows:
+    # Pinned, not windows-latest: that label moves to a new image every so
+    # often and a release build should not change compiler under you. This
+    # image ships LLVM 20.1.8, Ninja and CMake, so nothing has to be installed.
+    runs-on: windows-2025
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain versions
+        shell: bash
+        run: |
+          clang++ --version | head -2
+          cmake --version | head -1
+          ninja --version
+
+      # clang++ rather than the MSVC that CMake would pick by default: it is
+      # what the project is developed and tested against, and the two differ
+      # enough around the Windows headers that "it builds locally" would stop
+      # meaning anything.
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DNOTCLON_STATIC_RUNTIME=ON
+
+      - name: Build
+        shell: bash
+        run: cmake --build build
+
+      # The cheapest check that actually catches something: a binary whose
+      # runtime DLLs are missing fails here rather than on a user's machine.
+      # This is exactly how the editor's dependency on MSVCP140.dll -- present
+      # on a dev box, absent on a clean install -- would have been caught.
+      - name: Smoke test — binaries launch
+        shell: bash
+        run: |
+          # No pipe: piping into head makes the step's exit status head's, so
+          # a binary that failed to start would still pass.
+          ./build/notclon.exe > usage.txt
+          head -3 usage.txt
+          test -s usage.txt
+          echo "--- notclon.exe runs and its dependencies resolve"
+
+      # NOTE: the pinned-hash regression (AGENTS.md) is deliberately NOT run
+      # here. It renders frames, and GitHub-hosted runners have no GPU -- the
+      # only OpenGL Windows offers without one is a 1.1 software path, and
+      # NotClon needs 3.3. Running it would need Mesa's llvmpipe opengl32.dll
+      # dropped beside the exe, and llvmpipe is not bit-identical to the
+      # NVIDIA driver the baselines were recorded on, so it would flag every
+      # build as a regression. Render checks stay a local gate.
+
+      - name: Fetch ffmpeg
+        shell: bash
+        run: |
+          curl -sSL --retry 3 -o ffmpeg.zip "$FFMPEG_URL"
+          7z x ffmpeg.zip -offmpeg -y > /dev/null
+          find ffmpeg -name ffmpeg.exe -exec cp {} ffmpeg.exe \;
+          find ffmpeg -name 'LICENSE.txt' -exec cp {} FFmpeg-LICENSE.txt \;
+          ./ffmpeg.exe -version | head -1
+
+      - name: Assemble bundle
+        shell: bash
+        run: |
+          B=dist/NotClon-win64
+          mkdir -p "$B/licenses"
+          cp build/notclon.exe build/notclon-editor.exe build/SDL3.dll "$B/"
+          cp ffmpeg.exe "$B/"
+          cp -r assets docs templates "$B/"
+          cp FFmpeg-LICENSE.txt "$B/licenses/"
+          cp third_party/lua/COPYRIGHT "$B/licenses/Lua-COPYRIGHT.txt"
+          cp packaging/bundle-README.txt "$B/README.txt"
+          ls -la "$B"
+
+      # Only that the bundled binary itself works. Whether NotClon *finds*
+      # it cannot be checked here: that path runs during an encode, and an
+      # encode needs the GPU this runner does not have.
+      - name: Smoke test — bundled ffmpeg runs
+        shell: bash
+        run: dist/NotClon-win64/ffmpeg.exe -hide_banner -version | head -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NotClon-win64
+          path: dist/NotClon-win64
+          # The bundle is ~145 MB, most of it ffmpeg, and it compresses poorly.
+          compression-level: 6
+          retention-days: 30
+
+  release:
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: NotClon-win64
+          path: NotClon-win64
+
+      - name: Zip
+        run: zip -r "NotClon-${GITHUB_REF_NAME}-win64.zip" NotClon-win64
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: NotClon-*-win64.zip
+          draft: true
+          body: |
+            Windows x64 bundle. Unzip and run — nothing to install.
+
+                notclon.exe --dir templates\modchart --preview 20
+
+            Includes a static ffmpeg (GPL; see `licenses/`), SDL3, the assets,
+            the docs and a template song.
