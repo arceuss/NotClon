@@ -21,8 +21,12 @@ static const char* BG_VS_330 = R"(#version 330
 layout(location=0) in vec2 aPos;
 out vec2 imageCoord;
 out vec2 textureCoord;
+// <prefix><stem>.fov -- a scale on the coordinate the shader works in, about
+// the centre. 1.0 is the identity; larger sees more, so the pattern shrinks.
+uniform float uFov = 1.0;
 void main() {
     imageCoord = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    imageCoord = vec2(0.5) + (imageCoord - vec2(0.5)) * uFov;
     textureCoord = imageCoord;
     gl_Position = vec4(aPos, 0.0, 1.0);
 }
@@ -44,8 +48,12 @@ static const char* BG_VS_330_FLIP = R"(#version 330
 layout(location=0) in vec2 aPos;
 out vec2 imageCoord;
 out vec2 textureCoord;
+// <prefix><stem>.fov -- a scale on the coordinate the shader works in, about
+// the centre. 1.0 is the identity; larger sees more, so the pattern shrinks.
+uniform float uFov = 1.0;
 void main() {
     imageCoord = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    imageCoord = vec2(0.5) + (imageCoord - vec2(0.5)) * uFov;
     textureCoord = imageCoord;
     gl_Position = vec4(aPos.x, -aPos.y, 0.0, 1.0);
 }
@@ -55,8 +63,10 @@ static const char* BG_VS_120_FLIP = R"(#version 120
 attribute vec2 aPos;
 varying vec2 imageCoord;
 varying vec2 textureCoord;
+uniform float uFov = 1.0;
 void main() {
     imageCoord = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    imageCoord = vec2(0.5) + (imageCoord - vec2(0.5)) * uFov;
     textureCoord = imageCoord;
     gl_Position = vec4(aPos.x, -aPos.y, 0.0, 1.0);
 }
@@ -70,8 +80,10 @@ static const char* BG_VS_120 = R"(#version 120
 attribute vec2 aPos;
 varying vec2 imageCoord;
 varying vec2 textureCoord;
+uniform float uFov = 1.0;
 void main() {
     imageCoord = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    imageCoord = vec2(0.5) + (imageCoord - vec2(0.5)) * uFov;
     textureCoord = imageCoord;
     gl_Position = vec4(aPos, 0.0, 1.0);
 }
@@ -146,6 +158,16 @@ void Background::ensureGL() {
     blitLocAlpha_ = glGetUniformLocation(blit_, "uAlpha");
     glUseProgram(blit_);
     glUniform1i(glGetUniformLocation(blit_, "sampler0"), 0);
+    // Explicit, not just the GLSL default: a driver that ignores uniform
+    // initialisers leaves this at 0, and a 0 scale collapses the whole blit
+    // onto the centre texel -- a flat grey frame with no other symptom.
+    glUniform1f(glGetUniformLocation(blit_, "uFov"), 1.0f);
+    blitFlip_ = gl_program(BG_VS_330_FLIP, BG_BLIT_FS, "bgBlitFlip");
+    blitFlipLocAlpha_ = glGetUniformLocation(blitFlip_, "uAlpha");
+    glUseProgram(blitFlip_);
+    glUniform1i(glGetUniformLocation(blitFlip_, "sampler0"), 0);
+    glUniform1f(glGetUniformLocation(blitFlip_, "uFov"), 1.0f);
+    glUniform1f(blitFlipLocAlpha_, 1.0f);
 
     // sampler0 for a pure-shader layer: 1x1 opaque white, matching NotITG's
     // Texture="white" sprite (layout.xml:12).
@@ -291,6 +313,20 @@ bool Background::loadFromSm(const std::string& smPath, const std::string& songDi
 }
 
 // ---------------------------------------------------------------------------
+// The two synthetic knobs, read back. Undriven means fully on at identity
+// scale -- a shader named on the command line with no modchart entry behaves
+// exactly as it did before these existed.
+static float layerAmount(int slot, const float* k, unsigned driven) {
+    if (slot < 0 || !k || !(driven & (1u << slot))) return 1.0f;
+    return k[slot] < 0.0f ? 0.0f : k[slot];
+}
+static float layerFov(int slot, const float* k, unsigned driven) {
+    if (slot < 0 || !k || !(driven & (1u << slot))) return 1.0f;
+    // A zero scale collapses the shader onto one texel, which is never what
+    // anyone means by it.
+    return k[slot] < 0.001f ? 0.001f : k[slot];
+}
+
 // A knob's uniform must be set at its DECLARED type: glUniform1f into an
 // `int` uniform is silently ignored by GL, leaving it at 0 -- which for a
 // shader's `blockSize` is a divide by zero and a black frame.
@@ -356,10 +392,31 @@ bool Background::buildShader(Layer& L) {
     // (dream.frag's bright defaults to 0); the status line says so.
     static const char* BUILTIN[] = {"time", "beat", "bpm", "resolution", "res",
                                     "textureSize", "imageSize", "field",
-                                    "sampler0"};
+                                    "sampler0",
+                                    // ours, not the author's: it backs the
+                                    // <prefix><stem>.fov knob and would
+                                    // otherwise also register as bg.uFov.
+                                    "uFov"};
     GLint nu = 0;
     glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &nu);
     L.samplers.clear();
+    L.locFov = glGetUniformLocation(prog, "uFov");
+
+    // The two synthetic knobs, named after the FILE rather than any uniform:
+    // <prefix><stem> and <prefix><stem>.fov. Loading a shader and switching it
+    // on are separate acts, and this is what a modchart schedules.
+    {
+        const char* pre = L.scenePass ? "fx." : "bg.";
+        size_t a = fragPath.find_last_of("/\\");
+        std::string stem = a == std::string::npos ? fragPath : fragPath.substr(a + 1);
+        const size_t d = stem.find_last_of('.');
+        if (d != std::string::npos) stem = stem.substr(0, d);
+        L.knobName = std::string(pre) + stem;
+        L.slotAmount = modBgSlot(L.knobName);
+        L.slotFov    = modBgSlot(L.knobName + ".fov");
+        if (L.slotAmount >= 0) L.slotAmount -= MOD_BG_BASE;
+        if (L.slotFov    >= 0) L.slotFov    -= MOD_BG_BASE;
+    }
     std::string names;
     for (GLint i = 0; i < nu; ++i) {
         char nm[256]; GLsizei len = 0; GLint sz = 0; GLenum ty = 0;
@@ -389,8 +446,9 @@ bool Background::buildShader(Layer& L) {
         names += pre;
         names += nm;
     }
-    log_.push_back("shader " + fragPath +
-                   (names.empty() ? ": no knobs"
+    log_.push_back("shader " + fragPath + " [" + L.knobName + ", " +
+                   L.knobName + ".fov]" +
+                   (names.empty() ? ": no other knobs"
                                   : ": knobs " + names +
                                     " (undriven knobs keep the shader's own "
                                     "defaults, which may render black)"));
@@ -429,9 +487,26 @@ void Background::drawScene(GLuint sceneTex, int W, int H, double songTime,
                            float beat, float bpm, float fieldX, float fieldY,
                            const float* bgKnobs, unsigned bgDriven) {
     ensureGL();
+    // Seed the target with the frame itself. The caller cleared it, so without
+    // this a pass scheduled to 0 leaves a black screen rather than the
+    // untouched frame -- gating a shader off has to mean "as if it were not
+    // there", not "as if the playfield were not there".
+    glUseProgram(blitFlip_);
+    if (blitFlipLocAlpha_ >= 0) glUniform1f(blitFlipLocAlpha_, 1.0f);
+    glDisable(GL_BLEND);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, sceneTex);
+    glBindVertexArray(vao_);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glEnable(GL_BLEND);
+
     for (Layer& L : layers_) {
         if (!L.scenePass || !L.prog) continue;
+        const float amt = layerAmount(L.slotAmount, bgKnobs, bgDriven);
+        if (amt <= 0.0f) continue;      // loaded, scheduled off: costs nothing
         glUseProgram(L.prog);
+        if (L.locFov >= 0)
+            glUniform1f(L.locFov, layerFov(L.slotFov, bgKnobs, bgDriven));
         if (L.locTime >= 0) glUniform1f(L.locTime, float(songTime));
         if (L.locBeat >= 0) glUniform1f(L.locBeat, beat);
         if (L.locBpm  >= 0) glUniform1f(L.locBpm, bpm);
@@ -449,6 +524,17 @@ void Background::drawScene(GLuint sceneTex, int W, int H, double songTime,
         glDisable(GL_BLEND);
         glBindVertexArray(vao_);
         glDrawArrays(GL_TRIANGLES, 0, 3);
+        // Partial strength mixes the untouched frame back over the result, so
+        // the knob fades the effect in rather than only switching it on.
+        if (amt < 1.0f) {
+            glUseProgram(blitFlip_);
+            if (blitFlipLocAlpha_ >= 0) glUniform1f(blitFlipLocAlpha_, 1.0f - amt);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, sceneTex);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
         glEnable(GL_BLEND);
     }
 }
@@ -623,8 +709,8 @@ GLuint Background::drawChain(GLuint sceneTex, int W, int H, double songTime,
         glDisable(GL_BLEND);
 
         if (P.layer == SIZE_MAX) {
-            glUseProgram(blit_);
-            if (blitLocAlpha_ >= 0) glUniform1f(blitLocAlpha_, 1.0f);
+            glUseProgram(blitFlip_);
+            if (blitFlipLocAlpha_ >= 0) glUniform1f(blitFlipLocAlpha_, 1.0f);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, bufRead(P.copySrc, sceneTex));
         } else {
@@ -782,7 +868,16 @@ void Background::draw(int W, int H, double songTime, float beat, float bpm,
                 }
             }
         } else {
+            // Same gate as a scene pass, but a GATE only: a background layer
+            // composites through its own alpha, and overriding that to fade it
+            // would throw away whatever the shader meant by it. A playfield
+            // pass replaces the frame, so there the knob can genuinely
+            // crossfade. Fading a background is the shader's own job -- it has
+            // a knob per uniform for exactly that.
+            if (layerAmount(L.slotAmount, bgKnobs, bgDriven) <= 0.0f) continue;
             glUseProgram(L.prog);
+            if (L.locFov >= 0)
+                glUniform1f(L.locFov, layerFov(L.slotFov, bgKnobs, bgDriven));
             if (L.locTime >= 0)    glUniform1f(L.locTime, float(songTime));
             if (L.locBeat >= 0)    glUniform1f(L.locBeat, beat);
             if (L.locBpm >= 0)     glUniform1f(L.locBpm, bpm);

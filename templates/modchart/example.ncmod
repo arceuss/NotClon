@@ -74,6 +74,20 @@
 15360    *1        0         fx.wobble
 15360    *1        0         fx.chroma
 
+# --- every shader also gets two knobs of its own ------------------------------
+# Named after the FILE, not after any uniform it declares:
+#
+#   bg.example       how much of shaders/example.frag applies. 0 skips the
+#                    pass entirely, so a loaded shader costs nothing until you
+#                    schedule it. Undriven means fully on.
+#   bg.example.fov   a scale on the coordinate the shader works in. 100 is
+#                    the identity; higher sees more, so the pattern shrinks.
+#
+# Pulling the background's fov in over the drop makes the rings rush outward
+# without the shader knowing anything about it.
+9216     *1        60        bg.example.fov
+15360    *0.5      100       bg.example.fov
+
 # --- and the background settles with everything else --------------------------
 15360    *0.5      0         bg.rings
 15360    *0.5      40        bg.warp

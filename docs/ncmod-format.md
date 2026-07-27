@@ -145,7 +145,20 @@ editor labels them "(stub)".
 
 **Shader knobs.** A background shader's uniforms appear as `bg.<name>` and a
 playfield shader's as `fx.<name>`, so a modchart drives them like any other
-knob. The percent column is still divided by 100 — write `400` for `4.0`. That
+knob. Every uniform the shader declares and NotClon does not recognise becomes
+one automatically — a ported shader with ten tweakables gives you ten knobs
+without any extra work.
+
+On top of those, each shader gets **two knobs named after its file**:
+
+| knob | effect |
+|---|---|
+| `<prefix><stem>` | how much of the shader applies. `0` skips the pass entirely, so a loaded shader costs nothing until you schedule it. **Undriven means fully on**, so a shader named on the command line behaves as it always did. A playfield shader crossfades at intermediate values; a background layer is a straight on/off, because overriding its blend would throw away whatever the shader meant by its own alpha. |
+| `<prefix><stem>.fov` | a scale on the coordinate the shader works in. `100` is the identity; higher sees more, so the pattern shrinks. |
+
+So `shaders/example.frag` loaded as a background gives `bg.example` and
+`bg.example.fov`. This is what lets you *load* a shader without turning it on —
+the editor's shader picker inserts both at tick 0 with the amount at `0`. The percent column is still divided by 100 — write `400` for `4.0`. That
 works for `int` and `bool` uniforms too: `800` sets an `int blockSize` to `8`.
 A `--fxchain`'s passes register their knobs the same way. See
 [actors-and-lua.md](actors-and-lua.md).

@@ -148,6 +148,21 @@ private:
         // Every sampler2D beyond sampler0, so a chain pass can bind buffers to
         // them by name (samplerPrev, samplerBlock, ...).
         std::vector<std::pair<std::string, GLint>> samplers;
+
+        // Two SYNTHETIC knobs every shader layer gets, named after its file
+        // rather than after any uniform it declares: `<prefix><stem>` is how
+        // much of it applies, and `<prefix><stem>.fov` scales the coordinate
+        // it works in. They exist so loading a shader is not the same thing as
+        // switching it on -- a modchart schedules it like any other mod, and
+        // the .ncmod saves and reloads that schedule.
+        //
+        // UNDRIVEN MEANS FULLY ON, matching every other knob: a shader named
+        // on the command line with no modchart entry behaves as it always did.
+        // It is the editor that inserts an explicit 0, so a shader you add
+        // there is loaded but silent until you schedule it.
+        std::string knobName;         // e.g. "fx.playfield"; empty if unnamed
+        int   slotAmount = -1, slotFov = -1;
+        GLint locFov = -1;
     };
 
     // A named chain buffer. TWO textures, always: a pass that reads the buffer
@@ -183,6 +198,11 @@ private:
     std::vector<std::unique_ptr<VideoStream>> videos_;
     float videoScale_ = 0.5f;
     GLuint vao_ = 0, vbo_ = 0, blit_ = 0, white_ = 0;
+    // The same blit through the flipped VS, for anything compositing
+    // INTO a scene/chain target. Using blit_ there re-introduces the
+    // very y-flip those passes exist having cancelled.
+    GLuint blitFlip_ = 0;
+    GLint  blitFlipLocAlpha_ = -1;
     GLint blitLocAlpha_ = -1;
     std::vector<std::string> log_;
 };
