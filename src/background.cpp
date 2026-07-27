@@ -316,8 +316,8 @@ bool Background::loadFromSm(const std::string& smPath, const std::string& songDi
 // The two synthetic knobs, read back. Undriven means fully on at identity
 // scale -- a shader named on the command line with no modchart entry behaves
 // exactly as it did before these existed.
-static float layerAmount(int slot, const float* k, unsigned driven) {
-    if (slot < 0 || !k || !(driven & (1u << slot))) return 1.0f;
+static float layerAmount(int slot, const float* k, unsigned driven, bool fromDoc) {
+    if (slot < 0 || !k || !(driven & (1u << slot))) return fromDoc ? 0.0f : 1.0f;
     return k[slot] < 0.0f ? 0.0f : k[slot];
 }
 static float layerFov(int slot, const float* k, unsigned driven) {
@@ -464,8 +464,9 @@ static FILETIME fileMtime(const std::string& path) {
     return d.ftLastWriteTime;
 }
 
-bool Background::addSceneShader(const std::string& fragPath) {
+bool Background::addSceneShader(const std::string& fragPath, bool fromDoc) {
     Layer L;
+    L.fromDoc = fromDoc;
     L.shader = true;
     L.scenePass = true;
     L.path = fragPath;
@@ -502,7 +503,7 @@ void Background::drawScene(GLuint sceneTex, int W, int H, double songTime,
 
     for (Layer& L : layers_) {
         if (!L.scenePass || !L.prog) continue;
-        const float amt = layerAmount(L.slotAmount, bgKnobs, bgDriven);
+        const float amt = layerAmount(L.slotAmount, bgKnobs, bgDriven, L.fromDoc);
         if (amt <= 0.0f) continue;      // loaded, scheduled off: costs nothing
         glUseProgram(L.prog);
         if (L.locFov >= 0)
@@ -582,7 +583,7 @@ GLuint Background::bufRead(const std::string& src, GLuint sceneTex) {
     return it == bufs_.end() ? white_ : it->second.tex[it->second.cur];
 }
 
-bool Background::loadChain(const std::string& path) {
+bool Background::loadChain(const std::string& path, bool fromDoc) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) { log_.push_back("cannot open chain " + path); return false; }
     std::string txt;
@@ -654,6 +655,7 @@ bool Background::loadChain(const std::string& path) {
             Layer L;
             L.shader = true;
             L.scenePass = true;             // knobs register as fx.<name>
+            L.fromDoc = fromDoc;
             L.path = (tok[0].size() > 1 && (tok[0][0] == '/' || tok[0][1] == ':'))
                    ? tok[0] : base + "/" + tok[0];
             if (!buildShader(L)) { chain_.clear(); return false; }
@@ -756,8 +758,9 @@ GLuint Background::drawChain(GLuint sceneTex, int W, int H, double songTime,
     return it == bufs_.end() ? sceneTex : it->second.tex[it->second.cur];
 }
 
-bool Background::addShader(const std::string& fragPath) {
+bool Background::addShader(const std::string& fragPath, bool fromDoc) {
     Layer L;
+    L.fromDoc = fromDoc;
     L.shader = true;
     L.path = fragPath;
     if (!buildShader(L)) return false;
@@ -874,7 +877,7 @@ void Background::draw(int W, int H, double songTime, float beat, float bpm,
             // pass replaces the frame, so there the knob can genuinely
             // crossfade. Fading a background is the shader's own job -- it has
             // a knob per uniform for exactly that.
-            if (layerAmount(L.slotAmount, bgKnobs, bgDriven) <= 0.0f) continue;
+            if (layerAmount(L.slotAmount, bgKnobs, bgDriven, L.fromDoc) <= 0.0f) continue;
             glUseProgram(L.prog);
             if (L.locFov >= 0)
                 glUniform1f(L.locFov, layerFov(L.slotFov, bgKnobs, bgDriven));

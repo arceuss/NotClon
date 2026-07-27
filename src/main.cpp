@@ -582,12 +582,12 @@ int main(int argc, char** argv) {
           const std::string mdir = sl == std::string::npos ? std::string()
                                                            : modPath.substr(0, sl);
           for (const auto& fp : doc.shaderPaths(doc.bgShaders, mdir))
-              bg.addShader(fp);
+              bg.addShader(fp, true);
           for (const auto& fp : doc.shaderPaths(doc.fxShaders, mdir))
-              bg.addSceneShader(fp);
+              bg.addSceneShader(fp, true);
           if (!doc.fxChain.empty()) {
               const auto c = doc.shaderPaths({doc.fxChain}, mdir);
-              if (!c.empty()) bg.loadChain(c[0]);
+              if (!c.empty()) bg.loadChain(c[0], true);
           } }
         if (!fxChainArg.empty()) bg.loadChain(fxChainArg);
         for (const auto& m : bg.log()) printf("bg: %s%c", m.c_str(), 10);

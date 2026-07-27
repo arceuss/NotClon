@@ -234,12 +234,12 @@ int main(int argc, char** argv) {
         // together and reopening the document restores the whole effect.
         const std::string mdir = modPath.empty() ? dir : dirName(modPath);
         for (const auto& fp : doc.shaderPaths(doc.bgShaders, mdir))
-            bg->addShader(fp);
+            bg->addShader(fp, true);
         for (const auto& fp : doc.shaderPaths(doc.fxShaders, mdir))
-            bg->addSceneShader(fp);
+            bg->addSceneShader(fp, true);
         if (!doc.fxChain.empty()) {
             const auto c = doc.shaderPaths({doc.fxChain}, mdir);
-            if (!c.empty()) bg->loadChain(c[0]);
+            if (!c.empty()) bg->loadChain(c[0], true);
         }
         if (!fxChainArg.empty()) bg->loadChain(fxChainArg);
         if (bg->empty() && !bg->hasChain()) bg.reset();

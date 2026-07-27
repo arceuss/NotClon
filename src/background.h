@@ -39,14 +39,20 @@ public:
     // the order added. Compile failure logs and returns false; nothing is
     // added. Uniforms beyond the built-in set register as bg.<name> knobs a
     // .ncmod can drive.
-    bool addShader(const std::string& fragPath);
+    // fromDoc: the .ncmod named this shader, rather than the command line.
+    // It changes what an UNDRIVEN amount knob means. On the command line the
+    // user asked for the shader directly and there may be no modchart at all,
+    // so undriven is fully on. Named by a document, the modchart is what
+    // decides -- so undriven is OFF, and deleting a shader's entries turns it
+    // off instead of pinning it on with no way to say otherwise.
+    bool addShader(const std::string& fragPath, bool fromDoc = false);
 
     // A PLAYFIELD shader (--fxshader). Same file format and uniform contract
     // as a background layer, but instead of drawing behind everything it runs
     // over the already-rendered frame with sampler0 bound to it -- so it can
     // warp, tint or fold the playfield itself. Its uniforms register as
     // fx.<name> knobs. Runs before the built-in post chain.
-    bool addSceneShader(const std::string& fragPath);
+    bool addSceneShader(const std::string& fragPath, bool fromDoc = false);
     bool hasScenePass() const;
 
     // Run every scene layer over `sceneTex`. The caller has bound the target
@@ -115,7 +121,7 @@ public:
     // a scrub the buffers hold whatever was on screen before, and the picture
     // is wrong until enough frames have accumulated. hasFeedback() reports
     // which, so the editor can say so rather than quietly lying.
-    bool loadChain(const std::string& path);
+    bool loadChain(const std::string& path, bool fromDoc = false);
     bool hasChain() const { return !chain_.empty(); }
     bool hasFeedback() const { return chainFeedback_; }
     // Runs the chain and returns the texture holding the result -- the caller
@@ -162,6 +168,8 @@ private:
         // there is loaded but silent until you schedule it.
         std::string knobName;         // e.g. "fx.playfield"; empty if unnamed
         int   slotAmount = -1, slotFov = -1;
+        bool  fromDoc = false;        // undriven amount means off, not on
+
         GLint locFov = -1;
     };
 

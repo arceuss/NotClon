@@ -28,6 +28,14 @@
 #bgshader shaders/example.frag
 #fxshader shaders/playfield.frag
 
+# --- switch the shaders on ----------------------------------------------------
+# A shader NAMED BY THIS FILE is loaded but silent until the modchart says
+# otherwise -- deleting these two lines turns it off rather than pinning it on.
+# (A shader passed on the command line is on unless you say otherwise; there
+# the user asked for it directly and there may be no modchart at all.)
+0        *-1       100       bg.example
+0        *-1       100       fx.playfield
+
 # --- a gentle opening ---------------------------------------------------------
 0        *0.5      25        drunk
 0        *-1       0         glow

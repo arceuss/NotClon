@@ -153,12 +153,25 @@ On top of those, each shader gets **two knobs named after its file**:
 
 | knob | effect |
 |---|---|
-| `<prefix><stem>` | how much of the shader applies. `0` skips the pass entirely, so a loaded shader costs nothing until you schedule it. **Undriven means fully on**, so a shader named on the command line behaves as it always did. A playfield shader crossfades at intermediate values; a background layer is a straight on/off, because overriding its blend would throw away whatever the shader meant by its own alpha. |
+| `<prefix><stem>` | how much of the shader applies. `0` skips the pass entirely, so a loaded shader costs nothing until you schedule it. A playfield shader crossfades at intermediate values; a background layer is a straight on/off, because overriding its blend would throw away whatever the shader meant by its own alpha. |
 | `<prefix><stem>.fov` | a scale on the coordinate the shader works in. `100` is the identity; higher sees more, so the pattern shrinks. |
 
 So `shaders/example.frag` loaded as a background gives `bg.example` and
 `bg.example.fov`. This is what lets you *load* a shader without turning it on —
 the editor's shader picker inserts both at tick 0 with the amount at `0`.
+
+**What an undriven amount means depends on where the shader came from**, and
+the difference matters:
+
+| loaded by | undriven amount |
+|---|---|
+| `#bgshader`/`#fxshader`/`#fxchain` in the `.ncmod` | **off** |
+| `--bgshader`/`--fxshader`/`--fxchain` on the command line | **on** |
+
+A document-named shader is the modchart's to control, so deleting its entries
+turns it off rather than pinning it on with no line left to say otherwise. A
+command-line shader was asked for directly and may have no modchart at all, so
+it renders unless you say otherwise.
 
 The percent column is still divided by 100 — write `400` for `4.0`. That works
 for `int` and `bool` uniforms too: `800` sets an `int blockSize` to `8`. A
