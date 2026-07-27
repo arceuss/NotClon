@@ -101,6 +101,11 @@ int modBgSlot(const std::string& fullName) {
     return MOD_BG_BASE + int(g_bgNames.size()) - 1;
 }
 
+// How many bg./fx. slots have actually been registered by a loaded shader.
+// The editor needs this to offer them: a knob nothing can select is a knob
+// that does not exist as far as the UI is concerned.
+int modBgCount() { return int(g_bgNames.size()); }
+
 const char* modName(int id) {
     if (id >= MOD_BG_BASE && id < MOD_BG_BASE + int(g_bgNames.size()))
         return g_bgNames[id - MOD_BG_BASE].c_str();

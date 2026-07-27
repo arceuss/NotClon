@@ -118,6 +118,7 @@ static const int MOD_SLOTS       = MOD_COUNT + MAX_BG_UNIFORMS;
 // `1u << (mod - MOD_BG_BASE)` undefined behaviour with no diagnostic.
 static_assert(MAX_BG_UNIFORMS <= 32, "bgUsed_ is a 32-bit mask");
 int modBgSlot(const std::string& fullName);   // "bg.x" -> slot id, -1 if full
+int modBgCount();                            // how many are registered so far
 
 const char* modName(int id);
 int         modFromName(const std::string& name);   // -1 if unknown

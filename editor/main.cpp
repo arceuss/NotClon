@@ -87,6 +87,43 @@ std::string dirName(const std::string& p) {
     return i == std::string::npos ? std::string(".") : p.substr(0, i);
 }
 
+
+// The mod combos list the fixed enum AND every shader knob registered so far.
+// Without the second half a shader's uniforms are unreachable from the UI --
+// they render, and the only way to author one is to duplicate an entry and
+// retype it. Grouped by prefix so a long uniform list stays navigable.
+void modComboItems(int& out, bool& changed) {
+    for (int i = 0; i < nc::MOD_COUNT; ++i) {
+        if (i == nc::MOD_MOVEX)      ImGui::SeparatorText("playfield");
+        if (i == nc::MOD_ABERRATION) ImGui::SeparatorText("post");
+        char lbl[96];
+        snprintf(lbl, sizeof lbl, "%s%s", nc::modName(i),
+                 nc::modIsStub(i) ? " (stub)" : "");
+        if (ImGui::Selectable(lbl, i == out)) { out = i; changed = true; }
+    }
+    const int nbg = nc::modBgCount();
+    if (nbg <= 0) return;
+    // Grouped by prefix, not by shader. `bg.cube` (a shader's amount) and
+    // `bg.size` (a uniform it declares) are structurally identical -- nothing
+    // in the name says which is which -- so grouping per shader would be a
+    // guess. Prefix is derivable and still splits the list in half.
+    for (int pass = 0; pass < 2; ++pass) {
+        const char* pre = pass ? "fx." : "bg.";
+        bool titled = false;
+        for (int i = 0; i < nbg; ++i) {
+            const int id = nc::MOD_BG_BASE + i;
+            const std::string nm = nc::modName(id);
+            if (nm.compare(0, 3, pre) != 0) continue;
+            if (!titled) {
+                ImGui::SeparatorText(pass ? "playfield shaders"
+                                          : "background shaders");
+                titled = true;
+            }
+            if (ImGui::Selectable(nm.c_str(), id == out)) { out = id; changed = true; }
+        }
+    }
+}
+
 // Moonscraper's snap ladder -- these are the divisions a CH charter already
 // thinks in. The value is the denominator of a whole note, so 4 is a quarter
 // note and step = resolution * 4 / N ticks.
@@ -562,14 +599,8 @@ int main(int argc, char** argv) {
 
             ImGui::SetNextItemWidth(150);
             if (ImGui::BeginCombo("mod", nc::modName(formMod))) {
-                for (int i = 0; i < nc::MOD_COUNT; ++i) {
-                    if (i == nc::MOD_MOVEX)      ImGui::SeparatorText("playfield");
-                    if (i == nc::MOD_ABERRATION) ImGui::SeparatorText("post");
-                    char lbl[64];
-                    snprintf(lbl, sizeof lbl, "%s%s", nc::modName(i),
-                             nc::modIsStub(i) ? " (stub)" : "");
-                    if (ImGui::Selectable(lbl, i == formMod)) formMod = i;
-                }
+                bool dummy = false;
+                modComboItems(formMod, dummy);
                 ImGui::EndCombo();
             }
             ImGui::SetNextItemWidth(150);
@@ -628,14 +659,7 @@ int main(int argc, char** argv) {
 
                 ImGui::SetNextItemWidth(150);
                 if (ImGui::BeginCombo("mod##sel", nc::modName(e.mod))) {
-                    for (int i = 0; i < nc::MOD_COUNT; ++i) {
-                        char lbl[64];
-                        snprintf(lbl, sizeof lbl, "%s%s", nc::modName(i),
-                                 nc::modIsStub(i) ? " (stub)" : "");
-                        if (ImGui::Selectable(lbl, i == e.mod)) {
-                            e.mod = i; changed = true;
-                        }
-                    }
+                    modComboItems(e.mod, changed);
                     ImGui::EndCombo();
                 }
                 // Dragging these re-evaluates every frame, so the preview
