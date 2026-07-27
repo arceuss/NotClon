@@ -1408,6 +1408,11 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
                        fieldX, fieldY, bgKnobs, bgDriven);
         sceneTex = fxTex_;
     }
+    // A --fxchain runs after any --fxshader and owns its own buffers, so it
+    // needs no bounce: it returns whichever of them holds the result.
+    if (bg_ && bg_->hasChain())
+        sceneTex = bg_->drawChain(sceneTex, W, H, nowSec, float(beat), bpm,
+                                  fieldX, fieldY, bgKnobs, bgDriven);
 
     // ---- post ------------------------------------------------------------
     glBindFramebuffer(GL_FRAMEBUFFER, postTarget);

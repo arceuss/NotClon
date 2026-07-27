@@ -64,9 +64,46 @@ playfield layer.
 
 Varyings: `imageCoord` and `textureCoord`, both `(0,0)` at the **top-left**.
 
-`#version 120` and `#version 330` both work, so a shader written against older
-GLSL runs unchanged. Note that one layer is one pass with one input: multi-pass
-effects that expect their own intermediate buffers will link but not work.
+`#version 120` and `#version 330` both work, and a file with **no** `#version`
+line is treated as 120 — so a shader written against older GLSL runs unchanged.
+
+A single `--bgshader`/`--fxshader` layer is one pass with one input. For
+anything that needs its own intermediate buffers, use a chain.
+
+## Chains — multi-pass and feedback
+
+`--fxchain` runs a sequence of passes over named buffers:
+
+```
+Blur = blur.frag   sampler0=@frame
+Mix  = mix.frag    sampler0=@frame samplerBlur=Blur
+out  = Mix
+```
+
+`@frame` is the rendered frame; anything else is a buffer name. Each pass
+writes the buffer on its left. Any sampler your shader declares can be bound
+by name, and any other unrecognised uniform — `float`, `int` or `bool` —
+becomes an `fx.<name>` knob your modchart drives.
+
+**Buffers persist between frames.** Reading a buffer written earlier in the
+file gives you this frame; reading one written *later*, or one the pass writes
+itself, gives you the **previous** frame. That is feedback, and it is all you
+need for trails, echoes and datamosh-style block smearing:
+
+```
+Echo = echo.frag  sampler0=@frame samplerPrev=Echo
+out  = Echo
+```
+
+See [chains/echo.ncfx](chains/echo.ncfx) for a working one.
+
+The catch is real and worth knowing before you build on it: a chain with
+feedback is **not** a pure function of the song position, unlike everything
+else in NotClon. An encode renders every frame in order, so it is exact. The
+editor is not — after you scrub, the buffers still hold what was on screen
+before, and the preview is wrong until enough frames have passed. NotClon
+prints `[FEEDBACK]` when it loads a chain that has any, so you always know
+which kind you are looking at.
 
 ## Everything is a function of the song position
 

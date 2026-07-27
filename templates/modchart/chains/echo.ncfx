@@ -1,0 +1,37 @@
+# A shader chain: several passes over named buffers, run over the finished
+# frame.
+#
+#   notclon --dir "charts/My Song" --fxchain templates/modchart/chains/echo.ncfx
+#
+# One pass per line:
+#
+#   <buffer> = <shader.frag>  <sampler>=<source> ...
+#   <buffer> = @copy <source>
+#   out      = <buffer>
+#
+# A <source> is either `@frame` (the rendered frame) or another buffer's name.
+# Shader paths resolve against THIS file's folder. Any uniform the shader
+# declares that NotClon does not recognise becomes an `fx.<name>` knob your
+# modchart drives, ints and bools included.
+#
+# --- feedback ---------------------------------------------------------------
+# Buffers persist between frames. So:
+#
+#   * reading a buffer written EARLIER in the file gives you this frame
+#   * reading one written LATER -- or one the pass writes itself -- gives you
+#     the PREVIOUS frame
+#
+# That second case is feedback, and it is how trails, echoes and datamosh are
+# built. Nothing else is needed to express it; it is just ordering.
+#
+# The catch, and it is a real one: a chain with feedback is no longer a pure
+# function of the song position. An ENCODE renders every frame in order, so it
+# is exact. The EDITOR is not -- after you scrub, the buffers still hold
+# whatever was on screen before, and the picture is wrong until enough frames
+# have gone by. NotClon says "[FEEDBACK]" when it loads a chain that has any,
+# so you know which kind you are looking at.
+
+# This chain is the smallest useful example: blend the frame with the last one
+# it produced, which leaves a motion trail behind everything that moves.
+Echo = echo.frag  sampler0=@frame samplerPrev=Echo
+out  = Echo

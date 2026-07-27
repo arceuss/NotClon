@@ -257,6 +257,15 @@ bool Background::loadFromSm(const std::string& smPath, const std::string& songDi
 }
 
 // ---------------------------------------------------------------------------
+// A knob's uniform must be set at its DECLARED type: glUniform1f into an
+// `int` uniform is silently ignored by GL, leaving it at 0 -- which for a
+// shader's `blockSize` is a divide by zero and a black frame.
+static void setKnob(GLint loc, unsigned type, float v) {
+    if (loc < 0) return;
+    if (type == GL_INT || type == GL_BOOL) glUniform1i(loc, int(v));
+    else                                   glUniform1f(loc, v);
+}
+
 bool Background::buildShader(Layer& L) {
     const std::string& fragPath = L.path;
     FILE* f = fopen(fragPath.c_str(), "rb");
@@ -268,7 +277,11 @@ bool Background::buildShader(Layer& L) {
 
     // Pair the FS with a matching VS by its #version: 120 gets the varying VS,
     // 150+ is treated as 330. Anything else is an error naming what was found.
-    int ver = 0;
+    // No #version line at all means 120 -- that is what NotITG assumes, and
+    // real ported shaders rely on it (datamosh's blockmatch and findbest both
+    // open straight onto a uniform declaration). Erroring here rejected files
+    // that are perfectly valid GLSL 120.
+    int ver = 120;
     { const size_t p = src.find("#version");
       if (p != std::string::npos) ver = atoi(src.c_str() + p + 8); }
     const char* vs = nullptr;
@@ -312,14 +325,23 @@ bool Background::buildShader(Layer& L) {
                                     "sampler0"};
     GLint nu = 0;
     glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &nu);
+    L.samplers.clear();
     std::string names;
     for (GLint i = 0; i < nu; ++i) {
         char nm[256]; GLsizei len = 0; GLint sz = 0; GLenum ty = 0;
         glGetActiveUniform(prog, GLuint(i), sizeof nm, &len, &sz, &ty, nm);
-        if (ty != GL_FLOAT || strchr(nm, '[')) continue;
+        if (strchr(nm, '[')) continue;
         bool builtin = false;
         for (const char* b : BUILTIN) if (!strcmp(nm, b)) { builtin = true; break; }
         if (builtin) continue;
+        // Any OTHER sampler2D is a chain input, bound by name to a buffer.
+        if (ty == GL_SAMPLER_2D) {
+            L.samplers.push_back({nm, glGetUniformLocation(prog, nm)});
+            continue;
+        }
+        // int and bool are as driveable as float -- blockSize is an int, and
+        // setting it with glUniform1f leaves it at 0.
+        if (ty != GL_FLOAT && ty != GL_INT && ty != GL_BOOL) continue;
         const char* pre = L.scenePass ? "fx." : "bg.";
         const int slot = modBgSlot(std::string(pre) + nm);
         if (slot < 0) {
@@ -327,7 +349,8 @@ bool Background::buildShader(Layer& L) {
                            "' cannot be driven");
             continue;
         }
-        L.knobs.push_back({glGetUniformLocation(prog, nm), slot - MOD_BG_BASE});
+        L.knobs.push_back({glGetUniformLocation(prog, nm), slot - MOD_BG_BASE,
+                           unsigned(ty)});
         if (!names.empty()) names += " ";
         names += pre;
         names += nm;
@@ -386,7 +409,7 @@ void Background::drawScene(GLuint sceneTex, int W, int H, double songTime,
         if (L.locSampler >= 0) glUniform1i(L.locSampler, 0);
         for (const Knob& k : L.knobs)
             if (k.loc >= 0 && bgKnobs && (bgDriven & (1u << k.slot)))
-                glUniform1f(k.loc, bgKnobs[k.slot]);
+                setKnob(k.loc, k.type, bgKnobs[k.slot]);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, sceneTex);
         glDisable(GL_BLEND);
@@ -394,6 +417,223 @@ void Background::drawScene(GLuint sceneTex, int W, int H, double songTime,
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glEnable(GL_BLEND);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-pass chains (--fxchain). See the contract on Background::loadChain in
+// background.h -- especially the part about feedback and seeking.
+// ---------------------------------------------------------------------------
+
+Background::Buf& Background::ensureBuf(const std::string& name, int W, int H) {
+    Buf& b = bufs_[name];
+    if (b.tex[0] && b.w == W && b.h == H) return b;
+    for (int i = 0; i < 2; ++i) {
+        if (b.fbo[i]) { glDeleteFramebuffers(1, &b.fbo[i]); b.fbo[i] = 0; }
+        if (b.tex[i]) { glDeleteTextures(1, &b.tex[i]);     b.tex[i] = 0; }
+    }
+    b.w = W; b.h = H; b.cur = 0;
+    for (int i = 0; i < 2; ++i) {
+        glGenTextures(1, &b.tex[i]);
+        glBindTexture(GL_TEXTURE_2D, b.tex[i]);
+        // CLAMP, not repeat: a block-matching pass reads far outside its own
+        // texel, and wrapping would fold the far edge of the frame into the
+        // search. NEAREST because these buffers hold packed data, not
+        // pictures -- interpolating a packed vector is nonsense.
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenFramebuffers(1, &b.fbo[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, b.fbo[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, b.tex[i], 0);
+        // Black, not garbage: this IS the first frame a feedback pass reads.
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    return b;
+}
+
+GLuint Background::bufRead(const std::string& src, GLuint sceneTex) {
+    if (src == "@frame") return sceneTex;
+    auto it = bufs_.find(src);
+    return it == bufs_.end() ? white_ : it->second.tex[it->second.cur];
+}
+
+bool Background::loadChain(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) { log_.push_back("cannot open chain " + path); return false; }
+    std::string txt;
+    { char b[65536]; size_t n;
+      while ((n = fread(b, 1, sizeof b, f)) > 0) txt.append(b, n); }
+    fclose(f);
+
+    // Shader paths resolve against the CHAIN FILE's folder, not the cwd, so a
+    // chain and its .frag files move together as one directory.
+    const size_t sl = path.find_last_of("/\\");
+    const std::string base = sl == std::string::npos ? std::string(".")
+                                                     : path.substr(0, sl);
+    auto trim = [](std::string t) {
+        const size_t a = t.find_first_not_of(" \t\r");
+        if (a == std::string::npos) return std::string();
+        return t.substr(a, t.find_last_not_of(" \t\r") - a + 1);
+    };
+
+    chain_.clear();
+    chainOut_.clear();
+    std::vector<std::string> written;      // buffers written SO FAR, in order
+    size_t lineNo = 0;
+    for (size_t i = 0; i < txt.size();) {
+        size_t e = txt.find('\n', i);
+        if (e == std::string::npos) e = txt.size();
+        std::string line = txt.substr(i, e - i);
+        i = e + 1;
+        ++lineNo;
+        const size_t h = line.find('#');
+        if (h != std::string::npos) line = line.substr(0, h);
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) {
+            if (!trim(line).empty()) {
+                char m[128];
+                snprintf(m, sizeof m, "chain line %u: expected '<name> = ...'",
+                         unsigned(lineNo));
+                log_.push_back(path + ": " + m);
+                chain_.clear();
+                return false;
+            }
+            continue;
+        }
+        const std::string lhs = trim(line.substr(0, eq));
+        const std::string rhs = line.substr(eq + 1);
+        if (lhs.empty()) continue;
+
+        std::vector<std::string> tok;
+        { size_t j = 0;
+          while (j < rhs.size()) {
+              while (j < rhs.size() && isspace((unsigned char)rhs[j])) ++j;
+              std::string t;
+              while (j < rhs.size() && !isspace((unsigned char)rhs[j])) t += rhs[j++];
+              if (!t.empty()) tok.push_back(t);
+          } }
+        if (tok.empty()) continue;
+
+        if (lhs == "out") { chainOut_ = tok[0]; continue; }
+
+        Pass P;
+        P.out = lhs;
+        if (tok[0] == "@copy") {
+            if (tok.size() < 2) {
+                log_.push_back(path + ": @copy needs a source");
+                chain_.clear(); return false;
+            }
+            P.layer = SIZE_MAX;
+            P.copySrc = tok[1];
+        } else {
+            Layer L;
+            L.shader = true;
+            L.scenePass = true;             // knobs register as fx.<name>
+            L.path = (tok[0].size() > 1 && (tok[0][0] == '/' || tok[0][1] == ':'))
+                   ? tok[0] : base + "/" + tok[0];
+            if (!buildShader(L)) { chain_.clear(); return false; }
+            L.mtime = fileMtime(L.path);
+            P.layer = layers_.size();
+            layers_.push_back(std::move(L));
+            for (size_t t = 1; t < tok.size(); ++t) {
+                const size_t a = tok[t].find('=');
+                if (a == std::string::npos) continue;
+                P.binds.push_back({tok[t].substr(0, a), tok[t].substr(a + 1)});
+            }
+        }
+        // A read of a buffer not yet written THIS frame is a FEEDBACK edge --
+        // it sees the previous frame. Detected here so the editor can say so
+        // rather than silently showing a picture the encode will not produce.
+        auto isFeedback = [&](const std::string& src) {
+            if (src == "@frame") return false;
+            for (const std::string& w : written) if (w == src) return false;
+            return true;
+        };
+        if (P.layer == SIZE_MAX) {
+            if (isFeedback(P.copySrc)) chainFeedback_ = true;
+        } else {
+            for (const auto& b : P.binds)
+                if (isFeedback(b.second)) chainFeedback_ = true;
+        }
+
+        written.push_back(P.out);
+        chain_.push_back(std::move(P));
+    }
+
+    if (chain_.empty()) { log_.push_back(path + ": no passes"); return false; }
+    if (chainOut_.empty()) chainOut_ = chain_.back().out;
+    char m[512];
+    snprintf(m, sizeof m, "chain %s: %u passes -> '%s'%s", path.c_str(),
+             unsigned(chain_.size()), chainOut_.c_str(),
+             chainFeedback_ ? "  [FEEDBACK: exact in an encode, approximate in "
+                              "the editor until it settles after a seek]" : "");
+    log_.push_back(m);
+    return true;
+}
+
+GLuint Background::drawChain(GLuint sceneTex, int W, int H, double songTime,
+                             float beat, float bpm, float fieldX, float fieldY,
+                             const float* bgKnobs, unsigned bgDriven) {
+    if (chain_.empty()) return sceneTex;
+    ensureGL();
+    for (const Pass& P : chain_) {
+        Buf& out = ensureBuf(P.out, W, H);
+        const int dst = 1 - out.cur;
+        glBindFramebuffer(GL_FRAMEBUFFER, out.fbo[dst]);
+        glViewport(0, 0, W, H);
+        glDisable(GL_BLEND);
+
+        if (P.layer == SIZE_MAX) {
+            glUseProgram(blit_);
+            if (blitLocAlpha_ >= 0) glUniform1f(blitLocAlpha_, 1.0f);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, bufRead(P.copySrc, sceneTex));
+        } else {
+            Layer& L = layers_[P.layer];
+            if (!L.prog) { glEnable(GL_BLEND); continue; }
+            glUseProgram(L.prog);
+            if (L.locTime >= 0) glUniform1f(L.locTime, float(songTime));
+            if (L.locBeat >= 0) glUniform1f(L.locBeat, beat);
+            if (L.locBpm  >= 0) glUniform1f(L.locBpm, bpm);
+            if (L.locRes  >= 0) glUniform2f(L.locRes, float(W), float(H));
+            if (L.locRes2 >= 0) glUniform2f(L.locRes2, float(W), float(H));
+            if (L.locTexSize >= 0) glUniform2f(L.locTexSize, float(W), float(H));
+            if (L.locImgSize >= 0) glUniform2f(L.locImgSize, float(W), float(H));
+            if (L.locField >= 0) glUniform2f(L.locField, fieldX, fieldY);
+            for (const Knob& k : L.knobs)
+                if (k.loc >= 0 && bgKnobs && (bgDriven & (1u << k.slot)))
+                    setKnob(k.loc, k.type, bgKnobs[k.slot]);
+
+            // Unit 0 is sampler0; every named sampler gets a unit after it.
+            std::string s0 = "@frame";
+            for (const auto& b : P.binds) if (b.first == "sampler0") s0 = b.second;
+            if (L.locSampler >= 0) glUniform1i(L.locSampler, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, bufRead(s0, sceneTex));
+            int unit = 1;
+            for (const auto& sm : L.samplers) {
+                std::string src;
+                for (const auto& b : P.binds) if (b.first == sm.first) src = b.second;
+                if (src.empty()) continue;          // unbound: leave it on 0
+                glUniform1i(sm.second, unit);
+                glActiveTexture(GLenum(GL_TEXTURE0 + unit));
+                glBindTexture(GL_TEXTURE_2D, bufRead(src, sceneTex));
+                ++unit;
+            }
+            glActiveTexture(GL_TEXTURE0);
+        }
+        glBindVertexArray(vao_);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glEnable(GL_BLEND);
+        out.cur = dst;                    // published; later reads see it
+    }
+    auto it = bufs_.find(chainOut_);
+    return it == bufs_.end() ? sceneTex : it->second.tex[it->second.cur];
 }
 
 bool Background::addShader(const std::string& fragPath) {
@@ -519,7 +759,7 @@ void Background::draw(int W, int H, double songTime, float beat, float bpm,
             if (L.locField >= 0)   glUniform2f(L.locField, fieldX, fieldY);
             for (const Knob& k : L.knobs)
                 if (bgKnobs && (bgDriven >> k.slot) & 1u)
-                    glUniform1f(k.loc, bgKnobs[k.slot]);
+                    setKnob(k.loc, k.type, bgKnobs[k.slot]);
             if (first) glBlendFunc(GL_ONE, GL_ZERO);
             else       glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glBindTexture(GL_TEXTURE_2D, white_);

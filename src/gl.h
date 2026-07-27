@@ -29,6 +29,10 @@ typedef ptrdiff_t GLintptr;
 #define GL_FRAMEBUFFER_COMPLETE           0x8CD5
 #define GL_TEXTURE0                       0x84C0
 #define GL_ACTIVE_UNIFORMS                0x8B86
+// Uniform types, for setting a knob at its declared type and for spotting the
+// extra sampler2Ds a shader chain binds buffers to.
+#define GL_BOOL                           0x8B56
+#define GL_SAMPLER_2D                     0x8B5E
 #define GL_CLAMP_TO_EDGE                  0x812F
 #define GL_MULTISAMPLE                    0x809D
 #define GL_MIRRORED_REPEAT                0x8370

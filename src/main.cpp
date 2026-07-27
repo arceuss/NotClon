@@ -55,6 +55,10 @@ static void usage() {
 "                        rendered frame, so it can warp or fold the\n"
 "                        playfield itself rather than draw behind it.\n"
 "                        Uniforms register as fx.<name> knobs. Repeatable.\n"
+"  --fxchain <f.ncfx>    run a MULTI-PASS chain over the frame: named\n"
+"                        buffers, one shader per pass, and buffers that\n"
+"                        persist between frames -- so a pass can read its\n"
+"                        own previous output (feedback).\n"
 "  --nobg                skip the background layer (a .sm beside the chart\n"
 "                        supplies #BGCHANGES stills/movies automatically)\n"
 "  --bgscale <n>         movie decode scale, 0..1 (default 0.5 -- the board\n"
@@ -329,6 +333,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> actorArgs;
     std::vector<std::string> bgShaderArgs;
     std::vector<std::string> fxShaderArgs;
+    std::string fxChainArg;
     double syncMs = 0.0;
     bool noBf = false;
     std::string smPath, exportPath;
@@ -351,6 +356,7 @@ int main(int argc, char** argv) {
         else if (a == "--bgscale") bgScale = atof(next().c_str());
         else if (a == "--bgshader") bgShaderArgs.push_back(next());
         else if (a == "--fxshader") fxShaderArgs.push_back(next());
+        else if (a == "--fxchain")  fxChainArg = next();
         else if (a == "--assets") assetDir = next();
         else if (a == "--sync")   syncMs = atof(next().c_str());
         else if (a == "--nobf")   noBf = true;
@@ -566,8 +572,9 @@ int main(int argc, char** argv) {
         if (!smBeside.empty()) bg.loadFromSm(smBeside, chartDir, float(bgScale));
         for (const auto& fp : bgShaderArgs) bg.addShader(fp);
         for (const auto& fp : fxShaderArgs) bg.addSceneShader(fp);
+        if (!fxChainArg.empty()) bg.loadChain(fxChainArg);
         for (const auto& m : bg.log()) printf("bg: %s%c", m.c_str(), 10);
-        if (!bg.empty()) R.setBackground(&bg);
+        if (!bg.empty() || bg.hasChain()) R.setBackground(&bg);
     }
 
     std::vector<unsigned char> pixels(size_t(W) * H * 3);

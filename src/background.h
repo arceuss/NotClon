@@ -20,6 +20,7 @@
 #include "smbg.h"
 #include "video.h"
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -90,8 +91,44 @@ public:
               float fieldX, float fieldY,
               const float* bgKnobs, unsigned bgDriven);
 
+    // A MULTI-PASS CHAIN (--fxchain). One text file describing a sequence of
+    // passes over named buffers:
+    //
+    //     Block = shaders/blockmatch.frag  sampler0=@frame samplerPrev=Prev
+    //     Prev  = @copy @frame
+    //     Mosh  = shaders/render.frag      sampler0=@frame samplerMosh=Mosh
+    //     out   = Mosh
+    //
+    // `@frame` is the rendered frame; every other source is a buffer name.
+    //
+    // FEEDBACK IS THE POINT and it falls out of one rule: buffers persist
+    // across frames and are double-buffered, so a pass reads whatever was last
+    // completed. Reading a buffer written EARLIER this frame sees this frame;
+    // reading one written later -- or written by the pass itself, as `Mosh`
+    // does -- sees the previous frame. That is what datamosh-class effects
+    // need, and no other mechanism is required to express it.
+    //
+    // THIS BREAKS THE SEEK GUARANTEE, deliberately and only here. Every other
+    // part of NotClon is a pure function of the song position; a chain with a
+    // feedback edge is a function of the frames actually rendered before it.
+    // An ENCODE renders sequentially, so it is exact. The EDITOR is not: after
+    // a scrub the buffers hold whatever was on screen before, and the picture
+    // is wrong until enough frames have accumulated. hasFeedback() reports
+    // which, so the editor can say so rather than quietly lying.
+    bool loadChain(const std::string& path);
+    bool hasChain() const { return !chain_.empty(); }
+    bool hasFeedback() const { return chainFeedback_; }
+    // Runs the chain and returns the texture holding the result -- the caller
+    // blits it. Returns sceneTex unchanged if the chain is empty.
+    GLuint drawChain(GLuint sceneTex, int W, int H, double songTime, float beat,
+                     float bpm, float fieldX, float fieldY,
+                     const float* bgKnobs, unsigned bgDriven);
+
 private:
-    struct Knob { GLint loc; int slot; };   // shader uniform -> bg knob slot
+    // A knob's GL type: a shader wanting `uniform int blockSize` must be set
+    // with glUniform1i, and setting it with glUniform1f is a silent no-op that
+    // leaves it at 0 -- which for a block size means a divide by zero.
+    struct Knob { GLint loc; int slot; unsigned type; };
     struct Layer {
         bool shader = false;
         bool scenePass = false;       // --fxshader: runs OVER the frame
@@ -108,7 +145,34 @@ private:
               locRes2 = -1, locTexSize = -1, locImgSize = -1, locField = -1,
               locSampler = -1;
         std::vector<Knob> knobs;
+        // Every sampler2D beyond sampler0, so a chain pass can bind buffers to
+        // them by name (samplerPrev, samplerBlock, ...).
+        std::vector<std::pair<std::string, GLint>> samplers;
     };
+
+    // A named chain buffer. TWO textures, always: a pass that reads the buffer
+    // it writes is a GL feedback loop and undefined otherwise. Reads take
+    // tex[cur], writes go to tex[1-cur], and cur flips once the pass is done.
+    struct Buf {
+        GLuint fbo[2] = {0, 0};
+        GLuint tex[2] = {0, 0};
+        int cur = 0, w = 0, h = 0;
+    };
+    struct Pass {
+        size_t layer = 0;            // index into layers_; SIZE_MAX = @copy
+        std::string out;             // buffer this pass writes
+        std::string copySrc;         // for @copy
+        std::vector<std::pair<std::string, std::string>> binds;  // uniform=src
+    };
+    // Allocate or resize; contents are cleared to black on (re)allocation,
+    // which is also the first-frame state a feedback pass reads.
+    Buf& ensureBuf(const std::string& name, int W, int H);
+    GLuint bufRead(const std::string& src, GLuint sceneTex);
+
+    std::map<std::string, Buf> bufs_;
+    std::vector<Pass> chain_;
+    std::string chainOut_;
+    bool chainFeedback_ = false;
 
     void ensureGL();                  // fullscreen VAO + blit program + white 1x1
     // Compile L.path into L, replacing prog/locs/knobs only on success.

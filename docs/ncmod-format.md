@@ -134,7 +134,9 @@ editor labels them "(stub)".
 
 **Shader knobs.** A background shader's uniforms appear as `bg.<name>` and a
 playfield shader's as `fx.<name>`, so a modchart drives them like any other
-knob. The percent column is still divided by 100 — write `400` for `4.0`. See
+knob. The percent column is still divided by 100 — write `400` for `4.0`. That
+works for `int` and `bool` uniforms too: `800` sets an `int blockSize` to `8`.
+A `--fxchain`'s passes register their knobs the same way. See
 [actors-and-lua.md](actors-and-lua.md).
 
 `piu` exists too. Try it and see.
