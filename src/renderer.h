@@ -133,6 +133,21 @@ inline std::string nc_exeDir() {
     return sl == std::string::npos ? std::string(".") : p.substr(0, sl);
 }
 
+// The ffmpeg to run. A bundled ffmpeg.exe beside the executable wins over
+// whatever is on PATH, which is the whole point of shipping one: a release
+// should work on a machine that has never heard of ffmpeg, and it should keep
+// working when the user later installs a different version. Falls back to the
+// bare name so a source build with ffmpeg on PATH behaves as it always did.
+//
+// Quoted, because the exe path routinely contains spaces and every caller
+// pastes this straight into a _popen command line.
+inline std::string nc_ffmpeg() {
+    const std::string local = nc_exeDir() + "/ffmpeg.exe";
+    FILE* f = fopen(local.c_str(), "rb");
+    if (f) { fclose(f); return "\"" + local + "\""; }
+    return "ffmpeg";
+}
+
 // Asset dir resolution: an explicit --assets wins; otherwise <exe>/assets/,
 // then ./assets/ relative to the working directory. Probed by a texture every
 // build must have, so a wrong guess fails here with a clear message instead of

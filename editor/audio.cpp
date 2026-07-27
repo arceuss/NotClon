@@ -1,5 +1,8 @@
 #include "audio.h"
 
+// nc_ffmpeg(): a bundled ffmpeg.exe beside the editor wins over PATH.
+#include "renderer.h"
+
 #include <cstdio>
 
 namespace nce {
@@ -20,7 +23,7 @@ bool Audio::loadMix(const std::vector<std::string>& paths) {
     // One ffmpeg invocation, amix over all stems. normalize=0 keeps unity
     // gain -- CH plays stems at full volume on top of each other, and amix's
     // default 1/n scaling would make a two-stem song half as loud.
-    std::string cmd = "ffmpeg -hide_banner -loglevel error";
+    std::string cmd = nc::nc_ffmpeg() + " -hide_banner -loglevel error";
     for (const auto& p : paths) cmd += " -i \"" + p + "\"";
     char tail[256];
     snprintf(tail, sizeof tail,
@@ -53,9 +56,9 @@ bool Audio::load(const std::string& path) {
 
     char cmd[1024];
     snprintf(cmd, sizeof cmd,
-             "ffmpeg -hide_banner -loglevel error -i \"%s\" "
+             "%s -hide_banner -loglevel error -i \"%s\" "
              "-f s16le -acodec pcm_s16le -ac %d -ar %d -",
-             path.c_str(), CH, RATE);
+             nc::nc_ffmpeg().c_str(), path.c_str(), CH, RATE);
     FILE* p = _popen(cmd, "rb");
     if (!p) return false;
 

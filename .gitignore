@@ -1,5 +1,6 @@
 # build output (a complete movable install: exes + SDL3.dll + assets copy)
-build/
+build*/
+dist/
 
 # render/debug droppings
 preview.png

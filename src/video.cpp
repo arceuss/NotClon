@@ -1,5 +1,8 @@
 #include "video.h"
 
+// nc_ffmpeg(): a bundled ffmpeg.exe beside the exe wins over PATH.
+#include "renderer.h"
+
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -89,9 +92,9 @@ bool VideoStream::reopenAt(int index) {
     // cannot be decoded at all still fails loudly -- the short read is handled
     // and ffprobe already validated the file at open().
     snprintf(cmd, sizeof cmd,
-             "ffmpeg -hide_banner -loglevel fatal -ss %.6f -i \"%s\" "
+             "%s -hide_banner -loglevel fatal -ss %.6f -i \"%s\" "
              "%s-f rawvideo -pix_fmt rgb24 -",
-             double(index) / fps_, path_.c_str(), sc);
+             nc_ffmpeg().c_str(), double(index) / fps_, path_.c_str(), sc);
     pipe_ = _popen(cmd, "rb");
     if (!pipe_) return false;
     // The pipe, not the codec, is the historic bottleneck (AGENTS.md,

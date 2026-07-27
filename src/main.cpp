@@ -648,22 +648,23 @@ int main(int argc, char** argv) {
         char cmd[2048];
         if (bench)
             snprintf(cmd, sizeof cmd,
-                     "ffmpeg -y -hide_banner -loglevel error "
+                     "%s -y -hide_banner -loglevel error "
                      "-f rawvideo -pix_fmt rgb24 -s %dx%d -r %d -i - %s -f null -",
-                     W, H, fps, vcodec.c_str());
+                     nc::nc_ffmpeg().c_str(), W, H, fps, vcodec.c_str());
         else if (stems.empty())
             snprintf(cmd, sizeof cmd,
-                     "ffmpeg -y -hide_banner -loglevel warning "
+                     "%s -y -hide_banner -loglevel warning "
                      "-f rawvideo -pix_fmt rgb24 -s %dx%d -r %d -i - %s \"%s\"",
-                     W, H, fps, vcodec.c_str(), out.c_str());
+                     nc::nc_ffmpeg().c_str(), W, H, fps, vcodec.c_str(), out.c_str());
         else {
             // Video is input 0; each stem is its own -ss'd input, mixed at
             // unity gain the way CH layers them (amix normalize=0).
             std::string c;
             char head[256];
             snprintf(head, sizeof head,
-                     "ffmpeg -y -hide_banner -loglevel warning "
-                     "-f rawvideo -pix_fmt rgb24 -s %dx%d -r %d -i - ", W, H, fps);
+                     "%s -y -hide_banner -loglevel warning "
+                     "-f rawvideo -pix_fmt rgb24 -s %dx%d -r %d -i - ",
+                     nc::nc_ffmpeg().c_str(), W, H, fps);
             c = head;
             for (const auto& sp : stems) {
                 char in[600];
@@ -711,8 +712,10 @@ int main(int argc, char** argv) {
         auto tRead = Clk::now();
 
         if (previewOnly) {
-            FILE* p = _popen("ffmpeg -y -hide_banner -loglevel error -f image2pipe "
-                             "-vcodec ppm -i - preview.png", "wb");
+            const std::string pcmd = nc::nc_ffmpeg() +
+                " -y -hide_banner -loglevel error -f image2pipe"
+                " -vcodec ppm -i - preview.png";
+            FILE* p = _popen(pcmd.c_str(), "wb");
             fprintf(p, "P6\n%d %d\n255\n", W, H);
             for (int y = H - 1; y >= 0; --y)
                 fwrite(&pixels[size_t(y) * W * 3], 1, size_t(W) * 3, p);

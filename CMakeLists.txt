@@ -9,6 +9,31 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ---------------------------------------------------------------------------
+# NOTCLON_STATIC_RUNTIME -- link the C/C++ runtime in rather than depend on it.
+# Without this the editor needs MSVCP140.dll, present only if the user happens
+# to have a Visual C++ redistributable installed; a release is expected to run
+# on a machine that has never had a compiler on it.
+#
+# Set GLOBALLY, before any target exists, and that is not a style choice: the
+# static and dynamic CRTs disagree about whether every libc symbol is
+# dllimport, so a build where some objects got the flag and some did not fails
+# to link with a page of "undefined symbol: __declspec(dllimport) fopen".
+#
+# SDL3 is NOT covered: upstream ships a DLL and an import library with no
+# static lib, so SDL3.dll travels in the bundle. That is SDL's normal
+# distribution shape, and it is zlib-licensed, so shipping it is fine.
+# ---------------------------------------------------------------------------
+option(NOTCLON_STATIC_RUNTIME "Link the C/C++ runtime statically" OFF)
+if(NOTCLON_STATIC_RUNTIME)
+  # CMAKE_MSVC_RUNTIME_LIBRARY, not a raw -fms-runtime-lib flag: CMake emits
+  # its own `-D_DLL -Xclang --dependent-lib=msvcrt` AFTER whatever you put in
+  # CMAKE_CXX_FLAGS, so the raw flag is silently overridden and the build fails
+  # at link with "undefined symbol: __declspec(dllimport) fopen". This variable
+  # is the knob CMake actually honours, for clang-on-MSVC as well as MSVC.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+endif()
+
+# ---------------------------------------------------------------------------
 # Lua 5.1.5, vendored from the upstream tarball at lua.org (MIT).
 #
 #   https://www.lua.org/ftp/lua-5.1.5.tar.gz
@@ -101,10 +126,11 @@ add_custom_command(TARGET notclon-editor POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${SDL3_ROOT}/lib/x64/SDL3.dll $<TARGET_FILE_DIR:notclon-editor>)
 
-foreach(t notclon_core notclon notclon-editor imgui)
+foreach(t notclon_core notclon notclon-editor imgui notclon_lua)
   if(MSVC)
     target_compile_options(${t} PRIVATE /O2)
   else()
     target_compile_options(${t} PRIVATE -O2 -Wno-deprecated-declarations)
   endif()
 endforeach()
+
