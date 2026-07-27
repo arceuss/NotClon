@@ -41,6 +41,7 @@ notclon --dir templates/modchart --fxchain chains/echo.ncfx
 
 ```
 #chart templates/modchart
+#bgshader shaders/example.frag
 #fxshader shaders/playfield.frag
 ```
 
@@ -72,11 +73,12 @@ chromatic separation. Its uniforms become `fx.wobble`, `fx.chroma` and
 **`shaders/example.frag`** — a background shader. Beat-synced rings, a swirl,
 and a gutter that dims the area around the playfield so notes stay readable.
 Its `rings`, `warp` and `bright` uniforms become `bg.rings`, `bg.warp` and
-`bg.bright` knobs — uncomment the last block of `example.ncmod` to drive them.
+`bg.bright` knobs, which `example.ncmod` drives from the first tick.
 
-Note that `bright` starts at 0. An undriven knob keeps the shader's own
-default, so a shader whose brightness defaults to zero renders black until your
-modchart turns it up. NotClon warns about undriven knobs when it loads one.
+That it drives `bright` from tick 0 is the point: `bright` defaults to 0, and
+an undriven knob keeps the shader's own default — so a background nobody drives
+renders black. NotClon lists a shader's knobs when it loads one, and says which
+are undriven.
 
 ## Shader uniforms
 
