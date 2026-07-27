@@ -139,13 +139,29 @@ inline std::string nc_exeDir() {
 // working when the user later installs a different version. Falls back to the
 // bare name so a source build with ffmpeg on PATH behaves as it always did.
 //
-// Quoted, because the exe path routinely contains spaces and every caller
-// pastes this straight into a _popen command line.
+// Returned as an 8.3 SHORT PATH, unquoted, and that is not a micro-optimisation.
+// _popen runs the string through `cmd /c`, and cmd has a rule that when the
+// line begins with a quote AND contains another quote later, it strips the
+// wrong pair -- so a quoted ffmpeg path followed by a quoted output file
+// silently fails to launch. The encode then reports success having written
+// nothing, because the failure is invisible from this side. A short path has
+// no spaces, so it needs no quotes and the rule never triggers.
+//
+// If 8.3 generation is disabled on the volume, GetShortPathName hands back the
+// long path; quote it then and accept the risk, which is strictly better than
+// an unquoted path with spaces.
 inline std::string nc_ffmpeg() {
     const std::string local = nc_exeDir() + "/ffmpeg.exe";
     FILE* f = fopen(local.c_str(), "rb");
-    if (f) { fclose(f); return "\"" + local + "\""; }
-    return "ffmpeg";
+    if (!f) return "ffmpeg";
+    fclose(f);
+    char shortBuf[MAX_PATH];
+    const DWORD n = GetShortPathNameA(local.c_str(), shortBuf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        const std::string sp(shortBuf, n);
+        if (sp.find(' ') == std::string::npos) return sp;
+    }
+    return "\"" + local + "\"";
 }
 
 // Asset dir resolution: an explicit --assets wins; otherwise <exe>/assets/,

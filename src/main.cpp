@@ -733,7 +733,11 @@ int main(int argc, char** argv) {
     }
 
     if (enc) {
-        _pclose(enc);
+        // ffmpeg's exit status, not a guess. Reporting "wrote out.mp4" when
+        // ffmpeg never launched or died mid-encode is the worst failure this
+        // program can have -- it is indistinguishable from success until
+        // someone goes looking for the file. _pclose returns ffmpeg's code.
+        const int encRc = _pclose(enc);
         double tot = msDraw + msRead + msWrite;
         if (frameCount > 0 && tot > 0) {
             printf("%c[%s] %d frames @ %dx%d%c", 10, enc_name.c_str(), frameCount, W, H, 10);
@@ -745,7 +749,31 @@ int main(int argc, char** argv) {
             printf("  pipe     %8.1f ms  %5.2f ms/f  %4.1f%%%c", msWrite, msWrite/frameCount, 100*msWrite/tot, 10);
             printf("  TOTAL    %8.1f ms  ->  %.1f fps%c", tot, 1000.0*frameCount/tot, 10);
         }
-        if (!bench) printf("wrote %s%c", out.c_str(), 10);
+        if (encRc != 0) {
+            fprintf(stderr, "%cffmpeg exited %d -- NOTHING WAS WRITTEN.%c",
+                    10, encRc, 10);
+            fprintf(stderr, "  ran: %s%c", nc::nc_ffmpeg().c_str(), 10);
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(rc);
+            ReleaseDC(hwnd, dc);
+            return 1;
+        }
+        if (!bench) {
+            // Also confirm the file is actually there and non-empty: ffmpeg can
+            // exit 0 having written a zero-byte file if the muxer got nothing.
+            FILE* chk = fopen(out.c_str(), "rb");
+            long sz = 0;
+            if (chk) { fseek(chk, 0, SEEK_END); sz = ftell(chk); fclose(chk); }
+            if (sz <= 0) {
+                fprintf(stderr, "ffmpeg reported success but %s is missing or "
+                                "empty%c", out.c_str(), 10);
+                wglMakeCurrent(nullptr, nullptr);
+                wglDeleteContext(rc);
+                ReleaseDC(hwnd, dc);
+                return 1;
+            }
+            printf("wrote %s (%.1f MB)%c", out.c_str(), sz / 1048576.0, 10);
+        }
     }
     wglMakeCurrent(nullptr, nullptr);
     wglDeleteContext(rc);

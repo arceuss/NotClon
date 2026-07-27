@@ -19,3 +19,7 @@ AGENTS.md
 devdocs/
 # Session tooling, not the project.
 .claude/
+
+# Release artefacts.
+dist/
+build-rel/
