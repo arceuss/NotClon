@@ -1,0 +1,5 @@
+# No end-of-line conversion for anything. This project pins md5 hashes of
+# rendered output and carries binary-ish text (chart files, .ncmod) whose bytes
+# must survive a clone exactly; autocrlf silently rewriting files is how a
+# fresh checkout stops reproducing the baselines.
+* -text

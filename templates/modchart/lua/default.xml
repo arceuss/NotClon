@@ -1,0 +1,69 @@
+<!--
+  A NotClon actor tree.
+
+  Drop this folder next to your notes.chart and load it with:
+
+      notclon --dir "charts/My Song" --actor lua
+
+  or, if your song came from a .sm, let its #FGCHANGES load it automatically.
+
+  An actor is a sprite or a coloured quad. Attributes ending in "Command" are
+  command chains: `verb,arg,arg;verb,arg`, run left to right. A tween verb
+  (linear, decelerate, ...) applies to every command that FOLLOWS it until a
+  `sleep` resets things, which is how you build an animation out of one line.
+
+  Coordinates are StepMania's virtual 640x480 screen, (0,0) at the top-left.
+  SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_CENTER_X and SCREEN_CENTER_Y all work,
+  and you can add or subtract a number from them (SCREEN_CENTER_X-160).
+-->
+<ActorFrame> <children>
+
+  <!-- A plain quad. No File= means an untextured rectangle you tint yourself.
+       InitCommand runs immediately; OnCommand runs when everything is ready. -->
+  <Layer
+    Type="Quad"
+    InitCommand="x,SCREEN_CENTER_X;y,60;zoomto,240,6;diffuse,1,1,1,0"
+    OnCommand="sleep,1;linear,0.4;diffusealpha,1;sleep,2;linear,0.8;diffusealpha,0"
+  />
+
+  <!-- A sprite. Put the image in this folder and name it here; extensionless
+       names are resolved against the usual image types.
+
+       This one slides in, waits, then fades out — and `bounce` keeps it moving
+       the whole time. effectclock,bgm ties the effect to the SONG rather than
+       to wall-clock time, which is what you almost always want.
+  <Layer
+    File="mygraphic.png"
+    OnCommand="x,-100;y,SCREEN_CENTER_Y;decelerate,0.8;x,SCREEN_CENTER_X;
+               bounce;effectmagnitude,0,-12,0;effectclock,bgm;effectperiod,1;
+               sleep,8;linear,0.5;diffusealpha,0"
+  />
+  -->
+
+  <!-- Messages let one actor trigger others. Anything that broadcasts "Flash"
+       runs every FlashMessageCommand in the tree. -->
+  <Layer
+    Type="Quad"
+    InitCommand="x,SCREEN_CENTER_X;y,SCREEN_CENTER_Y;zoomto,SCREEN_WIDTH,SCREEN_HEIGHT;diffuse,1,1,1,0"
+    FlashMessageCommand="finishtweening;diffusealpha,0.6;linear,0.35;diffusealpha,0"
+  />
+
+  <!-- Lua. `%function(self) ... end` on any Command attribute is a Lua chunk.
+
+       NOTE: NotClon embeds Lua 5.1 — no goto, no //, no bitwise operators.
+       See docs/actors-and-lua.md for the full list and for what the API
+       exposes. Per-frame Update loops are not stepped yet, so drive timed
+       things with command chains (above) or from the .ncmod modchart. -->
+  <Layer
+    Type="Quad"
+    InitCommand="hidden,1"
+    OnCommand="%function(self)
+        -- Runs once, when the tree activates.
+        local dir = GAMESTATE:GetCurrentSong():GetSongDir()
+        local b   = GAMESTATE:GetSongBeat()
+        -- Fire the FlashMessageCommand above.
+        MESSAGEMAN:Broadcast('Flash')
+    end"
+  />
+
+</children> </ActorFrame>

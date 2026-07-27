@@ -1,0 +1,62 @@
+# A NotClon modchart, as a starting point.
+#
+#   notclon --dir "charts/My Song" --mods templates/modchart/example.ncmod
+#
+# Columns:  tick   *approach   percent   mod   [len=<ticks>]
+#
+#   tick       beat x Resolution. Resolution is in the chart's [Song] block,
+#              almost always 192 -- so beat 16 = tick 3072.
+#   *approach  how fast it moves to the target, full swings per second.
+#              *-1 snaps instantly, which is the usual choice.
+#   percent    100 = full strength. Negative usually mirrors the effect.
+#   len=       optional: the value reverts on its own after this many ticks.
+#
+# See docs/ncmod-format.md for every knob.
+
+# --- a gentle opening ---------------------------------------------------------
+0        *0.5      25        drunk
+0        *-1       0         glow
+
+# --- 16 bars in, lean into it -------------------------------------------------
+3072     *1        60        drunk
+3072     *0.7      40        tornado
+3072     *2        30        glow
+
+# --- a stab: one beat of tilt that undoes itself ------------------------------
+# This is what len= is for. No second line is needed to put tilt back.
+6144     *-1       70        tilt      len=192
+
+# --- the drop -----------------------------------------------------------------
+9216     *-1       100       beat
+9216     *4        80        bumpy
+9216     *-1       40        bumpyspeed
+9216     *-1       15        aberration
+
+# --- a bar of stealth, then back ----------------------------------------------
+# 50% stealth turns the notes into white silhouettes rather than hiding them.
+12288    *-1       50        stealth   len=768
+
+# --- land it clean ------------------------------------------------------------
+15360    *0.6      0         drunk
+15360    *0.6      0         tornado
+15360    *0.6      0         beat
+15360    *0.6      0         bumpy
+15360    *1        0         aberration
+15360    *1        0         glow
+
+# --- driving a background shader ----------------------------------------------
+# Uniforms in a --bgshader .frag become knobs named bg.<uniform>. The percent
+# column is still divided by 100, so 400 means 4.0.
+#
+# 0      *-1       400       bg.rings
+# 0      *-1       100       bg.warp
+# 0      *2        100       bg.bright
+
+# --- driving a playfield shader ----------------------------------------------
+# --fxshader uniforms become fx.<name>. This one ripples and splits the
+# playfield through the drop, then settles.
+#
+# 9216   *2        900       fx.wobble
+# 9216   *2        600       fx.chroma
+# 15360  *1        0         fx.wobble
+# 15360  *1        0         fx.chroma

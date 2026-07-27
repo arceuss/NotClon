@@ -1,0 +1,20 @@
+# build output (a complete movable install: exes + SDL3.dll + assets copy)
+build/
+
+# render/debug droppings
+preview.png
+vidframe.png
+*.mp4
+imgui.ini
+
+# song folders are user content (audio is not ours to distribute).
+# REM III is kept: it is this project's own chart and the regression baselines
+# render it -- the pinned hashes in AGENTS.md are meaningless without it.
+charts/*
+!charts/REM III/
+
+#im gatekeeping
+AGENTS.md
+devdocs/
+# Session tooling, not the project.
+.claude/
