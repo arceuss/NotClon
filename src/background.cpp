@@ -28,6 +28,40 @@ void main() {
 }
 )";
 
+// A pass that RESAMPLES THE FRAME needs the opposite winding in y. colorTex_
+// is an FBO attachment, so its v=0 is the bottom row, while imageCoord above
+// is y-down -- `texture(sampler0, imageCoord)` therefore reads the bottom of
+// the source while writing the top of the target, and the whole picture comes
+// out upside down. Flipping the destination makes the two cancel, so a scene
+// or chain shader can write the identity and get the identity.
+//
+// Only these passes need it. A background layer generates its content rather
+// than resampling the frame, so its orientation is a free choice and the
+// media path (video rows arrive top-down) depends on the y-down one; and a
+// shader driving off gl_FragCoord instead of imageCoord is unaffected either
+// way, which is why ported shaders like datamosh were never bitten by this.
+static const char* BG_VS_330_FLIP = R"(#version 330
+layout(location=0) in vec2 aPos;
+out vec2 imageCoord;
+out vec2 textureCoord;
+void main() {
+    imageCoord = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    textureCoord = imageCoord;
+    gl_Position = vec4(aPos.x, -aPos.y, 0.0, 1.0);
+}
+)";
+
+static const char* BG_VS_120_FLIP = R"(#version 120
+attribute vec2 aPos;
+varying vec2 imageCoord;
+varying vec2 textureCoord;
+void main() {
+    imageCoord = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+    textureCoord = imageCoord;
+    gl_Position = vec4(aPos.x, -aPos.y, 0.0, 1.0);
+}
+)";
+
 // A #version 120 FS declaring `varying vec2 imageCoord` cannot link against a
 // 330 VS declaring `out`, so the loader pairs by version. 120 links because
 // both binaries hold compatibility-profile contexts (editor/main.cpp:99,
@@ -285,8 +319,8 @@ bool Background::buildShader(Layer& L) {
     { const size_t p = src.find("#version");
       if (p != std::string::npos) ver = atoi(src.c_str() + p + 8); }
     const char* vs = nullptr;
-    if (ver == 120) vs = BG_VS_120;
-    else if (ver >= 150) vs = BG_VS_330;
+    if (ver == 120) vs = L.scenePass ? BG_VS_120_FLIP : BG_VS_120;
+    else if (ver >= 150) vs = L.scenePass ? BG_VS_330_FLIP : BG_VS_330;
     else {
         char m[128];
         snprintf(m, sizeof m, "unsupported '#version %d' (want 120 or 150+)", ver);

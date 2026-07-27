@@ -1404,15 +1404,20 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
         glBindFramebuffer(GL_FRAMEBUFFER, fxFbo_);
         glViewport(0, 0, W, H);
         glClear(GL_COLOR_BUFFER_BIT);
+        // 1 - fieldY: a scene pass renders through the flipped VS (see
+        // background.cpp), so its imageCoord runs the other way in y. Handing
+        // it the background layers' fieldY would put the strike line at its
+        // mirror image, and every effect that centres on the field -- pinch,
+        // corridor masks -- would key off the wrong end of the screen.
         bg_->drawScene(colorTex_, W, H, nowSec, float(beat), bpm,
-                       fieldX, fieldY, bgKnobs, bgDriven);
+                       fieldX, 1.0f - fieldY, bgKnobs, bgDriven);
         sceneTex = fxTex_;
     }
     // A --fxchain runs after any --fxshader and owns its own buffers, so it
     // needs no bounce: it returns whichever of them holds the result.
     if (bg_ && bg_->hasChain())
         sceneTex = bg_->drawChain(sceneTex, W, H, nowSec, float(beat), bpm,
-                                  fieldX, fieldY, bgKnobs, bgDriven);
+                                  fieldX, 1.0f - fieldY, bgKnobs, bgDriven);
 
     // ---- post ------------------------------------------------------------
     glBindFramebuffer(GL_FRAMEBUFFER, postTarget);

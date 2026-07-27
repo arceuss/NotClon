@@ -94,7 +94,14 @@ playfield layer.
 | `field` | vec2 | the strike line's position, in `imageCoord` |
 | `sampler0` | sampler2D | the layer's texture (white if none) |
 
-Varyings: `imageCoord` and `textureCoord`, both `(0,0)` at the **top-left**.
+Varyings: `imageCoord` and `textureCoord`.
+
+For a **background** layer, `(0,0)` is the top-left. For a **playfield**
+(`--fxshader`) or **chain** pass, `(0,0)` is the bottom-left, because those
+resample the rendered frame and the frame's own first row is its bottom one --
+`texture(sampler0, imageCoord)` is the identity, which is what a resampling
+shader needs. `field` is handed to each pass in whichever of the two it uses,
+so it always points at the strike line.
 
 `#version 120` and `#version 330` both work, and a file with **no** `#version`
 line is treated as 120 — so a shader written against older GLSL runs unchanged.

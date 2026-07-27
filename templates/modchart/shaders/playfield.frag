@@ -11,7 +11,9 @@
 
 #version 330
 
-in vec2 imageCoord;      // (0,0) top-left of the frame
+in vec2 imageCoord;      // (0,0) BOTTOM-left here -- see README; a playfield
+                         // pass indexes the frame directly, so this is the
+                         // identity coordinate for sampler0
 out vec4 fragColor;
 
 uniform sampler2D sampler0;   // the rendered frame
