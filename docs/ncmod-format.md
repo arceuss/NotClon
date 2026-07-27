@@ -19,9 +19,20 @@ A modchart is a plain text file. One line per change:
 | **mod** | which knob (see below). |
 | **len=** | optional. How long this line stays in force, in ticks. |
 
-Lines starting with `#` are comments. A `#chart <path>` line records which song
-the modchart belongs to — the editor writes it automatically, so opening a
-`.ncmod` reopens its chart too.
+Lines starting with `#` are comments. A few of them mean something:
+
+| line | effect |
+|---|---|
+| `#chart <path>` | which song the modchart belongs to. The editor writes it automatically, so opening a `.ncmod` reopens its chart too. |
+| `#bgshader <path>` | load a background shader, registering its uniforms as `bg.<name>` knobs. Repeatable. |
+| `#fxshader <path>` | load a playfield shader, registering `fx.<name>` knobs. Repeatable. |
+| `#fxchain <path>` | load a multi-pass shader chain. |
+
+Shader paths resolve against the **`.ncmod`'s own folder**, so a modchart and
+its `shaders/` folder move together. Carrying the pointer is what makes the
+document stand on its own: a `fx.wobble` line is meaningless unless the shader
+declaring `wobble` is loaded, so without it, reopening the file leaves the knob
+driving nothing. Every one of these is a plain comment to any other reader.
 
 ## `len=` — timed effects that undo themselves
 

@@ -81,6 +81,11 @@ int main(int argc, char** argv) {
     // trusting if the background it draws is the one the encoder would.
     std::vector<std::string> bgShaderArgs;
     std::vector<std::string> fxShaderArgs;
+    std::string fxChainArg;
+    // The .sm found beside the chart, kept so the shader stack can be
+    // rebuilt without reopening the chart -- loading a .ncmod changes which
+    // shaders apply, and that must not cost a chart reload.
+    std::string smBesidePath;
     double bgScale = 0.5;
 
     for (int i = 1; i < argc; ++i) {
@@ -93,6 +98,7 @@ int main(int argc, char** argv) {
         else if (a == "--assets") assetDir = next();
         else if (a == "--bgshader") bgShaderArgs.push_back(next());
         else if (a == "--fxshader") fxShaderArgs.push_back(next());
+        else if (a == "--fxchain")  fxChainArg = next();
         else if (a == "--bgscale")  bgScale = atof(next().c_str());
     }
 
@@ -148,13 +154,40 @@ int main(int argc, char** argv) {
     std::unique_ptr<nc::ActorLayer> actors;
     bool noBg = false, noActors = false;
 
-    // --bgshader with no chart open is the shader-authoring case: the layer
-    // stack has to exist before a .sm does. openChart rebuilds it from here.
-    if (!bgShaderArgs.empty()) {
+    // The shader stack, rebuilt from scratch. Two things feed it: the command
+    // line, and the open .ncmod's own #bgshader/#fxshader/#fxchain lines. Both
+    // opening a chart and loading a modchart change the answer, so this is one
+    // function rather than a block copied into each.
+    //
+    // Note --fxshader is APPLIED here. It used to be parsed into a vector that
+    // nothing ever read, so playfield shaders silently did nothing in the
+    // editor while working fine in the encoder -- the exact split the shared
+    // Renderer exists to prevent.
+    auto rebuildBg = [&](const std::string& dir) {
         bg = std::make_unique<nc::Background>();
+        if (!smBesidePath.empty())
+            bg->loadFromSm(smBesidePath, dir, float(bgScale));
         for (const auto& fp : bgShaderArgs) bg->addShader(fp);
-        if (bg->empty()) bg.reset();
-    }
+        for (const auto& fp : fxShaderArgs) bg->addSceneShader(fp);
+        // Relative to the .ncmod, so a modchart and its shaders/ folder travel
+        // together and reopening the document restores the whole effect.
+        const std::string mdir = modPath.empty() ? dir : dirName(modPath);
+        for (const auto& fp : doc.shaderPaths(doc.bgShaders, mdir))
+            bg->addShader(fp);
+        for (const auto& fp : doc.shaderPaths(doc.fxShaders, mdir))
+            bg->addSceneShader(fp);
+        if (!doc.fxChain.empty()) {
+            const auto c = doc.shaderPaths({doc.fxChain}, mdir);
+            if (!c.empty()) bg->loadChain(c[0]);
+        }
+        if (!fxChainArg.empty()) bg->loadChain(fxChainArg);
+        if (bg->empty() && !bg->hasChain()) bg.reset();
+    };
+
+    // Shader authoring with no chart open: the layer stack has to exist before
+    // a .sm does.
+    if (!bgShaderArgs.empty() || !fxShaderArgs.empty() || !fxChainArg.empty())
+        rebuildBg(chartDir);
 
     double tick = 0.0;
     bool playing = false, wasPlaying = false;
@@ -194,16 +227,14 @@ int main(int argc, char** argv) {
                     smBeside = e.path().generic_string(); break;
                 }
         }
+        smBesidePath = smBeside;
         actors = std::make_unique<nc::ActorLayer>();
         if (!smBeside.empty()) {
             std::string aerr;
             actors->loadFromSm(smBeside, dir, aerr);
         }
         if (actors->empty()) actors.reset();
-        bg = std::make_unique<nc::Background>();
-        if (!smBeside.empty()) bg->loadFromSm(smBeside, dir, float(bgScale));
-        for (const auto& fp : bgShaderArgs) bg->addShader(fp);
-        if (bg->empty()) bg.reset();
+        rebuildBg(dir);
 
         doc.rebuild(chart);          // tick->second mapping just changed
         tick = 0.0; playing = false;
@@ -220,6 +251,7 @@ int main(int argc, char** argv) {
             if (!doc.chartDir.empty() && doc.chartDir != chartDir)
                 openChart(doc.chartDir);
             doc.rebuild(chart);
+            rebuildBg(chartDir);     // the document may name its own shaders
             status = "loaded " + baseName(modPath);
         }
     }
@@ -271,6 +303,7 @@ int main(int argc, char** argv) {
                         status = "modchart names a chart that will not load: " + doc.chartDir;
                 }
                 doc.rebuild(chart);
+                rebuildBg(chartDir);     // the document may name its own shaders
                 selected = -1;
                 if (haveChart && doc.chartDir.empty()) doc.chartDir = chartDir;
                 status = "loaded " + baseName(modPath);

@@ -1,6 +1,9 @@
-# A NotClon modchart, as a starting point.
+# A NotClon modchart, as a starting point. This folder is a complete song --
+# a chart, a minute of (silent) audio, an actor tree and two shaders -- so it
+# runs as-is:
 #
-#   notclon --dir "charts/My Song" --mods templates/modchart/example.ncmod
+#   notclon --dir templates/modchart
+#   notclon-editor --mods templates/modchart/example.ncmod
 #
 # Columns:  tick   *approach   percent   mod   [len=<ticks>]
 #
@@ -12,6 +15,17 @@
 #   len=       optional: the value reverts on its own after this many ticks.
 #
 # See docs/ncmod-format.md for every knob.
+
+# --- what this document loads ------------------------------------------------
+# A modchart carries pointers to the chart it was written against and to any
+# shaders it drives, so opening it restores the whole thing. Paths are relative
+# to THIS file, which is what lets the folder be copied anywhere.
+#
+# Without the #fxshader line the fx.* knobs below would drive nothing: the knob
+# name comes from a uniform in the shader, so the shader has to be loaded for
+# them to mean anything.
+#chart templates/modchart
+#fxshader shaders/playfield.frag
 
 # --- a gentle opening ---------------------------------------------------------
 0        *0.5      25        drunk
@@ -32,6 +46,12 @@
 9216     *-1       40        bumpyspeed
 9216     *-1       15        aberration
 
+# --- ...and the playfield shader rides it -------------------------------------
+# These are uniforms in shaders/playfield.frag. The percent column is still
+# divided by 100, so 900 means 9.0.
+9216     *2        900       fx.wobble
+9216     *2        600       fx.chroma
+
 # --- a bar of stealth, then back ----------------------------------------------
 # 50% stealth turns the notes into white silhouettes rather than hiding them.
 12288    *-1       50        stealth   len=768
@@ -43,20 +63,15 @@
 15360    *0.6      0         bumpy
 15360    *1        0         aberration
 15360    *1        0         glow
+15360    *1        0         fx.wobble
+15360    *1        0         fx.chroma
 
 # --- driving a background shader ----------------------------------------------
-# Uniforms in a --bgshader .frag become knobs named bg.<uniform>. The percent
-# column is still divided by 100, so 400 means 4.0.
+# Same idea for --bgshader / #bgshader: its uniforms become bg.<name>.
+# Uncomment both the pointer and the knobs to see it.
+#
+# #bgshader shaders/example.frag
 #
 # 0      *-1       400       bg.rings
 # 0      *-1       100       bg.warp
 # 0      *2        100       bg.bright
-
-# --- driving a playfield shader ----------------------------------------------
-# --fxshader uniforms become fx.<name>. This one ripples and splits the
-# playfield through the drop, then settles.
-#
-# 9216   *2        900       fx.wobble
-# 9216   *2        600       fx.chroma
-# 15360  *1        0         fx.wobble
-# 15360  *1        0         fx.chroma

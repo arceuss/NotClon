@@ -156,6 +156,24 @@ public:
     // file did not name one.
     std::string chartDir;
 
+    // Shaders this modchart drives, written as `#bgshader` / `#fxshader` /
+    // `#fxchain` lines. Same reasoning as chartDir: a .ncmod that names
+    // `fx.wobble` is meaningless without the shader declaring `wobble`, so the
+    // document has to carry the pointer or reopening it loses the effect and
+    // leaves a knob driving nothing.
+    //
+    // RELATIVE PATHS RESOLVE AGAINST THE .ncmod'S OWN FOLDER, so a modchart
+    // and its shaders/ move together as one directory. Absolute paths are
+    // taken as-is. Resolution is the caller's job -- ModDoc does no file I/O
+    // beyond its own -- so use shaderPaths() rather than reading these raw.
+    std::vector<std::string> bgShaders, fxShaders;
+    std::string fxChain;
+
+    // The above, made absolute against `dir` (the folder the .ncmod was loaded
+    // from). Empty entries are skipped.
+    std::vector<std::string> shaderPaths(const std::vector<std::string>& rel,
+                                         const std::string& dir) const;
+
     bool load(const std::string& path);
     bool save(const std::string& path) const;
 

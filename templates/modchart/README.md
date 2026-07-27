@@ -1,25 +1,57 @@
 # Modchart template
 
-A working starting point. Copy this folder's contents next to your
-`notes.chart` and start editing.
+A complete song folder, not a fragment — it runs as-is:
 
 ```
-charts/My Song/
-    notes.chart
-    song.ogg
-    example.ncmod          <- the modchart
+notclon --dir templates/modchart
+notclon-editor --mods templates/modchart/example.ncmod
+```
+
+```
+templates/modchart/
+    notes.chart            <- 60s of notes at 120bpm, with sustains
+    song.ogg               <- 60s of silence, so the timeline is a real minute
+    song.ini
+    example.ncmod          <- the modchart, and it names the shader it drives
     lua/default.xml        <- an actor tree (sprites, animations)
     shaders/example.frag   <- a background shader
+    shaders/playfield.frag <- a playfield shader
+    chains/echo.ncfx       <- a multi-pass chain with feedback
 ```
 
-Try each piece on its own first:
+The audio is silent on purpose: a chart with no audio at all gives you a
+16-beat timeline to scrub, which is about eight seconds and not enough to
+build anything in. A minute of silence gives you a minute.
+
+To start your own, copy the pieces you want next to your real `notes.chart`
+and audio, and point `#chart` at that folder.
+
+Try each piece on its own:
 
 ```
-notclon --dir "charts/My Song" --mods example.ncmod
-notclon --dir "charts/My Song" --actor lua
-notclon --dir "charts/My Song" --bgshader shaders/example.frag --mods example.ncmod
-notclon --dir "charts/My Song" --fxshader shaders/playfield.frag --mods example.ncmod
+notclon --dir templates/modchart --nomods
+notclon --dir templates/modchart --actor lua
+notclon --dir templates/modchart --bgshader shaders/example.frag
+notclon --dir templates/modchart --fxchain chains/echo.ncfx
 ```
+
+## Pointing at shaders from the modchart
+
+`example.ncmod` carries its own pointers:
+
+```
+#chart templates/modchart
+#fxshader shaders/playfield.frag
+```
+
+`#bgshader`, `#fxshader` and `#fxchain` work like `#chart`: they are comments
+to anything that does not know about them, and relative paths resolve against
+the **`.ncmod`'s own folder** — so a modchart and its `shaders/` travel
+together, and reopening the document in the editor restores the whole effect
+rather than leaving `fx.*` knobs driving nothing.
+
+Command-line `--bgshader`/`--fxshader`/`--fxchain` still work and stack on top
+of whatever the document names.
 
 ## What's here
 

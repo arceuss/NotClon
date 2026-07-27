@@ -572,6 +572,23 @@ int main(int argc, char** argv) {
         if (!smBeside.empty()) bg.loadFromSm(smBeside, chartDir, float(bgScale));
         for (const auto& fp : bgShaderArgs) bg.addShader(fp);
         for (const auto& fp : fxShaderArgs) bg.addSceneShader(fp);
+        // Shaders the .ncmod names itself, resolved against ITS folder. A
+        // document that drives fx.<name> is meaningless without the shader
+        // that declares <name>, so carrying the pointer is what makes the
+        // modchart openable on its own -- the same reason #chart exists.
+        // Command-line flags are added first and these stack on top, so a
+        // --fxshader can still be layered over a document's own.
+        { const size_t sl = modPath.find_last_of("/\\");
+          const std::string mdir = sl == std::string::npos ? std::string()
+                                                           : modPath.substr(0, sl);
+          for (const auto& fp : doc.shaderPaths(doc.bgShaders, mdir))
+              bg.addShader(fp);
+          for (const auto& fp : doc.shaderPaths(doc.fxShaders, mdir))
+              bg.addSceneShader(fp);
+          if (!doc.fxChain.empty()) {
+              const auto c = doc.shaderPaths({doc.fxChain}, mdir);
+              if (!c.empty()) bg.loadChain(c[0]);
+          } }
         if (!fxChainArg.empty()) bg.loadChain(fxChainArg);
         for (const auto& m : bg.log()) printf("bg: %s%c", m.c_str(), 10);
         if (!bg.empty() || bg.hasChain()) R.setBackground(&bg);

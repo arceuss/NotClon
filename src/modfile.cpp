@@ -347,6 +347,20 @@ void ModDoc::clear(const Chart& c) { entries.clear(); rebuild(c); }
 // Comments start with '#'. The header lines are informational only -- the tick
 // is authoritative, so the file stays correct if the chart's tempo map moves.
 // ---------------------------------------------------------------------------
+// Relative entries resolve against the .ncmod's own folder; absolute ones are
+// left alone. "X:\..." and "/..." are the two absolute spellings that matter
+// here, matching how the actor and shader loaders already test a path.
+std::vector<std::string> ModDoc::shaderPaths(const std::vector<std::string>& rel,
+                                             const std::string& dir) const {
+    std::vector<std::string> out;
+    for (const std::string& p : rel) {
+        if (p.empty()) continue;
+        const bool abs = p.size() > 1 && (p[0] == '/' || p[0] == '\\' || p[1] == ':');
+        out.push_back(abs || dir.empty() ? p : dir + "/" + p);
+    }
+    return out;
+}
+
 bool ModDoc::load(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) { fprintf(stderr, "cannot open %s\n", path.c_str()); return false; }
@@ -365,6 +379,17 @@ bool ModDoc::load(const std::string& path) {
         bool enabled = true;
         if (s.compare(0, 2, "#!") == 0) { enabled = false; s = nc_trim(s.substr(2)); }
         else if (s.compare(0, 7, "#chart ") == 0) { chartDir = nc_trim(s.substr(7)); continue; }
+        // Shader pointers. Spelled as comments so any other reader skips them,
+        // exactly like #chart.
+        else if (s.compare(0, 10, "#bgshader ") == 0) {
+            bgShaders.push_back(nc_trim(s.substr(10))); continue;
+        }
+        else if (s.compare(0, 10, "#fxshader ") == 0) {
+            fxShaders.push_back(nc_trim(s.substr(10))); continue;
+        }
+        else if (s.compare(0, 9, "#fxchain ") == 0) {
+            fxChain = nc_trim(s.substr(9)); continue;
+        }
         else if (s[0] == '#') continue;
 
         int tick = 0;
@@ -404,6 +429,9 @@ bool ModDoc::save(const std::string& path) const {
     // Reopening the modchart reopens its chart. Spelled as a comment so any
     // other reader just skips it.
     if (!chartDir.empty()) fprintf(f, "#chart %s%c", chartDir.c_str(), 10);
+    for (const auto& p : bgShaders) fprintf(f, "#bgshader %s%c", p.c_str(), 10);
+    for (const auto& p : fxShaders) fprintf(f, "#fxshader %s%c", p.c_str(), 10);
+    if (!fxChain.empty()) fprintf(f, "#fxchain %s%c", fxChain.c_str(), 10);
     fprintf(f, "# tick   *approach   percent   mod%c%c", 10, 10);
     // The "#! " prefix is folded into the tick field's width so muted lines
     // stay in the same columns as live ones.
