@@ -158,9 +158,11 @@ On top of those, each shader gets **two knobs named after its file**:
 
 So `shaders/example.frag` loaded as a background gives `bg.example` and
 `bg.example.fov`. This is what lets you *load* a shader without turning it on —
-the editor's shader picker inserts both at tick 0 with the amount at `0`. The percent column is still divided by 100 — write `400` for `4.0`. That
-works for `int` and `bool` uniforms too: `800` sets an `int blockSize` to `8`.
-A `--fxchain`'s passes register their knobs the same way. See
+the editor's shader picker inserts both at tick 0 with the amount at `0`.
+
+The percent column is still divided by 100 — write `400` for `4.0`. That works
+for `int` and `bool` uniforms too: `800` sets an `int blockSize` to `8`. A
+`--fxchain`'s passes register their knobs the same way. See
 [actors-and-lua.md](actors-and-lua.md).
 
 `piu` exists too. Try it and see.
