@@ -158,6 +158,19 @@ SmImportReport importSm(const std::string& smPath, const std::string& outDir,
                 joined += v.params[i];
             }
             modLines.push_back(joined);
+        } else if (tag == "FGCHANGES") {
+            // Only to explain an empty .ncmod. A chart whose modchart is a Lua
+            // actor tree has no #MODS at all, and the first field of the first
+            // change names the folder it lives in.
+            for (size_t i = 1; i < v.params.size() && R.fgActor.empty(); ++i) {
+                const std::string t = trim(v.params[i]);
+                const size_t a = t.find('=');
+                if (a == std::string::npos) continue;
+                const size_t b = t.find('=', a + 1);
+                std::string nm = t.substr(a + 1, b == std::string::npos
+                                                 ? std::string::npos : b - a - 1);
+                if (!nm.empty()) R.fgActor = nm;
+            }
         } else if (tag == "NOTES" || tag == "NOTES2") {
             if (v.params.size() < 7) continue;
             NotesBlock b;

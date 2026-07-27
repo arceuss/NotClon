@@ -42,6 +42,7 @@ struct SmImportReport {
     double lastSec = 0.0;
 
     int    modLines = 0, modEntries = 0, modIntervals = 0;
+    std::string fgActor;                   // #FGCHANGES folder, if any
     std::vector<std::string> warnings;     // unknown tokens, dropped rows, ...
     std::vector<std::string> stubbed;      // knobs imported but not rendered
 };

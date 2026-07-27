@@ -394,6 +394,21 @@ int main(int argc, char** argv) {
                r.bpmPoints, r.stops, r.lastSec, 10);
         printf("  #MODS lines %d -> %d entries (%d scoped)%c",
                r.modLines, r.modEntries, r.modIntervals, 10);
+        // An empty .ncmod is a legitimate result -- plenty of charts keep no
+        // native mods at all -- but "0 -> 0 entries" buried in a status block
+        // reads as a failed import. Say what happened and where the modchart
+        // actually is, rather than leaving an empty file and no explanation.
+        if (r.modEntries == 0) {
+            printf("  ! no #MODS or #ATTACKS in this .sm, so the .ncmod is "
+                   "empty -- that is the file, not the importer%c", 10);
+            if (!r.fgActor.empty())
+                printf("    its modchart is the actor tree in '%s' "
+                       "(#FGCHANGES); render it with --actor %s%c",
+                       r.fgActor.c_str(), r.fgActor.c_str(), 10);
+            else
+                printf("    nothing in #FGCHANGES either -- check for a Lua "
+                       "folder beside the .sm%c", 10);
+        }
         if (!r.stubbed.empty()) {
             printf("  imported but NOT rendered:");
             for (const auto& s : r.stubbed) printf(" %s", s.c_str());
