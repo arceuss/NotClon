@@ -53,6 +53,30 @@ const SDL_DialogFileFilter CHART_FILTER[] = {
     {"All files", "*"},
 };
 
+const SDL_DialogFileFilter SHADER_FILTER[] = {
+    {"GLSL fragment shader", "frag"},
+    {"All files", "*"},
+};
+
+const SDL_DialogFileFilter CHAIN_FILTER[] = {
+    {"NotClon shader chain", "ncfx"},
+    {"All files", "*"},
+};
+
+// A shader the document names is stored RELATIVE to the .ncmod when it sits
+// under the same folder, so the pair stays portable; anything outside it has
+// to keep an absolute path, since there is nothing to be relative to.
+std::string relativeTo(const std::string& path, const std::string& dir) {
+    if (dir.empty() || path.size() <= dir.size()) return path;
+    std::string a = path, b = dir;
+    for (char& c : a) if (c == '\\') c = '/';
+    for (char& c : b) if (c == '\\') c = '/';
+    if (a.compare(0, b.size(), b) != 0) return path;
+    size_t i = b.size();
+    while (i < a.size() && (a[i] == '/' )) ++i;
+    return a.substr(i);
+}
+
 std::string baseName(const std::string& p) {
     size_t i = p.find_last_of("/\\");
     return i == std::string::npos ? p : p.substr(i + 1);
@@ -247,9 +271,15 @@ int main(int argc, char** argv) {
     if (!modPath.empty()) {
         if (doc.load(modPath)) {
             // A modchart names the chart it was written against, so opening one
-            // is enough to get back to where you were.
-            if (!doc.chartDir.empty() && doc.chartDir != chartDir)
-                openChart(doc.chartDir);
+            // is enough to get back to where you were. With no #chart line --
+            // hand-written, or saved before the directive existed -- fall back
+            // to the notes.chart sitting beside it, which is where a modchart
+            // almost always lives. Opening one should not land you on a blank
+            // highway when the chart is right there.
+            const std::string want = doc.chartDir.empty() ? dirName(modPath)
+                                                          : doc.chartDir;
+            if (!want.empty() && want != chartDir && openChart(want))
+                doc.chartDir = want;     // record it, so saving keeps it
             doc.rebuild(chart);
             rebuildBg(chartDir);     // the document may name its own shaders
             status = "loaded " + baseName(modPath);
@@ -266,6 +296,7 @@ int main(int argc, char** argv) {
     int   snapIdx = 3;      // 1/8
 
     DialogResult dlgOpen, dlgSave, dlgChart;
+    DialogResult dlgBgShader, dlgFxShader, dlgFxChain;
     bool hoveringPreview = false;
     Uint64 prevCounter = SDL_GetPerformanceCounter();
 
@@ -294,13 +325,44 @@ int main(int argc, char** argv) {
                 status = "cannot load " + dlgChart.path;
             }
         }
+        // Picking a shader edits the DOCUMENT, not just this session: the
+        // path goes into the .ncmod's #bgshader/#fxshader/#fxchain line, so
+        // saving keeps it and reopening restores it. Relative where it can be.
+        {
+            const std::string mdir = modPath.empty() ? chartDir : dirName(modPath);
+            auto took = [&](DialogResult& d, std::vector<std::string>* list,
+                            std::string* one, const char* what) {
+                if (!d.ready) return;
+                d.ready = false;
+                const std::string rel = relativeTo(d.path, mdir);
+                if (list) {
+                    // Adding the same shader twice would compile and draw it
+                    // twice, which for a scene pass is not a no-op.
+                    for (const auto& e : *list) if (e == rel) { status =
+                        std::string(what) + " already loaded"; return; }
+                    list->push_back(rel);
+                } else {
+                    *one = rel;
+                }
+                rebuildBg(chartDir);
+                status = std::string("added ") + what + " " + baseName(rel);
+            };
+            took(dlgBgShader, &doc.bgShaders, nullptr, "background shader");
+            took(dlgFxShader, &doc.fxShaders, nullptr, "playfield shader");
+            took(dlgFxChain,  nullptr, &doc.fxChain, "chain");
+        }
         if (dlgOpen.ready) {
             dlgOpen.ready = false;
             modPath = dlgOpen.path;
             if (doc.load(modPath)) {
-                if (!doc.chartDir.empty() && doc.chartDir != chartDir) {
-                    if (!openChart(doc.chartDir))
-                        status = "modchart names a chart that will not load: " + doc.chartDir;
+                // No #chart falls back to the modchart's own folder; see the
+                // startup path above.
+                const std::string want = doc.chartDir.empty() ? dirName(modPath)
+                                                              : doc.chartDir;
+                if (!want.empty() && want != chartDir) {
+                    if (openChart(want)) doc.chartDir = want;
+                    else if (!doc.chartDir.empty())
+                        status = "modchart names a chart that will not load: " + want;
                 }
                 doc.rebuild(chart);
                 rebuildBg(chartDir);     // the document may name its own shaders
@@ -708,6 +770,68 @@ int main(int argc, char** argv) {
             // What loaded, and why a .frag is not showing. A shader that fails
             // to compile keeps its last good program, so without this panel a
             // typo looks like "my edit did nothing".
+            ImGui::SeparatorText("Shaders");
+            // These add to the DOCUMENT. A modchart drives a shader through
+            // bg.<name>/fx.<name> knobs, so the two only mean anything
+            // together -- picking one here writes the pointer into the .ncmod
+            // rather than attaching it to this session alone.
+            if (ImGui::Button("+ background")) {
+                SDL_ShowOpenFileDialog(onFilePicked, &dlgBgShader, win,
+                                       SHADER_FILTER, 2,
+                                       chartDir.empty() ? nullptr : chartDir.c_str(),
+                                       false);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ playfield")) {
+                SDL_ShowOpenFileDialog(onFilePicked, &dlgFxShader, win,
+                                       SHADER_FILTER, 2,
+                                       chartDir.empty() ? nullptr : chartDir.c_str(),
+                                       false);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ chain")) {
+                SDL_ShowOpenFileDialog(onFilePicked, &dlgFxChain, win,
+                                       CHAIN_FILTER, 2,
+                                       chartDir.empty() ? nullptr : chartDir.c_str(),
+                                       false);
+            }
+            // What the document names, and a way to take one back off. The
+            // knobs it drove stay in the entry list -- removing a shader does
+            // not silently delete a section of the modchart.
+            {
+                int drop = -1, dropList = 0;
+                for (size_t i = 0; i < doc.bgShaders.size(); ++i) {
+                    ImGui::PushID(int(i) + 1000);
+                    if (ImGui::SmallButton("x")) { drop = int(i); dropList = 1; }
+                    ImGui::PopID();
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(("bg  " + doc.bgShaders[i]).c_str());
+                }
+                for (size_t i = 0; i < doc.fxShaders.size(); ++i) {
+                    ImGui::PushID(int(i) + 2000);
+                    if (ImGui::SmallButton("x")) { drop = int(i); dropList = 2; }
+                    ImGui::PopID();
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(("fx  " + doc.fxShaders[i]).c_str());
+                }
+                if (!doc.fxChain.empty()) {
+                    ImGui::PushID(3000);
+                    if (ImGui::SmallButton("x")) { drop = 0; dropList = 3; }
+                    ImGui::PopID();
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(("chain  " + doc.fxChain).c_str());
+                }
+                if (dropList) {
+                    if (dropList == 1) doc.bgShaders.erase(doc.bgShaders.begin() + drop);
+                    else if (dropList == 2) doc.fxShaders.erase(doc.fxShaders.begin() + drop);
+                    else doc.fxChain.clear();
+                    rebuildBg(chartDir);
+                    status = "removed shader";
+                }
+                if (doc.bgShaders.empty() && doc.fxShaders.empty() && doc.fxChain.empty())
+                    ImGui::TextDisabled("none named by this modchart");
+            }
+
             ImGui::SeparatorText("Background");
             if (!bg) {
                 ImGui::TextDisabled("none (no .sm beside the chart)");

@@ -21,15 +21,23 @@
 # shaders it drives, so opening it restores the whole thing. Paths are relative
 # to THIS file, which is what lets the folder be copied anywhere.
 #
-# Without the #fxshader line the fx.* knobs below would drive nothing: the knob
+# Without these lines the bg.*/fx.* knobs below would drive nothing: the knob
 # name comes from a uniform in the shader, so the shader has to be loaded for
 # them to mean anything.
 #chart templates/modchart
+#bgshader shaders/example.frag
 #fxshader shaders/playfield.frag
 
 # --- a gentle opening ---------------------------------------------------------
 0        *0.5      25        drunk
 0        *-1       0         glow
+
+# The background shader's uniforms, as bg.<name>. `bright` defaults to 0 in the
+# shader, so a background that is never driven renders black -- that is why it
+# is set here from the first tick rather than left to its default.
+0        *-1       400       bg.rings
+0        *-1       100       bg.warp
+0        *2        100       bg.bright
 
 # --- 16 bars in, lean into it -------------------------------------------------
 3072     *1        60        drunk
@@ -66,12 +74,6 @@
 15360    *1        0         fx.wobble
 15360    *1        0         fx.chroma
 
-# --- driving a background shader ----------------------------------------------
-# Same idea for --bgshader / #bgshader: its uniforms become bg.<name>.
-# Uncomment both the pointer and the knobs to see it.
-#
-# #bgshader shaders/example.frag
-#
-# 0      *-1       400       bg.rings
-# 0      *-1       100       bg.warp
-# 0      *2        100       bg.bright
+# --- and the background settles with everything else --------------------------
+15360    *0.5      0         bg.rings
+15360    *0.5      40        bg.warp
