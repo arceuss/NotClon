@@ -138,6 +138,8 @@ public:
 
     // Broadcast a message to this tree (MESSAGEMAN:Broadcast). Schedules the
     // matching <Name>MessageCommand on every actor that declares one.
+    // Lua message bodies may have non-idempotent side effects. Runtime callers
+    // must invoke this once per event edge, never once per rendered frame.
     void broadcast(const std::string& msg, double sec);
 
     Actor* root() { return root_.get(); }
