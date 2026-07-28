@@ -25,9 +25,9 @@
 // stores its command chain as a *timeline*: each command resolves to an
 // absolute (startSec, endSec, from, to, easing) segment when its chain is
 // scheduled, and evaluating an actor at time T is a search, not an
-// integration. Lua chunks are the exception -- they can branch on live state,
-// so a tree containing them is stepped forward from its activation time at a
-// fixed rate and cached (see ActorTree::evalAt).
+// integration. Lua setters capture into the same timeline when their command
+// runs. Per-frame UpdateCommand scripts remain unsupported rather than making
+// seeking depend on which frames happened to render first.
 #pragma once
 
 #include "chart.h"
@@ -40,6 +40,7 @@
 struct lua_State;
 
 namespace nc {
+class LuaHost;
 
 // --- easings ---------------------------------------------------------------
 // The seven ITG tweens. `sleep` is one of them: it holds the old value for the
@@ -88,6 +89,12 @@ struct Effect {
     float delay = 0.0f;
     bool  beatClock = false;                // effectclock,'bgm'
 };
+struct ActorCommand {
+    std::string name;
+    std::string text;
+    int luaRef = -1;                         // registry ref for %function bodies
+};
+
 
 struct Actor {
     std::string type;                       // ActorFrame | Sprite | Quad
@@ -95,6 +102,8 @@ struct Actor {
     std::string file;                       // texture path, resolved
     Tex         tex;
     bool        texLoaded = false;
+    bool        textureFiltering = true;
+    bool        textureFilterDirty = false;
 
     ActorState  base;                       // after InitCommand
     Effect      effect;
@@ -102,14 +111,19 @@ struct Actor {
     std::vector<std::unique_ptr<Actor>> children;
 
     // Raw command text by name: "On", "Init", "Update", "WagMessage", ...
-    std::vector<std::pair<std::string, std::string>> commands;
+    std::vector<ActorCommand> commands;
 
+    const ActorCommand* findCommandEntry(const std::string& name) const;
+    ActorCommand* findCommandEntry(const std::string& name);
     const std::string* findCommand(const std::string& name) const;
 };
 
 // A loaded folder: <dir>/default.xml plus whatever it references.
 class ActorTree {
 public:
+    ActorTree();
+    ~ActorTree();
+
     // `dir` is the folder named by the FG/BGCHANGES entry, resolved against the
     // song folder. `startSec` is when the change activates -- all timelines are
     // absolute from there.
@@ -127,39 +141,54 @@ public:
     void broadcast(const std::string& msg, double sec);
 
     Actor* root() { return root_.get(); }
+    const std::vector<std::string>& log() const;
 
 private:
     std::unique_ptr<Actor> root_;
     std::string dir_;
     double startSec_ = 0.0;
+    std::unique_ptr<LuaHost> lua_;
+    void dispatchPending(double sec);
 };
 
 // --- the Lua host ----------------------------------------------------------
-// One lua_State per render, holding the shim globals Saitama2000 reaches for.
-// Deliberately small: GAMESTATE, SCREENMAN (absorbing), MESSAGEMAN, plus the
-// Actor methods bound on a userdata. Anything unbound is an absorbing no-op
-// that logs once, so an unsupported modfile degrades instead of aborting.
+// One lua_State per actor tree. Globals therefore persist across sibling
+// actors, while separate scheduled trees cannot cross-talk. The binding
+// surface is deliberately the subset exercised by the actor files.
 class LuaHost {
 public:
     bool  open(std::string& err);
+    ~LuaHost() { close(); }
     void  close();
     lua_State* L() const { return L_; }
     // Compile `%function(self) ... end` body; returns a registry ref or -1.
     int   compileChunk(const std::string& src, const std::string& where,
                        std::string& err);
+    // Execute one compiled body with `self` bound to `actor`. Setter calls
+    // capture into the actor's deterministic segment timeline at `sec`.
+    bool  callChunk(int ref, Actor& actor, double sec, const std::string& where,
+                    std::string& err);
     void  setBeat(double beat, double sec) { beat_ = beat; sec_ = sec; }
     double beat() const { return beat_; }
     double sec()  const { return sec_; }
     void  setSongDir(const std::string& d) { songDir_ = d; }
     const std::string& songDir() const { return songDir_; }
-    // MESSAGEMAN:Broadcast queues here; the owner drains it and dispatches to
-    // its trees. The host cannot do it itself -- ActorLayer owns the trees.
+    // MESSAGEMAN:Broadcast queues here; the owning ActorTree drains it after
+    // the current Lua body returns, so dispatch never re-enters the VM.
     void  queueBroadcast(const std::string& m) { pending_.push_back(m); }
     std::vector<std::string>& pendingBroadcasts() { return pending_; }
     const std::vector<std::string>& log() const { return log_; }
     void  note(const std::string& s);
 
 private:
+    struct CallState;
+    CallState* call_ = nullptr;
+    void pushActor(Actor& actor);
+    bool invokeChunk(int ref, Actor& actor, const std::string& where,
+                     std::string& err);
+    static int actorIndex(lua_State* L);
+    static int actorCall(lua_State* L);
+
     lua_State* L_ = nullptr;
     double beat_ = 0, sec_ = 0;
     std::string songDir_;

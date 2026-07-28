@@ -219,9 +219,19 @@ float argf(const Cmd& c, size_t i, float d = 0.0f) {
 
 }  // namespace
 
-const std::string* Actor::findCommand(const std::string& name) const {
-    for (const auto& c : commands) if (c.first == name) return &c.second;
+const ActorCommand* Actor::findCommandEntry(const std::string& name) const {
+    for (const auto& c : commands) if (c.name == name) return &c;
     return nullptr;
+}
+
+ActorCommand* Actor::findCommandEntry(const std::string& name) {
+    for (auto& c : commands) if (c.name == name) return &c;
+    return nullptr;
+}
+
+const std::string* Actor::findCommand(const std::string& name) const {
+    const ActorCommand* c = findCommandEntry(name);
+    return c ? &c->text : nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -389,12 +399,13 @@ void scheduleChain(Actor& a, const std::string& text, double atSec,
 // Resolve an actor's state at `sec` by replaying its timeline.
 ActorState evalActor(const Actor& a, double sec) {
     ActorState st = a.base;
+    const float t = float(sec);
     for (const Seg& s : a.segs) {
-        if (sec < s.t0) break;                       // timeline is time-ordered
+        if (t < s.t0) break;                         // timeline is time-ordered
         float f = 1.0f;
         if (s.t1 > s.t0) {
-            if (sec >= s.t1) f = 1.0f;
-            else f = easeApply(s.ease, float((sec - s.t0) / (s.t1 - s.t0)));
+            if (t >= s.t1) f = 1.0f;
+            else f = easeApply(s.ease, (t - s.t0) / (s.t1 - s.t0));
         }
         auto L = [&](int i) { return s.from[i] + (s.to[i] - s.from[i]) * f; };
         switch (s.prop) {
@@ -548,34 +559,101 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
     }
 }
 
-void scheduleActor(Actor& a, double startSec, LuaHost* lua,
+void compileActorLua(Actor& a, LuaHost& lua, std::map<std::string, int>& cache,
+                     std::vector<std::string>* warn) {
+    for (ActorCommand& c : a.commands) {
+        if (trimws(c.text).compare(0, 10, "%function(") != 0) continue;
+        const auto found = cache.find(c.text);
+        if (found != cache.end()) {
+            c.luaRef = found->second;
+            continue;
+        }
+        std::string err;
+        const std::string where = (a.name.empty() ? a.type : a.name) + "." + c.name;
+        c.luaRef = lua.compileChunk(c.text, where, err);
+        if (c.luaRef >= 0) cache.emplace(c.text, c.luaRef);
+        else if (warn) warn->push_back(where + ": " + err);
+    }
+    for (auto& child : a.children) compileActorLua(*child, lua, cache, warn);
+}
+
+void scheduleActor(Actor& a, double startSec, LuaHost& lua,
                    std::vector<std::string>* warn) {
-    // InitCommand runs first and instantly; OnCommand from the same state.
+    // InitCommand runs first and instantly; OnCommand starts from that state.
     ActorState st;
-    if (const std::string* ini = a.findCommand("InitCommand")) {
-        if (trimws(*ini).compare(0, 10, "%function(") != 0) {
+    a.base = st;
+    a.segs.clear();
+    if (const ActorCommand* ini = a.findCommandEntry("InitCommand")) {
+        if (ini->luaRef >= 0) {
+            std::string err;
+            const std::string where = (a.name.empty() ? a.type : a.name) + ".InitCommand";
+            if (!lua.callChunk(ini->luaRef, a, startSec, where, err) && warn)
+                warn->push_back(where + ": " + err);
+            double endSec = startSec;
+            for (const Seg& s : a.segs) endSec = std::max(endSec, double(s.t1));
+            st = evalActor(a, endSec);
+        } else if (trimws(ini->text).compare(0, 10, "%function(") != 0) {
             Sched S; S.a = &a; S.t = startSec; S.cur = st;
-            runCmds(S, parseChain(*ini), 0, lua);
+            runCmds(S, parseChain(ini->text), 0, &lua);
             st = S.cur;
-        } else if (warn) {
-            warn->push_back("InitCommand is a Lua chunk; not executed yet");
         }
     }
     a.base = st;
     a.segs.clear();
-    if (const std::string* on = a.findCommand("OnCommand")) {
-        if (trimws(*on).compare(0, 10, "%function(") != 0)
-            scheduleChain(a, *on, startSec, st, 0, lua);
-        else if (warn)
-            warn->push_back("OnCommand is a Lua chunk; not executed yet");
+    if (const ActorCommand* on = a.findCommandEntry("OnCommand")) {
+        if (on->luaRef >= 0) {
+            std::string err;
+            const std::string where = (a.name.empty() ? a.type : a.name) + ".OnCommand";
+            if (!lua.callChunk(on->luaRef, a, startSec, where, err) && warn)
+                warn->push_back(where + ": " + err);
+        } else if (trimws(on->text).compare(0, 10, "%function(") != 0) {
+            scheduleChain(a, on->text, startSec, st, 0, &lua);
+        }
     }
     for (auto& c : a.children) scheduleActor(*c, startSec, lua, warn);
 }
 
+void dispatchActorCommand(Actor& a, const std::string& cmd, double sec,
+                          LuaHost& lua) {
+    if (const ActorCommand* c = a.findCommandEntry(cmd)) {
+        const ActorState st = evalActor(a, sec);
+        // Preserve commands scheduled at this exact instant; the newly
+        // appended segments override only properties this message touches.
+        a.segs.erase(std::remove_if(a.segs.begin(), a.segs.end(),
+            [&](const Seg& s) { return s.t0 > float(sec); }), a.segs.end());
+        if (c->luaRef >= 0) {
+            std::string err;
+            const std::string where = (a.name.empty() ? a.type : a.name) + "." + cmd;
+            if (!lua.callChunk(c->luaRef, a, sec, where, err))
+                lua.note(where + ": " + err);
+        } else if (trimws(c->text).compare(0, 10, "%function(") != 0) {
+            scheduleChain(a, c->text, sec, st, 0, &lua);
+        }
+    }
+    for (auto& child : a.children) dispatchActorCommand(*child, cmd, sec, lua);
+}
+
+
 }  // namespace
 
+ActorTree::ActorTree() = default;
+ActorTree::~ActorTree() = default;
+const std::vector<std::string>& ActorTree::log() const {
+    static const std::vector<std::string> empty;
+    return lua_ ? lua_->log() : empty;
+}
+
+
 bool ActorTree::load(const std::string& dir, double startSec, std::string& err) {
-    dir_ = dir; startSec_ = startSec;
+    dir_ = dir;
+    startSec_ = startSec;
+    root_.reset();
+    lua_ = std::make_unique<LuaHost>();
+    if (!lua_->open(err)) return false;
+    const size_t slash = dir.find_last_of("/\\");
+    lua_->setSongDir(slash == std::string::npos ? "." : dir.substr(0, slash));
+    lua_->setBeat(0.0, startSec);
+
     // SM looks for default.xml; Windows is case-insensitive but the repo may
     // not be, and Saitama2000 ships both spellings across its folders.
     std::string path;
@@ -597,27 +675,33 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
     root_ = std::make_unique<Actor>();
     std::vector<std::string> warn;
     buildActor(root, *root_, dir, startSec, &warn);
-    scheduleActor(*root_, startSec, nullptr, &warn);
+    std::map<std::string, int> cache;
+    compileActorLua(*root_, *lua_, cache, &warn);
+    scheduleActor(*root_, startSec, *lua_, &warn);
+    dispatchPending(startSec);
+    for (const std::string& w : warn) lua_->note(w);
     return true;
 }
 
 void ActorTree::broadcast(const std::string& msg, double sec) {
-    // Re-schedule <Name>MessageCommand from the actor's state at `sec`.
-    struct W {
-        static void go(Actor& a, const std::string& cmd, double sec) {
-            if (const std::string* t = a.findCommand(cmd)) {
-                if (trimws(*t).compare(0, 10, "%function(") != 0) {
-                    const ActorState st = evalActor(a, sec);
-                    // Drop anything already scheduled past now, then append.
-                    a.segs.erase(std::remove_if(a.segs.begin(), a.segs.end(),
-                        [&](const Seg& s) { return s.t0 >= sec; }), a.segs.end());
-                    scheduleChain(a, *t, sec, st, 0, nullptr);
-                }
-            }
-            for (auto& c : a.children) go(*c, cmd, sec);
-        }
-    };
-    if (root_) W::go(*root_, msg + "MessageCommand", sec);
+    if (!root_ || !lua_) return;
+    lua_->setBeat(lua_->beat(), sec);
+    dispatchActorCommand(*root_, msg + "MessageCommand", sec, *lua_);
+    dispatchPending(sec);
+}
+
+void ActorTree::dispatchPending(double sec) {
+    if (!root_ || !lua_) return;
+    for (int pass = 0; pass < 64; ++pass) {
+        auto& pending = lua_->pendingBroadcasts();
+        if (pending.empty()) return;
+        std::vector<std::string> batch;
+        batch.swap(pending);
+        for (const std::string& msg : batch)
+            dispatchActorCommand(*root_, msg + "MessageCommand", sec, *lua_);
+    }
+    lua_->pendingBroadcasts().clear();
+    lua_->note("MESSAGEMAN broadcast recursion limit reached");
 }
 
 // ---------------------------------------------------------------------------
@@ -656,6 +740,13 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
             if (f) { fclose(f); a.tex = gl_loadTex(a.file, false, /*flipY=*/false); }
             a.texLoaded = true;
         }
+        if (a.tex.id && a.textureFilterDirty) {
+            glBindTexture(GL_TEXTURE_2D, a.tex.id);
+            const GLint filter = a.textureFiltering ? GL_LINEAR : GL_NEAREST;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+            a.textureFilterDirty = false;
+        }
         float sw = (w.sizeX > 0) ? w.sizeX : float(a.tex.w ? a.tex.w : 64);
         float sh = (w.sizeY > 0) ? w.sizeY : float(a.tex.h ? a.tex.h : 64);
         sw *= w.zoomX; sh *= w.zoomY;
@@ -681,6 +772,7 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
 
 void ActorTree::draw(Renderer& R, double sec) {
     if (!root_ || sec < startSec_) return;
+    if (lua_) lua_->setBeat(R.actorBeat(), sec);
     ActorState id;
     drawActor(R, *root_, sec, R.actorBeat(), id);
 }
@@ -693,8 +785,30 @@ int lua_absorb(lua_State* L) {                 // returns itself, so chains work
     lua_pushvalue(L, 1);
     return 1;
 }
+struct LuaActorRef {
+    Actor* actor;
+    LuaHost* host;
+};
 
-// The three natives the boot chunk's GAMESTATE/MESSAGEMAN close over. Each
+enum ActorMethod {
+    AM_X, AM_Y, AM_ZOOM, AM_ZOOMTO, AM_ZOOMX, AM_ZOOMY,
+    AM_VISIBLE, AM_HIDDEN, AM_DIFFUSEALPHA, AM_DIFFUSE, AM_ROTZ,
+    AM_LINEAR, AM_SLEEP, AM_FINISH, AM_FILTER, AM_PLAY, AM_QUEUE, AM_GETCHILD
+};
+
+struct ActorMethodDef { const char* name; ActorMethod method; };
+const ActorMethodDef ACTOR_METHODS[] = {
+    {"x", AM_X}, {"y", AM_Y}, {"zoom", AM_ZOOM}, {"zoomto", AM_ZOOMTO},
+    {"zoomx", AM_ZOOMX}, {"zoomy", AM_ZOOMY}, {"visible", AM_VISIBLE},
+    {"hidden", AM_HIDDEN}, {"diffusealpha", AM_DIFFUSEALPHA},
+    {"diffuse", AM_DIFFUSE}, {"rotationz", AM_ROTZ}, {"linear", AM_LINEAR},
+    {"sleep", AM_SLEEP}, {"finishtweening", AM_FINISH},
+    {"SetTextureFiltering", AM_FILTER}, {"playcommand", AM_PLAY},
+    {"queuecommand", AM_QUEUE}, {"GetChild", AM_GETCHILD},
+};
+
+
+// The natives the boot chunk's shims close over. Each
 // carries its LuaHost as an upvalue rather than a global, so two hosts in one
 // process cannot cross-talk.
 LuaHost* hostOf(lua_State* L) {
@@ -716,7 +830,182 @@ int lua_nc_broadcast(lua_State* L) {
     if (h && m) h->queueBroadcast(m);
     return 0;
 }
+int lua_nc_trace(lua_State* L) {
+    LuaHost* h = hostOf(L);
+    const char* s = lua_tostring(L, 1);
+    if (h && s) h->note(s);
+    return 0;
+}
 }  // namespace
+struct LuaHost::CallState {
+    std::map<Actor*, Sched> actors;
+    int depth = 0;
+};
+
+void LuaHost::pushActor(Actor& actor) {
+    LuaActorRef* ref = static_cast<LuaActorRef*>(lua_newuserdata(L_, sizeof(LuaActorRef)));
+    ref->actor = &actor;
+    ref->host = this;
+    luaL_getmetatable(L_, "nc.Actor");
+    lua_setmetatable(L_, -2);
+}
+
+int LuaHost::actorIndex(lua_State* L) {
+    LuaActorRef* ref = static_cast<LuaActorRef*>(luaL_checkudata(L, 1, "nc.Actor"));
+    const char* name = luaL_checkstring(L, 2);
+    for (const ActorMethodDef& def : ACTOR_METHODS) {
+        if (strcmp(def.name, name) != 0) continue;
+        lua_pushinteger(L, int(def.method));
+        lua_pushcclosure(L, &LuaHost::actorCall, 1);
+        return 1;
+    }
+    if (ref && ref->host && name)
+        ref->host->note(std::string("unsupported Actor method: ") + name);
+    lua_pushcfunction(L, lua_absorb);
+    return 1;
+}
+
+int LuaHost::actorCall(lua_State* L) {
+    LuaActorRef* ref = static_cast<LuaActorRef*>(luaL_checkudata(L, 1, "nc.Actor"));
+    LuaHost* host = ref ? ref->host : nullptr;
+    Actor* actor = ref ? ref->actor : nullptr;
+    if (!host || !actor || !host->call_) {
+        lua_pushvalue(L, 1);
+        return 1;
+    }
+    const ActorMethod method = ActorMethod(lua_tointeger(L, lua_upvalueindex(1)));
+    if (method == AM_GETCHILD) {
+        const char* name = luaL_checkstring(L, 2);
+        for (auto& child : actor->children) {
+            if (child->name == name) {
+                host->pushActor(*child);
+                return 1;
+            }
+        }
+        lua_getglobal(L, "ABSORB");
+        lua_call(L, 0, 1);
+        return 1;
+    }
+
+    auto found = host->call_->actors.find(actor);
+    if (found == host->call_->actors.end()) {
+        Sched initial{};
+        initial.a = actor;
+        initial.t = host->sec_;
+        initial.cur = evalActor(*actor, host->sec_);
+        found = host->call_->actors.emplace(actor, initial).first;
+    }
+    Sched& S = found->second;
+    auto number = [&](int i, float d = 0.0f) {
+        return float(luaL_optnumber(L, i, d));
+    };
+    auto boolean = [&](int i, bool d) {
+        if (lua_gettop(L) < i || lua_isnil(L, i)) return d;
+        return lua_isnumber(L, i) ? lua_tonumber(L, i) != 0.0
+                                  : lua_toboolean(L, i) != 0;
+    };
+
+    switch (method) {
+        case AM_X: emit1(S, PROP_X, number(2)); break;
+        case AM_Y: emit1(S, PROP_Y, number(2)); break;
+        case AM_ZOOM: {
+            const float z = number(2, 1.0f);
+            emit1(S, PROP_ZOOMX, z);
+            emit1(S, PROP_ZOOMY, z);
+        } break;
+        case AM_ZOOMTO: {
+            const float size[2] = {number(2), number(3)};
+            emit(S, PROP_SIZE, 2, size);
+        } break;
+        case AM_ZOOMX: emit1(S, PROP_ZOOMX, number(2, 1.0f)); break;
+        case AM_ZOOMY: emit1(S, PROP_ZOOMY, number(2, 1.0f)); break;
+        case AM_VISIBLE: emit1(S, PROP_HIDDEN, boolean(2, true) ? 0.0f : 1.0f); break;
+        case AM_HIDDEN: emit1(S, PROP_HIDDEN, boolean(2, true) ? 1.0f : 0.0f); break;
+        case AM_DIFFUSEALPHA: emit1(S, PROP_DIFFUSEALPHA, number(2, 1.0f)); break;
+        case AM_DIFFUSE: {
+            float colour[4] = {1, 1, 1, 1};
+            if (lua_istable(L, 2)) {
+                for (int i = 0; i < 4; ++i) {
+                    lua_rawgeti(L, 2, i + 1);
+                    if (lua_isnumber(L, -1)) colour[i] = float(lua_tonumber(L, -1));
+                    lua_pop(L, 1);
+                }
+            } else {
+                for (int i = 0; i < 4; ++i) colour[i] = number(i + 2, 1.0f);
+            }
+            emit(S, PROP_DIFFUSE, 4, colour);
+        } break;
+        case AM_ROTZ: emit1(S, PROP_ROTZ, number(2)); break;
+        case AM_LINEAR: S.dur = number(2); S.ease = Ease::Linear; break;
+        case AM_SLEEP:
+            S.t += number(2);
+            S.dur = 0;
+            S.ease = Ease::Instant;
+            break;
+        case AM_FINISH:
+            S.dur = 0;
+            S.ease = Ease::Instant;
+            break;
+        case AM_FILTER: {
+            const bool filter = boolean(2, true);
+            if (actor->textureFiltering != filter) {
+                actor->textureFiltering = filter;
+                actor->textureFilterDirty = true;
+            }
+        } break;
+        case AM_PLAY:
+        case AM_QUEUE: {
+            const char* name = luaL_checkstring(L, 2);
+            if (host->call_->depth < 8) {
+                ++host->call_->depth;
+                if (const ActorCommand* command =
+                        actor->findCommandEntry(std::string(name) + "Command")) {
+                    if (command->luaRef >= 0) {
+                        std::string err;
+                        if (!host->invokeChunk(command->luaRef, *actor, command->name, err))
+                            host->note(command->name + ": " + err);
+                    } else if (trimws(command->text).compare(0, 10, "%function(") != 0) {
+                        runCmds(S, parseChain(command->text), host->call_->depth, host);
+                    }
+                }
+                --host->call_->depth;
+            }
+        } break;
+        default: break;
+    }
+    lua_pushvalue(L, 1);
+    return 1;
+}
+
+bool LuaHost::invokeChunk(int ref, Actor& actor, const std::string& where,
+                          std::string& err) {
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, ref);
+    if (!lua_isfunction(L_, -1)) {
+        lua_pop(L_, 1);
+        err = where + ": invalid Lua registry reference";
+        return false;
+    }
+    pushActor(actor);
+    if (lua_pcall(L_, 1, 0, 0) != 0) {
+        err = lua_tostring(L_, -1) ? lua_tostring(L_, -1) : "runtime error";
+        lua_pop(L_, 1);
+        return false;
+    }
+    return true;
+}
+
+bool LuaHost::callChunk(int ref, Actor& actor, double sec,
+                        const std::string& where, std::string& err) {
+    if (!L_ || ref < 0) return false;
+    if (call_) return invokeChunk(ref, actor, where, err);
+    CallState state;
+    call_ = &state;
+    sec_ = sec;
+    const bool ok = invokeChunk(ref, actor, where, err);
+    call_ = nullptr;
+    return ok;
+}
+
 
 void LuaHost::note(const std::string& s) {
     for (const auto& e : log_) if (e == s) return;
@@ -727,6 +1016,10 @@ bool LuaHost::open(std::string& err) {
     L_ = luaL_newstate();
     if (!L_) { err = "luaL_newstate failed"; return false; }
     luaL_openlibs(L_);
+    luaL_newmetatable(L_, "nc.Actor");
+    lua_pushcfunction(L_, &LuaHost::actorIndex);
+    lua_setfield(L_, -2, "__index");
+    lua_pop(L_, 1);
 
     // Register the natives FIRST: the boot chunk defines GAMESTATE and
     // MESSAGEMAN as closures over them, and while Lua resolves globals at call
@@ -737,6 +1030,7 @@ bool LuaHost::open(std::string& err) {
         {"__nc_beat", lua_nc_beat},
         {"__nc_songdir", lua_nc_songdir},
         {"__nc_broadcast", lua_nc_broadcast},
+        {"__nc_trace", lua_nc_trace},
     };
     for (const Reg& r : natives) {
         lua_pushlightuserdata(L_, this);
@@ -759,6 +1053,10 @@ bool LuaHost::open(std::string& err) {
         // `error("'setn' is obsolete")`, so the guard never fires and every
         // caller still dies. Overwrite it unconditionally with the no-op that
         // matches what setn did back when tables carried a stored size.
+        "SCREEN_WIDTH = 640\n"
+        "SCREEN_HEIGHT = 480\n"
+        "SCREEN_CENTER_X = 320\n"
+        "SCREEN_CENTER_Y = 240\n"
         "table.setn = function(t, n) end\n"
         "local function absorb()\n"
         "  local t = {}\n"
@@ -767,6 +1065,11 @@ bool LuaHost::open(std::string& err) {
         "end\n"
         "ABSORB = absorb\n"
         "SCREENMAN = absorb()\n"
+        "PREFSMAN = { GetPreference = function() return '' end }\n"
+        "DISPLAY = { GetVendor = function() return '' end,\n"
+        "            GetDisplayWidth = function() return SCREEN_WIDTH end,\n"
+        "            GetDisplayHeight = function() return SCREEN_HEIGHT end }\n"
+        "Trace = function(v) __nc_trace(tostring(v)) end\n"
         "MESSAGEMAN = { Broadcast = function(self, m) __nc_broadcast(m) end }\n"
         "GAMESTATE = {\n"
         "  GetSongBeat = function() return __nc_beat() end,\n"
@@ -820,6 +1123,7 @@ void ActorLayer::addFolder(const std::string& songDir, const std::string& sub,
     s.tree = std::make_unique<ActorTree>();
     std::string err;
     if (!s.tree->load(s.e.dir, startSec, err)) { log_.push_back(err); return; }
+    for (const std::string& entry : s.tree->log()) log_.push_back(entry);
     trees_.push_back(std::move(s));
 }
 

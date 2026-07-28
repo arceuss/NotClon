@@ -75,6 +75,15 @@ The embedded Lua exposes a deliberately small surface:
 - `GAMESTATE:GetSongBeat()` — the current beat
 - `GAMESTATE:GetCurrentSong():GetSongDir()` — the song folder
 - `MESSAGEMAN:Broadcast('Name')` — trigger `NameMessageCommand`s
+- `SCREEN_WIDTH`, `SCREEN_HEIGHT`, `SCREEN_CENTER_X`, and `SCREEN_CENTER_Y` —
+  the virtual-screen constants (`640`, `480`, `320`, and `240`)
+- `Trace(value)` — append a value to the actor diagnostic log
+- `self` is the current actor in `InitCommand`, `OnCommand`, and
+  `*MessageCommand` Lua bodies. Setters such as `x`, `y`, `zoom`, `zoomto`,
+  `diffuse`, `visible`, `linear`, `sleep`, `playcommand`, `queuecommand`, and
+  `SetTextureFiltering` return `self`, so chained calls work.
+- Lua globals persist across every actor in the same tree. Actors can register
+  themselves in a table during one command and be retrieved by a later command.
 - `SCREENMAN` — accepted but inert: theme-UI calls like
   `SCREENMAN:GetTopScreen():GetChild('Overlay'):hidden(1)` are safely absorbed,
   since NotClon has no theme UI to hide
@@ -154,10 +163,15 @@ shader gives them.
 
 Honest list, so you don't fight the tool:
 
-- `%function` Lua chunks compile, but per-frame `UpdateCommand` loops are not
-  executed yet — schedule effects with command chains and messages instead,
-  or drive the playfield from the `.ncmod` modchart (which is the better tool
-  for note/highway mods anyway).
+- `%function` bodies run for `InitCommand`, `OnCommand`, and
+  `*MessageCommand`, with actor setters captured into the same seekable
+  timelines as XML command chains. Per-frame `UpdateCommand` loops are not
+  executed — schedule effects with command chains and messages instead, or
+  drive the playfield from the `.ncmod` modchart.
+- Unsupported actor methods are absorbing no-ops that return `self`, keeping
+  method chains alive. Command-line renders report each distinct method once
+  as `actor: unsupported Actor method: <name>`; check this before assuming a
+  Lua setter took effect.
 - `NoteCrossed*` message broadcasts (per-column note triggers) are not emitted.
 - 3D perspective on actors is approximated: `rotationx/y` render as
   foreshortening rather than true vanishing-point perspective.
