@@ -309,7 +309,7 @@ private:
     GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0, cover_ = 0, piu_ = 0;
     GLuint avao_ = 0, avbo_ = 0;
     double actorBeat_ = 0.0;
-    double fieldSec_ = 0.0;   // when evalField reads the Plr() field proxies
+    double fieldSec_ = 0.0;   // when evalField reads live Lua PlayerOptions
     ActorLayer* actors_ = nullptr;
     Background* bg_ = nullptr;
     GLuint vao_ = 0, vbo_ = 0, qvao_ = 0, qvbo_ = 0;

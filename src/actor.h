@@ -128,19 +128,17 @@ struct Actor {
     std::string text;
 
     // --- ActorFrameTexture ---------------------------------------------------
-    // A render target that captures whatever has already been drawn. SM's AFT
-    // does this by rendering its preceding siblings into its own texture;
-    // NotClon copies the live framebuffer at the point the AFT is reached,
-    // which is the same content for a tree that draws in order.
+    // A render target that binds its texture and draws its own children into
+    // it. Sibling order still matters: a sprite before the AFT samples the
+    // previous frame, while one after it samples the just-rendered contents.
     //
     // Create() allocates; SetTextureName() publishes it under a name other
-    // actors can reference by Texture= or SetTexture(). The Enable* flags are
-    // accepted and mostly recorded rather than honoured -- see aftCreate.
+    // actors can reference by Texture= or SetTexture().
     bool        isAft = false;
     std::string aftName;
     int         aftW = 0, aftH = 0;
-    bool        aftAlpha = true, aftDepth = false, aftFloat = false;
-    bool        aftPreserve = true;
+    bool        aftAlpha = false, aftDepth = false, aftFloat = false;
+    bool        aftPreserve = false;
     GLuint      aftTex = 0, aftFbo = 0, aftDepthRb = 0;
 
     // --- .sprite animation ---------------------------------------------------
@@ -174,7 +172,7 @@ struct Actor {
     // proxy, and a wrapper transforms its owner rather than drawing beside it.
     Actor*      proxyTarget = nullptr;
     std::unique_ptr<Actor> wrapper;
-    int         playerField = 0;             // renderer-owned P1/P2 source
+    int         playerField = 0;             // renderer-owned NoteField source
 
     ActorState  base;                       // after InitCommand
     ActorState  onBase;                     // state OnCommand starts from
@@ -250,12 +248,13 @@ public:
     // and Lua trees which never requested this player.
     bool playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                     float& mx, float& my, float& mz) const;
+    bool playerState(int pn, double sec, double beat, ActorState& out) const;
+    bool drawPlayer(Renderer& R, int pn, double sec, double beat);
     int livePlayerCount() const;
     bool canonicalSource() const { return canonicalSource_; }
-    // The notefield proxies behind the chart-side Plr(pn): synthetic
-    // actors outside the draw tree whose evaluated state the renderer
-    // folds into each player's field transform. This is how a chart
-    // skews or spins the notefield itself.
+    // Renderer-owned Player actors outside the FG/BG tree. NoteField is a
+    // distinct child so ActorProxy targeting Player retains Player placement,
+    // while targeting GetChild("NoteField") does not invent that parent.
     Actor& plrProxy(int i) { return plrProxy_[i & 1]; }
     Actor& topScreen() { return screen_; }
     Actor* screenActor(const std::string& name);
@@ -424,10 +423,9 @@ public:
     int drainLuaMods(ModDoc& doc, int resolution);
 
     // Step every tree's command loop to `sec`. See ActorTree::update.
-    // Player pn's notefield transform at `sec`: rotX/rotY/rotZ degrees +
-    // skewX, summed over trees. False = identity (the common case).
-    bool fieldXf(int pn, double sec, float& rx, float& ry, float& rz,
-                 float& sk);
+    // Draw the live synthetic Player through its locally-centred field source.
+    // True means a live Player existed, including when its own state hid it.
+    bool drawPlayer(Renderer& R, int pn, double sec, double beat);
     bool playerMods(int pn, double sec, float beat, Mods& mods, PostFx& fx,
                     float& mx, float& my, float& mz) const;
     int livePlayerCount() const;

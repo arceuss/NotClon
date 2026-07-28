@@ -991,7 +991,7 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
                                      float r, float g, float b, float a) {
     if (pn < 1 || pn > 2 || !playerSourceTex_[pn - 1]) return;
     const float virtW = 480.0f * float(W) / float(H);
-    drawActorQuad3D(virtW * 0.5f + x, 240.0f + y, z, 0, 0,
+    drawActorQuad3D(x, y, z, 0, 0,
                     virtW * zoomX, 480.0f * zoomY,
                     rotXDeg, rotYDeg, rotZDeg, skewX,
                     fovDeg, vanishX, vanishY, 0, 0, 0, 0,
@@ -1134,45 +1134,6 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
             F.m[10] = zoom *  cx_;
             F.m[15] = 1.0f;
             mvpEff = mat_mul(baseMvp, F);
-        }
-    }
-
-    // The chart-side notefield handle: Plr(pn):rotationx/y/z and skewx from
-    // the actor layer, folded in AFTER tilt/mini/wag so the chart's transform
-    // composes over the modchart's, matching SM where both land on the same
-    // notefield actor. Identity when no chart drives a proxy -- which is
-    // every chart until one calls Plr() -- so the pinned baselines never see
-    // this branch.
-    if (actors_) {
-        float prx = 0, pry = 0, prz = 0, psk = 0;
-        if (actors_->fieldXf(plr, fieldSec_, prx, pry, prz, psk)) {
-            // SM screen space is Y-down; ours is Y-up. Conjugating by
-            // diag(1,-1,1) negates the X and Z rotations and the skew term.
-            const float ax = -prx * 3.14159265f / 180.0f;
-            const float ay =  pry * 3.14159265f / 180.0f;
-            const float az = -prz * 3.14159265f / 180.0f;
-            Mat4 R{};
-            const float cX = cosf(ax), sX = sinf(ax);
-            const float cY = cosf(ay), sY = sinf(ay);
-            const float cZ = cosf(az), sZ = sinf(az);
-            // Rz * Ry * Rx, SM's actor rotation order.
-            R.m[0]  =  cZ * cY;
-            R.m[1]  =  sZ * cY;
-            R.m[2]  = -sY;
-            R.m[4]  =  cZ * sY * sX - sZ * cX;
-            R.m[5]  =  sZ * sY * sX + cZ * cX;
-            R.m[6]  =  cY * sX;
-            R.m[8]  =  cZ * sY * cX + sZ * sX;
-            R.m[9]  =  sZ * sY * cX - cZ * sX;
-            R.m[10] =  cY * cX;
-            R.m[15] = 1.0f;
-            if (psk != 0.0f) {
-                Mat4 S{};
-                S.m[0] = S.m[5] = S.m[10] = S.m[15] = 1.0f;
-                S.m[4] = -psk;                   // x += skew * y, sign per above
-                R = mat_mul(R, S);
-            }
-            mvpEff = mat_mul(mvpEff, R);
         }
     }
 
@@ -1607,7 +1568,7 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
     const float bpm = float(chart.bpmAt(beat));
     actorBeat_ = beat;                     // the actor effect clock
-    fieldSec_ = songTime;                  // the field-proxy eval clock
+    fieldSec_ = songTime;                  // live Lua PlayerOptions clock
     // Canonical SM5 Lua mutates ModsLevel_Song from its self-queued update
     // command. Step it before evaluating either field so this frame sees the
     // same PlayerOptions values the actor commands just produced.
@@ -1626,10 +1587,12 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     float& fieldX = E.fieldX; float& fieldY = E.fieldY;
     Mat4& mvpEff = E.mvpEff;
 
-    // A Player/NoteField reached through ActorProxy is a renderer-owned source,
-    // not an Actor child. Render each live field once to a transparent full-
-    // screen texture; any number of proxies can then place it into an AFT.
-    if (actors_ && actors_->livePlayerCount() > 0) {
+    // A NoteField reached through Player/ActorProxy is a renderer-owned local
+    // source. Keep the two-player half-width projection, but centre each field
+    // in its own transparent texture so Player and proxy transforms operate on
+    // the same local origin SM5 uses.
+    const int actorPlayers = actors_ ? actors_->livePlayerCount() : 0;
+    if (actorPlayers > 0) {
         const int sourceFieldW = twoFields ? W / 2 : W;
         for (int pn = 1; pn <= (twoFields ? 2 : 1); ++pn) {
             glBindFramebuffer(GL_FRAMEBUFFER, playerSourceFbo_[pn - 1]);
@@ -1637,9 +1600,8 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
             glClearColor(0, 0, 0, 0);
             glClear(GL_COLOR_BUFFER_BIT);
             FieldEval& source = pn == 1 ? E : E2;
-            const int x = pn == 1 ? 0 : sourceFieldW;
-            const int w = pn == 1 ? sourceFieldW : W - sourceFieldW;
-            drawField(chart, beat, o, source, x, w,
+            const int sourceX = (W - sourceFieldW) / 2;
+            drawField(chart, beat, o, source, sourceX, sourceFieldW,
                       scrollNow, songTime, nowSec, bpm);
         }
     }
@@ -1689,14 +1651,21 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    // Keep the two half-width camera projections, but draw them through a full
-    // viewport so transformed fields can overlap instead of being seam-clipped.
+    // A chart that touches Player/NoteField state draws the same centred local
+    // sources used by ActorProxy, preserving target visibility and every Player
+    // transform. Other charts keep the direct path and pinned output.
     const int fieldW = twoFields ? W / 2 : W;
-    drawField(chart, beat, o, E, 0, fieldW,
-              scrollNow, songTime, nowSec, bpm);
-    if (twoFields) {
-        drawField(chart, beat, o, E2, fieldW, W - fieldW,
+    const bool drewP1 = actorPlayers > 0 &&
+                        actors_->drawPlayer(*this, 1, songTime, beat);
+    if (!drewP1)
+        drawField(chart, beat, o, E, 0, fieldW,
                   scrollNow, songTime, nowSec, bpm);
+    if (twoFields) {
+        const bool drewP2 = actorPlayers > 1 &&
+                            actors_->drawPlayer(*this, 2, songTime, beat);
+        if (!drewP2)
+            drawField(chart, beat, o, E2, fieldW, W - fieldW,
+                      scrollNow, songTime, nowSec, bpm);
     }
     glViewport(0, 0, W, H);
     // #FGCHANGES actor folders: in front of the playfield. Drawn INSIDE fbo_,

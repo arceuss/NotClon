@@ -934,6 +934,23 @@ void inferSheetGrid(Actor& a) {
     }
 }
 
+void ensureDefaultSpriteStates(Actor& a) {
+    if (a.type != "Sprite") return;
+    inferSheetGrid(a);
+    if (!a.spriteFrames.empty()) return;
+    const int states = a.sheetCols * a.sheetRows;
+    for (int i = 0; i < states; ++i) {
+        a.spriteFrames.push_back(i);
+        a.spriteDelays.push_back(0.1f);
+        a.spriteTotal += 0.1f;
+    }
+}
+
+void finalizeSpriteStates(Actor& a) {
+    ensureDefaultSpriteStates(a);
+    for (auto& child : a.children) finalizeSpriteStates(*child);
+}
+
 // Build an Actor from the table returned by a stock SM5 Def.* constructor.
 // Command functions are referenced directly, preserving their file-local
 // closures; converting them back to strings would sever every module upvalue.
@@ -991,9 +1008,14 @@ bool buildLuaActor(lua_State* L, int table, Actor& a, LuaHost& lua,
             }
             lua_pop(L, 1);
         }
-        inferSheetGrid(a);
     }
     lua_pop(L, 1);
+
+    // Sprite::SetTexture calls LoadStatesFromTexture when no Frames table was
+    // supplied: one sequential state per filename-declared texture cell, each
+    // held for 0.1 seconds. This is also what makes animate(false)+setstate(n)
+    // select one slice from assets such as "fuck 32x1.png".
+    ensureDefaultSpriteStates(a);
 
     std::vector<int> childKeys;
     lua_pushnil(L);
@@ -1116,7 +1138,11 @@ ActorTree::ActorTree() {
         Actor& player = plrProxy_[pn];
         player.type = "ActorFrame";
         player.name = pn == 0 ? "PlayerP1" : "PlayerP2";
-        player.playerField = pn + 1;
+        auto field = std::make_unique<Actor>();
+        field->type = "ActorFrame";
+        field->name = "NoteField";
+        field->playerField = pn + 1;
+        player.children.push_back(std::move(field));
         for (const char* name : {"Judgment", "Combo"}) {
             auto child = std::make_unique<Actor>();
             child->type = "ActorFrame";
@@ -1177,9 +1203,18 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
     screen_.onBase = ActorState{};
     screen_.segs.clear();
     screen_.effect = Effect{};
-    for (Actor& player : plrProxy_) {
-        player.base = ActorState{};
-        player.onBase = ActorState{};
+    const float virtW = dispH_ > 0 ? 480.0f * float(dispW_) / float(dispH_)
+                                  : 640.0f;
+    for (int pn = 0; pn < 2; ++pn) {
+        Actor& player = plrProxy_[pn];
+        ActorState initial;
+        // SM5 fallback gameplay placement: the Player is screen-positioned;
+        // its NoteField child is local to that point. The chart overwrites
+        // these values whenever it moves or proxies the fields.
+        initial.x = floorf(virtW * (pn == 0 ? 0.85f : 2.15f) / 3.0f);
+        initial.y = 240.0f;
+        player.base = initial;
+        player.onBase = initial;
         player.segs.clear();
         player.effect = Effect{};
         for (auto& child : player.children) {
@@ -1250,6 +1285,7 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
         if (!xmlParse(txt, i, root)) { err = "cannot parse " + path; return false; }
         root_ = std::make_unique<Actor>();
         buildActor(root, *root_, dir, startSec, &warn);
+        finalizeSpriteStates(*root_);
         std::map<std::string, int> cache;
         compileActorLua(*root_, *lua_, cache, &warn);
     }
@@ -1341,6 +1377,14 @@ bool ActorTree::playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                            float& mx, float& my, float& mz) const {
     return canonicalSource_ && lua_ &&
            lua_->playerMods(pn - 1, beat, mods, fx, mx, my, mz);
+}
+
+bool ActorTree::playerState(int pn, double sec, double beat,
+                            ActorState& out) const {
+    if (pn < 1 || pn > 2 || !root_) return false;
+    out = evalActor(plrProxy_[pn - 1], sec);
+    applyEffect(plrProxy_[pn - 1], out, sec, beat);
+    return true;
 }
 
 int ActorTree::livePlayerCount() const {
@@ -1478,27 +1522,38 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         glGetIntegerv(GL_VIEWPORT, viewport);
         glBindFramebuffer(GL_FRAMEBUFFER, a.aftFbo);
         glViewport(0, 0, a.aftW, a.aftH);
-        GLbitfield clear = a.aftDepth ? GL_DEPTH_BUFFER_BIT : 0;
-        if (!a.aftPreserve) clear |= GL_COLOR_BUFFER_BIT;
-        if (clear) {
+        if (!a.aftPreserve) {
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glDepthMask(GL_TRUE);
             glClearColor(0, 0, 0, 0);
-            glClear(clear);
+            glClear(GL_COLOR_BUFFER_BIT |
+                    (a.aftDepth ? GL_DEPTH_BUFFER_BIT : 0));
         }
-        for (auto& c : a.children) drawActor(R, *c, sec, beat, w);
+        // RageTextureRenderTarget::BeginRenderingTo resets the world and camera
+        // before ActorFrameTexture traverses its children. Keep the inherited
+        // colour, but never leak the AFT actor's spatial transform into them.
+        ActorState targetRoot;
+        targetRoot.r = w.r; targetRoot.g = w.g;
+        targetRoot.b = w.b; targetRoot.a = w.a;
+        for (auto& c : a.children) drawActor(R, *c, sec, beat, targetRoot);
         glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFbo));
         glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         return;
     }
 
     if (a.proxyTarget) {
-        if (a.proxyTarget->playerField > 0)
-            R.drawActorPlayerSource(a.proxyTarget->playerField,
-                w.x, w.y, w.z, w.zoomX, w.zoomY,
-                w.rotX, w.rotY, w.rotZ, w.skewX,
-                w.projFov, w.vanishX, w.vanishY,
-                w.r, w.g, w.b, w.a);
-        else
-            drawActor(R, *a.proxyTarget, sec, beat, w, true);
+        // ActorProxy::DrawPrimitives calls the target's ordinary Draw() below
+        // the proxy matrix, temporarily overriding only target visibility.
+        drawActor(R, *a.proxyTarget, sec, beat, w, true);
+        return;
+    }
+
+    if (a.playerField > 0) {
+        R.drawActorPlayerSource(a.playerField,
+            w.x, w.y, w.z, w.zoomX, w.zoomY,
+            w.rotX, w.rotY, w.rotZ, w.skewX,
+            w.projFov, w.vanishX, w.vanishY,
+            w.r, w.g, w.b, w.a);
         return;
     }
 
@@ -1701,6 +1756,15 @@ void ActorTree::draw(Renderer& R, double sec) {
     g_namedTex = nullptr;
 }
 
+bool ActorTree::drawPlayer(Renderer& R, int pn, double sec, double beat) {
+    if (!root_ || pn < 1 || pn > livePlayerCount() || sec < startSec_)
+        return false;
+    ActorState parent = evalActor(screen_, sec);
+    applyEffect(screen_, parent, sec, beat);
+    drawActor(R, plrProxy_[pn - 1], sec, beat, parent);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // LuaHost -- vendored Lua 5.1.5, opened with the shim globals charts expect.
 // ---------------------------------------------------------------------------
@@ -1878,6 +1942,14 @@ struct LuaHost::CallState {
 };
 
 void LuaHost::pushActor(Actor& actor) {
+    if (tree_) {
+        if (&actor == &tree_->plrProxy(0))
+            requestedPlayers_ = std::max(requestedPlayers_, 1);
+        else if (&actor == &tree_->plrProxy(1))
+            requestedPlayers_ = std::max(requestedPlayers_, 2);
+        else if (actor.playerField > 0)
+            requestedPlayers_ = std::max(requestedPlayers_, actor.playerField);
+    }
     LuaActorRef* ref = static_cast<LuaActorRef*>(lua_newuserdata(L_, sizeof(LuaActorRef)));
     ref->actor = &actor;
     ref->host = this;
@@ -2014,12 +2086,6 @@ int LuaHost::actorCall(lua_State* L) {
             }
             lua_getglobal(L, "ABSORB");
             lua_call(L, 0, 1);
-            return 1;
-        }
-        if (host->tree_ && strcmp(name, "NoteField") == 0 &&
-            (actor == &host->tree_->plrProxy(0) ||
-             actor == &host->tree_->plrProxy(1))) {
-            host->pushActor(*actor);
             return 1;
         }
         for (auto& child : actor->children) {
@@ -2953,21 +3019,14 @@ bool ActorLayer::loadFromSm(const std::string& smPath, const std::string& songDi
 }
 
 
-bool ActorLayer::fieldXf(int pn, double sec, float& rx, float& ry, float& rz,
-                         float& sk) {
-    rx = ry = rz = sk = 0.0f;
-    bool any = false;
-    for (Slot& sl : trees_) {
-        if (!sl.tree || !sl.tree->ok()) continue;
-        const ActorState st = evalActor(sl.tree->plrProxy(pn - 1), sec);
-        // Summed across trees: two charts driving one field add, the same way
-        // two mod entries on one knob would.
-        if (st.rotX != 0 || st.rotY != 0 || st.rotZ != 0 || st.skewX != 0) {
-            rx += st.rotX; ry += st.rotY; rz += st.rotZ; sk += st.skewX;
-            any = true;
-        }
-    }
-    return any;
+bool ActorLayer::drawPlayer(Renderer& R, int pn, double sec, double beat) {
+    Slot* active = nullptr;
+    for (Slot& sl : trees_)
+        if (sl.tree && sl.tree->ok() && sec >= sl.e.startSec &&
+            sl.tree->livePlayerCount() >= pn &&
+            (!active || sl.e.startSec >= active->e.startSec))
+            active = &sl;
+    return active && active->tree->drawPlayer(R, pn, sec, beat);
 }
 
 bool ActorLayer::playerMods(int pn, double sec, float beat, Mods& mods,
