@@ -577,7 +577,12 @@ int main(int argc, char** argv) {
         // Two playfields whenever the document says so -- from a `#players 2`
         // header or from a drained modfile that drove player 2. One entry
         // list, two docs differing only in the player filter.
-        if (opt.doc == &doc && doc.players == 2) {
+        if (actors.livePlayerCount() >= 2) {
+            doc2 = doc;                 // pointer is the two-field layout signal
+            opt.doc2 = &doc2;           // live Lua PlayerOptions override its values
+            printf("modchart: two live SM5 playfields%c", 10);
+        }
+        else if (opt.doc == &doc && doc.players == 2) {
             doc.forPlayer = 1;
             doc.rebuild(chart);
             doc2 = doc;

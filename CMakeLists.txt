@@ -39,10 +39,9 @@ endif()
 #   https://www.lua.org/ftp/lua-5.1.5.tar.gz
 #   sha256 2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333
 #
-# Upstream on purpose. StepMania-4's src/lua-5.1 is 5.1.1 and 53 of its files
-# differ from 5.1.5 -- mostly four upstream point releases, but the point is
-# that you cannot tell those from an engine patch by looking, and nothing here
-# needs SM's variant. COPYRIGHT ships alongside.
+# Lua itself stays at upstream 5.1.5. The lexer/parser carry StepMania 5.1's
+# small `cmd(...)` extension because canonical actor Lua uses that syntax;
+# copying the whole engine fork would also pull in unrelated changes.
 #
 # NOT NotITG/Program/lua50.dll: every binary in that folder is x86 and NotClon
 # is x86-64, so it cannot be loaded in-process at all -- an ABI wall, not a
@@ -60,6 +59,15 @@ if(MSVC OR WIN32)
   target_compile_definitions(notclon_lua PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 set_target_properties(notclon_lua PROPERTIES C_STANDARD 99)
+
+enable_testing()
+add_executable(lua-cmd-test tests/lua_cmd_test.cpp)
+target_link_libraries(lua-cmd-test PRIVATE notclon_lua)
+add_test(NAME lua-cmd COMMAND lua-cmd-test)
+
+add_executable(sm-timing-test tests/sm_timing_test.cpp)
+target_include_directories(sm-timing-test PRIVATE src)
+add_test(NAME sm-timing COMMAND sm-timing-test)
 
 # ---------------------------------------------------------------------------
 # The shared render core. Both binaries link this so a frame has exactly one
@@ -84,19 +92,26 @@ if(WIN32)
   target_link_libraries(notclon_core PUBLIC opengl32 gdi32 user32)
 endif()
 
+add_executable(lua-message-test tests/lua_message_test.cpp)
+target_link_libraries(lua-message-test PRIVATE notclon_core)
+add_test(NAME lua-message COMMAND lua-message-test)
+
+add_executable(actor-runtime-test tests/actor_runtime_test.cpp)
+target_link_libraries(actor-runtime-test PRIVATE notclon_core)
+add_test(NAME actor-runtime COMMAND actor-runtime-test)
+
 # Assets ship beside the executables: the binaries resolve <exe>/assets/ at
 # runtime, so build/ is a complete, movable install -- zip it and it runs.
-function(nc_copy_assets tgt)
-  add_custom_command(TARGET ${tgt} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:${tgt}>/assets)
-endfunction()
+add_custom_target(notclon_assets ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          ${CMAKE_SOURCE_DIR}/assets ${CMAKE_BINARY_DIR}/assets
+  COMMENT "Copying runtime assets")
 
 # ---------------------------------------------------------------------------
 # notclon -- offline renderer, pipes to ffmpeg
 # ---------------------------------------------------------------------------
 add_executable(notclon src/main.cpp)
-nc_copy_assets(notclon)
+add_dependencies(notclon notclon_assets)
 target_link_libraries(notclon PRIVATE notclon_core)
 
 # ---------------------------------------------------------------------------
@@ -116,7 +131,7 @@ add_library(imgui STATIC
 target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${SDL3_ROOT}/include)
 
 add_executable(notclon-editor editor/main.cpp editor/audio.cpp)
-nc_copy_assets(notclon-editor)
+add_dependencies(notclon-editor notclon_assets)
 target_link_libraries(notclon-editor PRIVATE notclon_core imgui
                       ${SDL3_ROOT}/lib/x64/SDL3.lib)
 target_include_directories(notclon-editor PRIVATE ${SDL3_ROOT}/include)
@@ -126,11 +141,10 @@ add_custom_command(TARGET notclon-editor POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${SDL3_ROOT}/lib/x64/SDL3.dll $<TARGET_FILE_DIR:notclon-editor>)
 
-foreach(t notclon_core notclon notclon-editor imgui notclon_lua)
+foreach(t notclon_core notclon notclon-editor imgui notclon_lua lua-cmd-test sm-timing-test lua-message-test actor-runtime-test)
   if(MSVC)
     target_compile_options(${t} PRIVATE /O2)
   else()
     target_compile_options(${t} PRIVATE -O2 -Wno-deprecated-declarations)
   endif()
 endforeach()
-

@@ -53,6 +53,8 @@ struct Mods {
     float mini = 0;          // field zoom, 1 - 0.5*mini (Player.cpp:723)
     // xmod. 1.0 is 1x -- the one knob whose neutral value is not 0.
     float scrollspeed = 1.0f;
+    // Multiplies the note draw range behind the receptors by 1+value.
+    float drawSizeBack = 0;
     // m_fPerspectiveTilt in [-1, +1]: hallway is -tilt, distant is +tilt,
     // overhead drives it to 0 (PlayerOptions.cpp:349-353). One underlying
     // value, which is why the importer maps all three names onto this knob.
@@ -102,7 +104,7 @@ struct Mods {
     float bumpyPeriod = 0;
     float wavePeriod = 0;
     float tornadoPeriod = 0, tornadoOffsetP = 0;
-    float confusionOffset = 0, confusionYOffset = 0;
+    float confusionOffset = 0, confusionXOffset = 0, confusionYOffset = 0;
     // New periodic shapes, same input as drunk/bumpy but a different function:
     // triangle, ramp, step and quantised-sine (ArrowEffects.cpp:766-811).
     float zigzag = 0, zigzagPeriod = 0, zigzagOffset = 0;
@@ -119,14 +121,16 @@ struct Mods {
     float beatOffset = 0, beatMult = 0;
     float beaty = 0, beatyOffset = 0, beatyMult = 0;
     float beatz = 0, beatzOffset = 0, beatzMult = 0;
-    // Per-column Y displacement (PlayerOptions.cpp:1105-1111, m_fMovesY).
+    // Per-column movement (ArrowEffects::GetMoveX/GetMoveY).
     //
     // INDEX BASE: NotITG spells these movey0..movey<N-1> (column N), SM5
     // spells the same array movey1..movey<N> -- `ssprintf("movey%d", i+1)`.
     // NotClon reads NotITG-lineage modcharts, so movey0 is column 0 here. A
     // chart written against SM5's spelling is off by one, which is why the
     // SM5 ports of such charts rewrite these rows.
+    float movexCol[NUM_LANES] = {0, 0, 0, 0, 0};
     float moveyCol[NUM_LANES] = {0, 0, 0, 0, 0};
+    float tinyCol[NUM_LANES] = {0, 0, 0, 0, 0};
     // Z-axis twins of the periodic shapes (ArrowEffects.cpp:1200-1290). Same
     // functions, applied to depth instead of sideways.
     float zigzagZ = 0, zigzagZPeriod = 0;
@@ -308,6 +312,8 @@ inline float GetXPos(const Mods& m, int col, float yOffset, float songTime,
         if (amount != 0.0f)
             x += m.beat * (amount * sinf(yOffset / 15.0f + PI_F / 2.0f));
     }
+    if (col >= 0 && col < NUM_LANES && m.movexCol[col] != 0.0f)
+        x += m.movexCol[col] * ARROW_SIZE;
     return x;
 }
 
@@ -475,12 +481,16 @@ inline float GetYPosBump(const Mods& m, int col, float yOffset,
 // function of yOffset, so the gem tumbles end-over-end as it travels; the
 // input is the post-ApplyYMods offset (NoteDisplay.cpp:1023).
 inline float GetRotationX(const Mods& m, float yOffset) {
-    return (m.roll != 0.0f) ? m.roll * yOffset * 0.5f : 0.0f;
+    float r = m.confusionXOffset * (180.0f / PI_F);
+    if (m.roll != 0.0f) r += m.roll * yOffset * 0.5f;
+    return r;
 }
 
 // twirl -- ArrowEffects.cpp:354-362: same law as roll, about Y (:1025).
 inline float GetRotationY(const Mods& m, float yOffset) {
-    return (m.twirl != 0.0f) ? m.twirl * yOffset * 0.5f : 0.0f;
+    float r = m.confusionYOffset * (180.0f / PI_F);
+    if (m.twirl != 0.0f) r += m.twirl * yOffset * 0.5f;
+    return r;
 }
 
 // dizzy -- ArrowEffects.cpp:364-378: (noteBeat - songBeat) * dizzy is
@@ -512,8 +522,10 @@ inline float GetRotationZ(const Mods& m, float noteBeat, float songBeat,
 
 // tiny's per-note zoom, SM5 ArrowEffects.cpp:813-818. (mini is deliberately
 // NOT here: it is the whole-field transform in drawFrame, Player.cpp:723.)
-inline float GetZoom(const Mods& m) {
-    return (m.tiny != 0.0f) ? powf(0.5f, m.tiny) : 1.0f;
+inline float GetZoom(const Mods& m, int col = -1) {
+    float tiny = m.tiny;
+    if (col >= 0 && col < NUM_LANES) tiny += m.tinyCol[col];
+    return (tiny != 0.0f) ? powf(0.5f, tiny) : 1.0f;
 }
 
 // tiny's column pull-together, SM5 ArrowEffects.cpp:561-566: the whole

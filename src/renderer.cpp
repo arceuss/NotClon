@@ -93,26 +93,33 @@ const char* ACTOR_VS = R"(#version 330
 layout(location=0) in vec2 aPos;
 layout(location=1) in vec2 aUV;
 layout(location=2) in vec4 aCol;
-out vec2 vUV; out vec4 vCol;
+layout(location=3) in vec2 aLocal;
+out vec2 vUV; out vec4 vCol; out vec2 vLocal;
 uniform float uDepth;
 // Half the virtual screen. Height is pinned at 480 (240 here); width follows
 // the output aspect -- SM5 and current NotITG both run widescreen this way,
 // and charts scale themselves by SCREEN_WIDTH/640. Defaults keep 4:3.
 uniform vec2 uVirtHalf = vec2(320.0, 240.0);
 void main() {
-    vUV = aUV; vCol = aCol;
+    vUV = aUV; vCol = aCol; vLocal = aLocal;
     gl_Position = vec4(aPos.x / uVirtHalf.x - 1.0, 1.0 - aPos.y / uVirtHalf.y, uDepth, 1.0);
 }
 )";
 
 const char* ACTOR_FS = R"(#version 330
-in vec2 vUV; in vec4 vCol;
+in vec2 vUV; in vec4 vCol; in vec2 vLocal;
 out vec4 oCol;
 uniform sampler2D uTex;
 uniform float uHasTex;
+uniform vec2 uFadeX;
+uniform vec2 uFadeY;
 void main() {
     vec4 c = vCol;
     if (uHasTex > 0.5) c *= texture(uTex, vUV);
+    if (uFadeX.x > 0.0) c.a *= clamp(vLocal.x / uFadeX.x, 0.0, 1.0);
+    if (uFadeX.y > 0.0) c.a *= clamp((1.0-vLocal.x) / uFadeX.y, 0.0, 1.0);
+    if (uFadeY.x > 0.0) c.a *= clamp(vLocal.y / uFadeY.x, 0.0, 1.0);
+    if (uFadeY.y > 0.0) c.a *= clamp((1.0-vLocal.y) / uFadeY.y, 0.0, 1.0);
     // SM's fixed-function alpha test: glAlphaFunc(GL_GREATER, 0.01)
     // (RageDisplay_OGL.cpp:1881). It applies to MASK draws too -- that is what
     // lets a mostly-transparent mask image stamp depth only where it has ink.
@@ -234,14 +241,20 @@ void Renderer::buildCamera() {
     float pitch = ch::CAM_PITCH_DEG * 3.14159265f / 180.0f;
     float fwd[3] = {0.0f, -sinf(pitch), cosf(pitch)};
     float at[3]  = {eye[0] + fwd[0]*10, eye[1] + fwd[1]*10, eye[2] + fwd[2]*10};
+    const Mat4 view = mat_lookAt(eye, at);
     mvp_ = mat_mul(mat_perspective(ch::CAM_FOV, float(W)/float(H),
                                    ch::CAM_NEAR, ch::CAM_FAR),
-                   mat_lookAt(eye, at));
+                   view);
+    mvp2_ = mat_mul(mat_perspective(ch::CAM_FOV, float(W)*0.5f/float(H),
+                                    ch::CAM_NEAR, ch::CAM_FAR),
+                    view);
     // Unity is left-handed; this right-handed lookAt puts +x on the left.
     // Negating clip-space x once lets every Unity coordinate be used verbatim
     // instead of sprinkling sign flips through the geometry.
-    mvp_.m[0] = -mvp_.m[0]; mvp_.m[4] = -mvp_.m[4];
-    mvp_.m[8] = -mvp_.m[8]; mvp_.m[12] = -mvp_.m[12];
+    for (Mat4* m : {&mvp_, &mvp2_}) {
+        m->m[0] = -m->m[0]; m->m[4] = -m->m[4];
+        m->m[8] = -m->m[8]; m->m[12] = -m->m[12];
+    }
 }
 
 void Renderer::makeFbos() {
@@ -273,6 +286,7 @@ void Renderer::makeFbos() {
     // clip every frame to a corner and read back black.
     mk(postFbo_, postTex_);
     mk(fxFbo_, fxTex_);            // --fxshader's intermediate; see renderer.h
+    for (int pn = 0; pn < 2; ++pn) mk(playerSourceFbo_[pn], playerSourceTex_[pn]);
 }
 
 void Renderer::destroyFbos() {
@@ -281,6 +295,11 @@ void Renderer::destroyFbos() {
     if (postFbo_) { glDeleteFramebuffers(1, &postFbo_); postFbo_ = 0; }
     if (fxFbo_)   { glDeleteFramebuffers(1, &fxFbo_);   fxFbo_ = 0; }
     if (fxTex_)   { glDeleteTextures(1, &fxTex_);       fxTex_ = 0; }
+    for (int pn = 0; pn < 2; ++pn) {
+        if (playerSourceFbo_[pn]) glDeleteFramebuffers(1, &playerSourceFbo_[pn]);
+        if (playerSourceTex_[pn]) glDeleteTextures(1, &playerSourceTex_[pn]);
+        playerSourceFbo_[pn] = playerSourceTex_[pn] = 0;
+    }
     if (colorTex_) { glDeleteTextures(1, &colorTex_); colorTex_ = 0; }
     if (postTex_)  { glDeleteTextures(1, &postTex_);  postTex_ = 0; }
 }
@@ -315,6 +334,25 @@ bool Renderer::init(int w, int h, const std::string& A) {
     texFretH_   = gl_loadTex(A + "frets/spr_newtargets_head_strip6.png", false);
     texLift_    = gl_loadTex(A + "frets/spr_targets_lift.png", false);
     texHLight_  = gl_loadTex(A + "frets/Head_Lights.png", false);
+    actorFont_  = gl_loadTex(A + "fonts/_eurostile normal (mipmaps) 16x16.png", false);
+    int rawFontWidth[256];
+    for (int& width : rawFontWidth) width = 32;
+    int addToWidths = 0, advanceExtra = 1;
+    if (FILE* f = fopen((A + "fonts/_eurostile normal.ini").c_str(), "rb")) {
+        char line[256];
+        while (fgets(line, sizeof line, f)) {
+            int key = 0, value = 0;
+            if (sscanf(line, "AddToAllWidths=%d", &value) == 1) addToWidths = value;
+            else if (sscanf(line, "AdvanceExtraPixels=%d", &value) == 1) advanceExtra = value;
+            else if (sscanf(line, "%d=%d", &key, &value) == 2 && key >= 0 && key < 256)
+                rawFontWidth[key] = value;
+        }
+        fclose(f);
+    }
+    for (int i = 0; i < 256; ++i) {
+        actorFontWidth_[i] = rawFontWidth[i] + addToWidths;
+        actorFontAdvance_[i] = actorFontWidth_[i] + advanceExtra;
+    }
 
     prog_ = gl_program(SCENE_VS, SCENE_FS, "scene");
     post_ = gl_program(POST_VS, POST_FS, "post");
@@ -334,10 +372,12 @@ bool Renderer::init(int w, int h, const std::string& A) {
 
     glGenVertexArrays(1, &avao_); glBindVertexArray(avao_);
     glGenBuffers(1, &avbo_); glBindBuffer(GL_ARRAY_BUFFER, avbo_);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(2*sizeof(float)));
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(4*sizeof(float)));
-    glEnableVertexAttribArray(0); glEnableVertexAttribArray(1); glEnableVertexAttribArray(2);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 10*sizeof(float), (void*)0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 10*sizeof(float), (void*)(2*sizeof(float)));
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 10*sizeof(float), (void*)(4*sizeof(float)));
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, 10*sizeof(float), (void*)(8*sizeof(float)));
+    glEnableVertexAttribArray(0); glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(2); glEnableVertexAttribArray(3);
 
     const float quad[6] = {-1,-1, 3,-1, -1,3};
     glGenVertexArrays(1, &qvao_); glBindVertexArray(qvao_);
@@ -760,21 +800,71 @@ void Renderer::drawActorQuad(float cx, float cy, float w, float h, float rotZDeg
                              float r, float g, float b, float a,
                              GLuint tex, int blend, bool zWrite, bool zTest,
                              bool clearZ, float u0, float v0, float u1, float v1) {
+    drawActorQuad3D(cx, cy, 0.0f, 0.0f, 0.0f, w, h,
+                    0.0f, 0.0f, rotZDeg, 0.0f,
+                    -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                    r, g, b, a, tex, blend, zWrite, zTest, clearZ,
+                    u0, v0, u1, v1);
+}
+
+void Renderer::drawActorQuad3D(float cx, float cy, float cz,
+                               float localX, float localY, float w, float h,
+                               float rotXDeg, float rotYDeg, float rotZDeg,
+                               float skewX, float fovDeg,
+                               float vanishX, float vanishY,
+                               float fadeLeft, float fadeRight,
+                               float fadeTop, float fadeBottom,
+                               float r, float g, float b, float a,
+                               GLuint tex, int blend, bool zWrite, bool zTest,
+                               bool clearZ, float u0, float v0,
+                               float u1, float v1) {
     // blend,noeffect writes depth with NO colour, so it must still draw at
     // alpha 0 -- that is the whole point of a mask actor.
     if (a <= 0.0f && blend != 2) return;
     const float hw = w * 0.5f, hh = h * 0.5f;
-    const float th = rotZDeg * 3.14159265f / 180.0f;
-    const float c = cosf(th), s2 = sinf(th);
-    auto P = [&](float dx, float dy, float u, float v, float* o) {
-        o[0] = cx + dx * c - dy * s2;
-        o[1] = cy + dx * s2 + dy * c;
+    const float rx = rotXDeg * 3.14159265f / 180.0f;
+    const float ry = rotYDeg * 3.14159265f / 180.0f;
+    const float rz = rotZDeg * 3.14159265f / 180.0f;
+    const float cX = cosf(rx), sX = sinf(rx);
+    const float cY = cosf(ry), sY = sinf(ry);
+    const float cZ = cosf(rz), sZ = sinf(rz);
+    const float m00 = cZ*cY;
+    const float m01 = cZ*sY*sX+sZ*cX;
+    const float m02 = cZ*sY*cX-sZ*sX;
+    const float m10 = -sZ*cY;
+    const float m11 = -sZ*sY*sX+cZ*cX;
+    const float m12 = -sZ*sY*cX-cZ*sX;
+    const float m20 = -sY;
+    const float m21 = cY*sX;
+    const float m22 = cY*cX;
+    const float virtW = 480.0f * float(W) / float(H);
+    const float cameraDist = fovDeg > 0.0f
+        ? virtW * 0.5f / tanf(fovDeg * 3.14159265f / 360.0f) : 0.0f;
+    auto P = [&](float dx, float dy, float u, float v,
+                 float lx, float ly, float* o) {
+        float x = localX + dx;
+        float y = localY + dy;
+        const float z = 0.0f;
+        x += skewX * y;
+        float px = cx + x*m00 + y*m10 + z*m20;
+        float py = cy + x*m01 + y*m11 + z*m21;
+        const float pz = cz + x*m02 + y*m12 + z*m22;
+        if (fovDeg > 0.0f) {
+            const float denom = cameraDist - pz;
+            const float scale = fabsf(denom) > 1e-5f ? cameraDist / denom : 1.0f;
+            px = vanishX + (px - vanishX) * scale;
+            py = vanishY + (py - vanishY) * scale;
+        }
+        o[0] = px;
+        o[1] = py;
         o[2] = u; o[3] = v;
         o[4] = r; o[5] = g; o[6] = b; o[7] = a;
+        o[8] = lx; o[9] = ly;
     };
-    float q[6][8];
-    P(-hw, -hh, u0, v0, q[0]); P(hw, -hh, u1, v0, q[1]); P(hw, hh, u1, v1, q[2]);
-    P(-hw, -hh, u0, v0, q[3]); P(hw,  hh, u1, v1, q[4]); P(-hw, hh, u0, v1, q[5]);
+    float q[6][10];
+    P(-hw, -hh, u0, v0, 0, 0, q[0]); P(hw, -hh, u1, v0, 1, 0, q[1]);
+    P(hw, hh, u1, v1, 1, 1, q[2]);   P(-hw, -hh, u0, v0, 0, 0, q[3]);
+    P(hw, hh, u1, v1, 1, 1, q[4]);   P(-hw, hh, u0, v1, 0, 1, q[5]);
 
     glUseProgram(actor_);
     glBindVertexArray(avao_);
@@ -824,6 +914,8 @@ void Renderer::drawActorQuad(float cx, float cy, float w, float h, float rotZDeg
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(glGetUniformLocation(actor_, "uTex"), 0);
     glUniform1f(glGetUniformLocation(actor_, "uHasTex"), tex ? 1.0f : 0.0f);
+    glUniform2f(glGetUniformLocation(actor_, "uFadeX"), fadeLeft, fadeRight);
+    glUniform2f(glGetUniformLocation(actor_, "uFadeY"), fadeTop, fadeBottom);
     glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     if (blend == 2) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -834,6 +926,77 @@ void Renderer::drawActorQuad(float cx, float cy, float w, float h, float rotZDeg
     glUseProgram(prog_);
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+}
+
+void Renderer::drawActorText(const std::string& text,
+                             float cx, float cy, float cz,
+                             float zoomX, float zoomY,
+                             float rotXDeg, float rotYDeg, float rotZDeg,
+                             float skewX, float fovDeg,
+                             float vanishX, float vanishY,
+                             float r, float g, float b, float a,
+                             int blend, bool zWrite, bool zTest, bool clearZ) {
+    if (!actorFont_.id || text.empty()) return;
+
+    std::vector<std::string> lines(1);
+    for (char ch : text) {
+        if (ch == '\n') lines.emplace_back();
+        else lines.back() += ch;
+    }
+    int totalHeight = 21 * int(lines.size()) + 3 * int(lines.size() - 1);
+    int lineY = int(lrintf(-float(totalHeight) * 0.5f));
+    bool firstGlyph = true;
+    for (const std::string& line : lines) {
+        int lineWidth = 0;
+        for (unsigned char ch : line) lineWidth += actorFontAdvance_[ch];
+        int cursorX = int(lrintf(-float(lineWidth) * 0.5f));
+        lineY += 21;
+        const int glyphTop = lineY - 26;
+        for (unsigned char ch : line) {
+            int glyphWidth = actorFontWidth_[ch];
+            const int advance = actorFontAdvance_[ch];
+            int chop = 32 - glyphWidth;
+            if ((chop % 2) == 1) { --chop; ++glyphWidth; }
+            const float extraLeft = std::min(2.0f, chop * 0.5f);
+            const float extraRight = std::min(1.0f, chop * 0.5f);
+            const float drawWidth = glyphWidth + extraLeft + extraRight;
+            if (drawWidth > 0.0f) {
+                const int col = ch & 15, row = ch >> 4;
+                const float u0 = (col * 32 + chop * 0.5f - extraLeft) / 512.0f;
+                const float u1 = (col * 32 + 32 - chop * 0.5f + extraRight) / 512.0f;
+                const float v0 = (row * 32) / 512.0f;
+                const float v1 = (row * 32 + 32) / 512.0f;
+                const float localX = (cursorX - extraLeft + drawWidth * 0.5f) * zoomX;
+                const float localY = (glyphTop + 16.0f) * zoomY;
+                drawActorQuad3D(cx, cy, cz, localX, localY,
+                                drawWidth * zoomX, 32.0f * zoomY,
+                                rotXDeg, rotYDeg, rotZDeg, skewX,
+                                fovDeg, vanishX, vanishY, 0, 0, 0, 0,
+                                r, g, b, a, actorFont_.id, blend,
+                                zWrite, zTest, clearZ && firstGlyph,
+                                u0, v0, u1, v1);
+                firstGlyph = false;
+            }
+            cursorX += advance;
+        }
+        lineY += 3;
+    }
+}
+
+void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
+                                     float zoomX, float zoomY,
+                                     float rotXDeg, float rotYDeg, float rotZDeg,
+                                     float skewX, float fovDeg,
+                                     float vanishX, float vanishY,
+                                     float r, float g, float b, float a) {
+    if (pn < 1 || pn > 2 || !playerSourceTex_[pn - 1]) return;
+    const float virtW = 480.0f * float(W) / float(H);
+    drawActorQuad3D(virtW * 0.5f + x, 240.0f + y, z, 0, 0,
+                    virtW * zoomX, 480.0f * zoomY,
+                    rotXDeg, rotYDeg, rotZDeg, skewX,
+                    fovDeg, vanishX, vanishY, 0, 0, 0, 0,
+                    r, g, b, a, playerSourceTex_[pn - 1], 0,
+                    false, false, false, 0.0f, 1.0f, 1.0f, 0.0f);
 }
 
 // The sustain glow: its own program, additive, no texture. Mirrors drawLayer
@@ -904,12 +1067,14 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
     // The strike line in screen UV, for shaders that want to protect or
     // target the playfield. Filled by the background block below and reused
     // by the --fxshader pass; the 0.5,0.5 default is screen centre.
-    if (doc) {
+    const bool livePlayerOptions = actors_ &&
+        actors_->playerMods(plr, fieldSec_, float(beat), mods, fx, mx, my, mz);
+    if (!livePlayerOptions && doc) {
         doc->evalAt(chart, beat * chart.resolution, mods, fx, mx, my, mz,
                       bg_ ? bgKnobs : nullptr);
         bgDriven = doc->bgUsedMask();
     }
-    else       modchartAt(beat, mods, fx);
+    else if (!livePlayerOptions) modchartAt(beat, mods, fx);
     if (o.noMods) { mods = Mods{}; mx = my = mz = 0; bgDriven = 0; }
 
     // `piu` is a transition, not a switch. The pad slides in from the top of
@@ -945,7 +1110,8 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
     // the receptor row, and rotating about the strike line already is that.
     // wag is the Actor effect from Saitama's lua layer: rotZ of the field,
     // wag% * 21 degrees on a 2-beat bgm-clock sine.
-    mvpEff = mvp_;
+    const Mat4& baseMvp = o.doc2 ? mvp2_ : mvp_;
+    mvpEff = baseMvp;
     {
         const float tiltDeg = 30.0f * mods.tilt;
         float zoom = 1.0f - 0.5f * mods.mini;
@@ -967,7 +1133,7 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
             F.m[9]  = zoom * -cz_ * sx_;
             F.m[10] = zoom *  cx_;
             F.m[15] = 1.0f;
-            mvpEff = mat_mul(mvp_, F);
+            mvpEff = mat_mul(baseMvp, F);
         }
     }
 
@@ -1013,25 +1179,33 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
     return E;
 }
 
-// Draw one playfield at a horizontal viewport shift, from one player's
-// evaluated state. vpX = 0 is today's single-player frame, bit for bit;
-// +-W/2 is CH's own two-player layout (GameManager.cs:756 gives each
-// player's camera a viewport rect offset of half a screen, with the camera
-// itself identical).
+// Draw one playfield at the position and scale of its camera rectangle without
+// using that rectangle as a clip region. Modcharts move/rotate the two fields
+// through each other; clipping each source to its half first cuts notes off at
+// the centre seam. Folding the viewport mapping into clip space preserves the
+// half-width projection while the full framebuffer remains available.
 void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
-                         FieldEval& E, int vpX, float scrollNow,
+                         FieldEval& E, int vpX, int vpW, float scrollNow,
                          float songTime, double nowSec, float bpm) {
     Mods& mods = E.mods;
     float& mx = E.mx; float& my = E.my; float& mz = E.mz;
     const float noteSpeed = E.noteSpeed;
     const float piuT = E.piuT;
     Mat4& mvpEff = E.mvpEff;
+    Mat4 drawMvp = mvpEff;
+    if (vpX != 0 || vpW != W) {
+        Mat4 place{};
+        place.m[0] = float(vpW) / float(W);
+        place.m[5] = place.m[10] = place.m[15] = 1.0f;
+        place.m[12] = float(2 * vpX + vpW) / float(W) - 1.0f;
+        drawMvp = mat_mul(place, mvpEff);
+    }
     (void)nowSec;
     const bool hasStops = !chart.stops.empty();
     auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
-    glViewport(vpX, 0, W, H);
+    glViewport(0, 0, W, H);
     glUseProgram(prog_);
-    glUniformMatrix4fv(glGetUniformLocation(prog_, "uMVP"), 1, GL_FALSE, mvpEff.m);
+    glUniformMatrix4fv(glGetUniformLocation(prog_, "uMVP"), 1, GL_FALSE, drawMvp.m);
     glUniform1i(glGetUniformLocation(prog_, "uTex"), 0);
     glUniform3f(glGetUniformLocation(prog_, "uOffset"),
                 o.px + mx, o.py + my, o.pz + mz);
@@ -1039,12 +1213,12 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // same rigid movex/movey/movez offset. Set once here; drawLayer only ever
     // switches to it, and only when a note actually glows.
     glUseProgram(glow_);
-    glUniformMatrix4fv(glGetUniformLocation(glow_, "uMVP"), 1, GL_FALSE, mvpEff.m);
+    glUniformMatrix4fv(glGetUniformLocation(glow_, "uMVP"), 1, GL_FALSE, drawMvp.m);
     glUniform1i(glGetUniformLocation(glow_, "uTex"), 0);
     glUniform3f(glGetUniformLocation(glow_, "uOffset"),
                 o.px + mx, o.py + my, o.pz + mz);
     glUseProgram(susGlow_);
-    glUniformMatrix4fv(glGetUniformLocation(susGlow_, "uMVP"), 1, GL_FALSE, mvpEff.m);
+    glUniformMatrix4fv(glGetUniformLocation(susGlow_, "uMVP"), 1, GL_FALSE, drawMvp.m);
     glUniform3f(glGetUniformLocation(susGlow_, "uOffset"),
                 o.px + mx, o.py + my, o.pz + mz);
     glUseProgram(prog_);
@@ -1260,7 +1434,6 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // ArrowEffects.cpp:813-818 and :561-566). Both constant per frame. cx is
     // exactly SM5's fPixelOffsetFromCenter -- offset from highway centre
     // including mod dx -- so the lateral contraction multiplies it whole.
-    const float noteZoom = GetZoom(mods);
     const float tinyCol  = GetTinyColScale(mods);
 
     for (int i = hidePlayfield ? -1 : int(chart.notes.size()) - 1; i >= 0; --i) {
@@ -1279,7 +1452,9 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         // With the bot playing, a note is consumed at the strike line; without
         // it, CH lets the note travel to its own cull plane. Culled on the
         // modified z, as ITG does, so boomerang can pull a note back into view.
-        float nearCull = o.noBot ? ch::NOTE_CULL_NEAR : 0.0f;
+        float nearCull = o.noBot
+                       ? ch::NOTE_CULL_NEAR * (1.0f + mods.drawSizeBack)
+                       : 0.0f;
         // Consumption stays in the raw scroll domain (time-anchored); the far
         // cull and the behind-the-eye clamp act on the DRAWN z, which only
         // differs under reverse/centered.
@@ -1316,6 +1491,7 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         const float rotZ = -GetRotationZ(mods, float(n.beat), float(beat));
 
         if (n.open) {
+            const float noteZoom = GetZoom(mods, 2);
             float dx = pxToUnits(GetXPos(mods, 2, yOff, songTime, float(beat), bpm));
             if (mods.tiny != 0.0f) dx *= tinyCol;
             // open order is Body -> Head -> Anim, unlike standard notes
@@ -1344,6 +1520,7 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                 ? -GetRotationZ(mods, float(n.beat), float(beat), true)
                 : rotZ;
             if (!(n.frets & (1 << lane))) continue;
+            const float noteZoom = GetZoom(mods, lane);
             float px2 = GetXPos(mods, lane, yOff, songTime, float(beat), bpm);
             float bump = GetYPosBump(mods, lane, yOff, float(beat), bpm);
             float cx = ch::noteX(lane) + pxToUnits(px2);
@@ -1431,13 +1608,41 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     const float bpm = float(chart.bpmAt(beat));
     actorBeat_ = beat;                     // the actor effect clock
     fieldSec_ = songTime;                  // the field-proxy eval clock
+    // Canonical SM5 Lua mutates ModsLevel_Song from its self-queued update
+    // command. Step it before evaluating either field so this frame sees the
+    // same PlayerOptions values the actor commands just produced.
+    if (actors_) {
+        actors_->setAutoplay(!o.noBot);
+        actors_->pump(*this, songTime);
+    }
     FieldEval E = evalField(chart, beat, o, o.doc, 1);
+    const bool twoFields = o.doc2 != nullptr;
+    FieldEval E2;
+    if (twoFields) E2 = evalField(chart, beat, o, o.doc2, 2);
     Mods& mods = E.mods; PostFx& fx = E.fx;
     float& mx = E.mx; float& my = E.my; float& mz = E.mz;
     float (&bgKnobs)[MAX_BG_UNIFORMS] = E.bgKnobs;
     unsigned& bgDriven = E.bgDriven;
     float& fieldX = E.fieldX; float& fieldY = E.fieldY;
     Mat4& mvpEff = E.mvpEff;
+
+    // A Player/NoteField reached through ActorProxy is a renderer-owned source,
+    // not an Actor child. Render each live field once to a transparent full-
+    // screen texture; any number of proxies can then place it into an AFT.
+    if (actors_ && actors_->livePlayerCount() > 0) {
+        const int sourceFieldW = twoFields ? W / 2 : W;
+        for (int pn = 1; pn <= (twoFields ? 2 : 1); ++pn) {
+            glBindFramebuffer(GL_FRAMEBUFFER, playerSourceFbo_[pn - 1]);
+            glViewport(0, 0, W, H);
+            glClearColor(0, 0, 0, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            FieldEval& source = pn == 1 ? E : E2;
+            const int x = pn == 1 ? 0 : sourceFieldW;
+            const int w = pn == 1 ? sourceFieldW : W - sourceFieldW;
+            drawField(chart, beat, o, source, x, w,
+                      scrollNow, songTime, nowSec, bpm);
+        }
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glViewport(0, 0, W, H);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1484,13 +1689,14 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    // Two playfields when the modchart drives a second player. Same camera,
-    // half-screen viewport shift each way -- CH's own 2P layout.
-    drawField(chart, beat, o, E, o.doc2 ? -W / 2 : 0,
+    // Keep the two half-width camera projections, but draw them through a full
+    // viewport so transformed fields can overlap instead of being seam-clipped.
+    const int fieldW = twoFields ? W / 2 : W;
+    drawField(chart, beat, o, E, 0, fieldW,
               scrollNow, songTime, nowSec, bpm);
-    if (o.doc2) {
-        FieldEval E2 = evalField(chart, beat, o, o.doc2, 2);
-        drawField(chart, beat, o, E2, W / 2, scrollNow, songTime, nowSec, bpm);
+    if (twoFields) {
+        drawField(chart, beat, o, E2, fieldW, W - fieldW,
+                  scrollNow, songTime, nowSec, bpm);
     }
     glViewport(0, 0, W, H);
     // #FGCHANGES actor folders: in front of the playfield. Drawn INSIDE fbo_,

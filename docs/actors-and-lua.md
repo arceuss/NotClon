@@ -1,8 +1,10 @@
 # Actors and Lua
 
-NotClon can render the StepMania/OpenITG **XML actor layer** — the `lua/`,
+NotClon can render StepMania/OpenITG **actor folders** — the `lua/`,
 `effects/`-style folders that classic modfiles use for foreground visuals:
 sprites, tweened animations, masks, message-driven effects, and embedded Lua.
+Stock SM5 `default.lua` ActorDef tables are preferred; converted `default.xml`
+files remain a fallback.
 
 If a song folder has a `.sm` file next to the chart, its `#FGCHANGES` /
 `#BGCHANGES` entries load these folders automatically. You can also load one
@@ -12,12 +14,12 @@ by hand:
 notclon.exe --dir "charts/MySong" --actor effects@228
 ```
 
-That loads `charts/MySong/effects/default.xml` as a foreground layer starting
-at beat 228.
+That loads `charts/MySong/effects/default.lua` (or its XML fallback) as a
+foreground layer starting at beat 228.
 
 ## The Lua version — read this before writing any Lua
 
-NotClon embeds **Lua 5.1.5**.
+NotClon embeds **Lua 5.1.5** plus StepMania 5.1's `cmd(...)` parser extension.
 
 | don't use | why | use instead |
 |---|---|---|
@@ -80,10 +82,9 @@ The embedded Lua exposes a deliberately small surface:
 - `STATSMAN:GetCurStageStats()` and the player-stage-stat accessors used by
   classic modfiles. Offline rendering has no live score, so dance points are
   reported as zero.
-- `GAMESTATE:ApplyGameCommand(...)` is accepted so a runtime loop survives,
-  but it does not mutate NotClon's playfield. Player mods still come from the
-  imported Lua `mods` tables / `.ncmod`; a command-line render reports this
-  limitation once when the method is used.
+- `GAMESTATE:GetPlayerState(...):GetPlayerOptions('ModsLevel_Song')` exposes
+  live per-player options. `FromString`, direct modifier methods and
+  `GAMESTATE:ApplyGameCommand(...)` mutate the CH fields the same frame.
 - `MESSAGEMAN:Broadcast('Name')` — trigger `NameMessageCommand`s
 - `SCREEN_WIDTH`, `SCREEN_HEIGHT`, `SCREEN_CENTER_X`, and `SCREEN_CENTER_Y` —
   the virtual-screen constants (`640`, `480`, `320`, and `240`)
@@ -93,12 +94,15 @@ The embedded Lua exposes a deliberately small surface:
   tween, effect, state, getter, texture and command methods return `self` where
   StepMania does, so chains work.
 - `ActorFrameTexture` setup (`SetTextureName`, `SetWidth`, `SetHeight`,
-  `Enable*`, `Create`, `GetTexture`) and `Sprite:SetTexture` work for the
-  screen-capture chains used by classic NotITG files.
-- Lua globals persist across every actor in the same tree. Actors can register
-  themselves in a table during one command and be retrieved by a later command.
-- `SCREENMAN` is accepted but inert: theme-UI and ActorProxy calls are safely
-  absorbed, since NotClon has no StepMania screen/player tree to manipulate.
+  `Enable*`, `Create`, `GetTexture`) allocates a real FBO. Its children render
+  into that target and named textures feed later sprites/AFTs.
+- Actor-valued Lua globals and `MESSAGEMAN` broadcasts cross actor-folder
+  boundaries, matching the one screen-wide environment used by SM modfiles.
+- `SCREENMAN:GetTopScreen():GetChild('PlayerP1'/'PlayerP2')` returns typed
+  player sources with `Judgment` and `Combo` children; `ActorProxy:SetTarget`
+  renders those sources or another actor subtree.
+- BitmapText loads the supplied SM font INI/sheet, and ActorFrame FOV/vanishing
+  point state uses a real perspective projection.
 
 ## Background shaders
 
@@ -189,11 +193,13 @@ Honest list, so you don't fight the tool:
   method chains alive. Command-line renders report each distinct method once
   as `actor: unsupported Actor method: <name>`; check this before assuming a
   Lua setter took effect.
-- `GAMESTATE:ApplyGameCommand` does not apply per-frame PlayerOptions; use the
-  imported Lua mod tables or `.ncmod` for playfield modifiers.
-- `NoteCrossed*` message broadcasts (per-column note triggers) are not emitted.
-- 3D perspective on actors is approximated: `rotationx/y` render as
-  foreshortening rather than true vanishing-point perspective.
+- Autoplay emits deterministic `Judgment` messages with `params.Player` and
+  `params.TapNoteScore`; `--nobot` suppresses them. `NoteCrossed*` per-column
+  messages are not emitted.
+- Only actor-valued globals are mirrored between separately loaded folders;
+  arbitrary scalar/table globals remain local to their Lua state.
+- Mirin, NotITG spline APIs, shader flags and general theme-object lookup are
+  outside the stock-SM5 surface implemented here.
 
 A template with a working actor tree, shader and modchart lives in
 [`templates/modchart/`](../templates/modchart/).

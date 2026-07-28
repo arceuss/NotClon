@@ -38,6 +38,7 @@ const ModInfo MODS[] = {
     {"brake",      0.0f},
     // The one knob whose neutral is not zero: 1.0 == 1x.
     {"scrollspeed",1.0f},
+    {"drawsizeback", 0.0f},
     // the rotation family + per-note zoom
     {"dizzy",      0.0f},
     {"confusion",  0.0f},
@@ -67,6 +68,7 @@ const ModInfo MODS[] = {
     {"waveperiod",    0.0f},
     {"tornadoperiod", 0.0f},
     {"confusionoffset",  0.0f},
+    {"confusionxoffset", 0.0f},
     {"confusionyoffset", 0.0f},
     {"zigzag",        0.0f},
     {"zigzagperiod",  0.0f},
@@ -87,11 +89,21 @@ const ModInfo MODS[] = {
     {"beatz",         0.0f},
     {"beatzoffset",   0.0f},
     {"beatzmult",     0.0f},
+    {"movex0",        0.0f},
+    {"movex1",        0.0f},
+    {"movex2",        0.0f},
+    {"movex3",        0.0f},
+    {"movex4",        0.0f},
     {"movey0",        0.0f},
     {"movey1",        0.0f},
     {"movey2",        0.0f},
     {"movey3",        0.0f},
     {"movey4",        0.0f},
+    {"tiny0",         0.0f},
+    {"tiny1",         0.0f},
+    {"tiny2",         0.0f},
+    {"tiny3",         0.0f},
+    {"tiny4",         0.0f},
     {"zigzagz",       0.0f},
     {"zigzagzperiod", 0.0f},
     {"sawtoothz",     0.0f},
@@ -316,8 +328,11 @@ void ModDoc::evalAt(const Chart& c, double tick, Mods& m, PostFx& fx,
     float v[MOD_SLOTS];
     evalAt(c, tick, v);
     if (bgOut) memcpy(bgOut, v + MOD_BG_BASE, MAX_BG_UNIFORMS * sizeof(float));
-    const float beat = float(tick / double(c.resolution));
+    modValuesToState(v, float(tick / double(c.resolution)), m, fx, mx, my, mz);
+}
 
+void modValuesToState(const float* v, float beat, Mods& m, PostFx& fx,
+                      float& mx, float& my, float& mz) {
     m = Mods{};
     m.tornado   = v[MOD_TORNADO];
     m.drunk     = v[MOD_DRUNK];
@@ -337,6 +352,7 @@ void ModDoc::evalAt(const Chart& c, double tick, Mods& m, PostFx& fx,
     m.boost     = v[MOD_BOOST];
     m.brake     = v[MOD_BRAKE];
     m.scrollspeed = v[MOD_SCROLLSPEED];
+    m.drawSizeBack = v[MOD_DRAWSIZEBACK];
     m.dizzy     = v[MOD_DIZZY];
     m.confusion = v[MOD_CONFUSION];
     m.roll      = v[MOD_ROLL];
@@ -360,6 +376,7 @@ void ModDoc::evalAt(const Chart& c, double tick, Mods& m, PostFx& fx,
     m.wavePeriod     = v[MOD_WAVEPERIOD];
     m.tornadoPeriod  = v[MOD_TORNADOPERIOD];
     m.confusionOffset  = v[MOD_CONFUSIONOFFSET];
+    m.confusionXOffset = v[MOD_CONFUSIONXOFFSET];
     m.confusionYOffset = v[MOD_CONFUSIONYOFFSET];
     m.zigzag    = v[MOD_ZIGZAG];    m.zigzagPeriod   = v[MOD_ZIGZAGPERIOD];
     m.sawtooth  = v[MOD_SAWTOOTH];  m.sawtoothPeriod = v[MOD_SAWTOOTHPERIOD];
@@ -371,9 +388,17 @@ void ModDoc::evalAt(const Chart& c, double tick, Mods& m, PostFx& fx,
     m.beatOffset = v[MOD_BEATOFFSET];  m.beatMult  = v[MOD_BEATMULT];
     m.beaty = v[MOD_BEATY]; m.beatyOffset = v[MOD_BEATYOFFSET]; m.beatyMult = v[MOD_BEATYMULT];
     m.beatz = v[MOD_BEATZ]; m.beatzOffset = v[MOD_BEATZOFFSET]; m.beatzMult = v[MOD_BEATZMULT];
+    static_assert(MOD_MOVEX4 - MOD_MOVEX0 == NUM_LANES - 1,
+                  "movex knobs must be contiguous, one per lane");
     static_assert(MOD_MOVEY4 - MOD_MOVEY0 == NUM_LANES - 1,
                   "movey knobs must be contiguous, one per lane");
-    for (int c = 0; c < NUM_LANES; ++c) m.moveyCol[c] = v[MOD_MOVEY0 + c];
+    static_assert(MOD_TINY4 - MOD_TINY0 == NUM_LANES - 1,
+                  "tiny knobs must be contiguous, one per lane");
+    for (int c = 0; c < NUM_LANES; ++c) {
+        m.movexCol[c] = v[MOD_MOVEX0 + c];
+        m.moveyCol[c] = v[MOD_MOVEY0 + c];
+        m.tinyCol[c] = v[MOD_TINY0 + c];
+    }
     m.zigzagZ = v[MOD_ZIGZAGZ]; m.zigzagZPeriod = v[MOD_ZIGZAGZPERIOD];
     m.sawtoothZ = v[MOD_SAWTOOTHZ]; m.sawtoothZPeriod = v[MOD_SAWTOOTHZPERIOD];
     m.digitalZ = v[MOD_DIGITALZ]; m.digitalZPeriod = v[MOD_DIGITALZPERIOD];

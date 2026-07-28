@@ -26,12 +26,13 @@
 // absolute (startSec, endSec, from, to, easing) segment when its chain is
 // scheduled, and evaluating an actor at time T is a search, not an
 // integration. Lua setters capture into the same timeline when their command
-// runs. Per-frame UpdateCommand scripts remain unsupported rather than making
-// seeking depend on which frames happened to render first.
+// runs. Self-queued UpdateCommand loops are replayed deterministically; a
+// backwards seek rebuilds the tree and replays it from its load time.
 #pragma once
 
 #include "chart.h"
 #include "renderer.h"
+#include "smbg.h"
 
 #include <map>
 #include <memory>
@@ -43,6 +44,12 @@ struct lua_State;
 namespace nc {
 class LuaHost;
 class ActorTree;
+class ActorLayer;
+
+struct LuaMessageParams {
+    const char* player = nullptr;
+    const char* tapNoteScore = nullptr;
+};
 
 // --- easings ---------------------------------------------------------------
 // The seven ITG tweens. `sleep` is one of them: it holds the old value for the
@@ -65,6 +72,9 @@ struct ActorState {
     float skewX = 0;                        // x += skewX * y, SM's skewx
     int   blend = 0;                        // 0 normal, 1 add, 2 noeffect
     bool  zWrite = false, zTest = false, clearZ = false;
+    // Camera state inherited from the nearest ActorFrame/WrapperState whose
+    // FOV was set. -1 means the normal screen-space projection.
+    float projFov = -1, vanishX = 0, vanishY = 0;
 };
 
 // One scheduled property change, resolved to absolute seconds.
@@ -113,11 +123,9 @@ struct Actor {
     std::string file;                       // texture path, resolved
     Tex         tex;
     bool        texLoaded = false;
-    // A BitmapText: File= names a FONT and Text= is its string. NotClon has no
-    // font rendering, so such an actor draws nothing -- an untextured quad
-    // would be a white box sitting where the text belongs, which is worse than
-    // the text being absent.
     bool        isText = false;
+    std::string font;
+    std::string text;
 
     // --- ActorFrameTexture ---------------------------------------------------
     // A render target that captures whatever has already been drawn. SM's AFT
@@ -133,26 +141,40 @@ struct Actor {
     int         aftW = 0, aftH = 0;
     bool        aftAlpha = true, aftDepth = false, aftFloat = false;
     bool        aftPreserve = true;
-    GLuint      aftTex = 0, aftFbo = 0;
+    GLuint      aftTex = 0, aftFbo = 0, aftDepthRb = 0;
 
     // --- .sprite animation ---------------------------------------------------
     // SM's animated-sprite descriptor: an ini naming a sheet plus a Frame/Delay
     // list. The sheet's grid comes from its FILENAME ("walk 2x1.png"),
     // the same convention the pump noteskin uses.
     //
-    // The frame index is a PURE FUNCTION OF TIME -- total the delays and take
-    // the remainder. Not a counter: drawFrame() is called at an arbitrary beat
-    // with no history, so a counter would make a seek show a different frame
-    // than the encode did.
+    // Frame selection is a pure function of time plus the recorded SetState
+    // keys. SetState resets SM's per-sprite animation clock; keeping that reset
+    // as an absolute key makes a cold seek match a forward encode.
+    struct SpriteStateKey { double sec; int state; };
     std::vector<int>   spriteFrames;   // frame index into the sheet, in order
     std::vector<float> spriteDelays;   // seconds each entry is held
+    std::vector<SpriteStateKey> spriteStateKeys;
     float              spriteTotal = 0.0f;
     int                sheetCols = 1, sheetRows = 1;
     bool        textureFiltering = true;
+    bool        textureFromTarget = false;
     int         spriteState = 0;
     bool        spriteAnimate = true;
     float       baseZoomX = 1.0f, baseZoomY = 1.0f;
     bool        textureFilterDirty = false;
+    bool        customTexRect = false;
+    float       texRect[4] = {0, 0, 1, 1};
+    float       fadeLeft = 0, fadeRight = 0, fadeTop = 0, fadeBottom = 0;
+    float       fov = -1, vanishX = 0, vanishY = 0;
+    bool        vanishSet = false;
+
+    // ActorProxy and ActorFrame wrapper state are real typed objects in SM5.
+    // They are kept outside children: a proxy target is not owned by the
+    // proxy, and a wrapper transforms its owner rather than drawing beside it.
+    Actor*      proxyTarget = nullptr;
+    std::unique_ptr<Actor> wrapper;
+    int         playerField = 0;             // renderer-owned P1/P2 source
 
     ActorState  base;                       // after InitCommand
     ActorState  onBase;                     // state OnCommand starts from
@@ -168,7 +190,7 @@ struct Actor {
     const std::string* findCommand(const std::string& name) const;
 };
 
-// A loaded folder: <dir>/default.xml plus whatever it references.
+// A loaded folder: <dir>/default.lua (SM5) or the legacy default.xml fallback.
 class ActorTree {
 public:
     ActorTree();
@@ -207,8 +229,12 @@ public:
     // stepped, so the tree is rebuilt and replayed from the start; that is
     // deterministic and matches the encode, at the cost of the replay.
     void setDisplaySize(int w, int h);   // store + forward to the Lua env
-    void update(double sec, double beat, int maxSteps = 20000);
+    void update(double sec, double beat);
     void setChart(const Chart* chart);
+    void setSmTiming(const SmTiming* timing) {
+        haveSmTiming_ = timing != nullptr;
+        if (timing) smTiming_ = *timing;
+    }
 
     // Textures published by an ActorFrameTexture's SetTextureName, so a later
     // Texture="<name>" or SetTexture() resolves to the live render target.
@@ -219,32 +245,53 @@ public:
     std::map<std::string, NamedTex>& namedTextures() { return namedTex_; }
     // See ActorLayer::drainLuaMods. One tree, one lua_State, one `mods` table.
     int drainLuaMods(ModDoc& doc, int resolution);
+    // Canonical SM5 Lua drives the live ModsLevel_Song PlayerOptions instead
+    // of being flattened into ModDoc keyframes. Returns false for XML trees
+    // and Lua trees which never requested this player.
+    bool playerMods(int pn, float beat, Mods& mods, PostFx& fx,
+                    float& mx, float& my, float& mz) const;
+    int livePlayerCount() const;
+    bool canonicalSource() const { return canonicalSource_; }
     // The notefield proxies behind the chart-side Plr(pn): synthetic
     // actors outside the draw tree whose evaluated state the renderer
     // folds into each player's field transform. This is how a chart
     // skews or spins the notefield itself.
     Actor& plrProxy(int i) { return plrProxy_[i & 1]; }
+    Actor& topScreen() { return screen_; }
+    Actor* screenActor(const std::string& name);
+    void setOwner(ActorLayer* owner) { owner_ = owner; }
+    void collectActorGlobals(std::map<std::string, Actor*>& out);
+    void installActorGlobals(const std::map<std::string, Actor*>& values);
 
 private:
     std::unique_ptr<Actor> root_;
+    Actor screen_;
     Actor plrProxy_[2];
     std::string dir_;
     double startSec_ = 0.0;
     std::unique_ptr<LuaHost> lua_;
+    ActorLayer* owner_ = nullptr;
     const Chart* chart_ = nullptr;
+    SmTiming smTiming_;
+    bool haveSmTiming_ = false;
     std::map<std::string, NamedTex> namedTex_;
     int perPlayerDropped_ = 0;
     // Commands waiting to fire, earliest first.
     struct Pending { double t; Actor* a; std::string cmd; };
     std::vector<Pending> pending_;
     double luaClock_ = -1.0;      // how far the pump has been stepped
-    bool   pumpOverrun_ = false;  // hit maxSteps; reported once
+    bool   pumpStalled_ = false;  // too many commands at one timestamp
     bool   gameCmdReported_ = false;
     double pumpBeat_ = 0.0;
     int dispW_ = 1920, dispH_ = 1080;
     int    pumpRan_ = 0;
     bool   pumpEverRan_ = false;
-    void   runPending(double sec, int maxSteps);
+    bool   canonicalSource_ = false;
+    void   runPending(double sec);
+    void   broadcastLocal(const std::string& msg, double sec,
+                          const LuaMessageParams* params = nullptr);
+    bool   ownsActor(const Actor* actor) const;
+    friend class ActorLayer;
 public:
     // Called by queuecommand. Kept ordered by time.
     void   enqueue(double t, Actor& a, const std::string& cmd);
@@ -253,8 +300,9 @@ private:
 };
 
 // --- the Lua host ----------------------------------------------------------
-// One lua_State per actor tree. Globals therefore persist across sibling
-// actors, while separate scheduled trees cannot cross-talk. The binding
+// One lua_State per actor tree. Globals persist across sibling actors;
+// ActorLayer mirrors actor-valued globals and message broadcasts between the
+// states to reproduce SM's one screen-wide Lua environment. The binding
 // surface is deliberately the subset exercised by the actor files.
 class LuaHost {
 public:
@@ -268,7 +316,6 @@ public:
     void  setChart(const Chart* chart) { chart_ = chart; }
     // `sleep` inside a command body does not tween -- it delays whatever that
     // body queues next. Accumulated per chunk call and read by queuecommand.
-    double pendingSleep = 0.0;
     double chunkStart   = 0.0;
     ~LuaHost() { close(); }
     void  close();
@@ -279,8 +326,9 @@ public:
     // Execute one compiled body with `self` bound to `actor`. Setter calls
     // capture into the actor's deterministic segment timeline at `sec`.
     bool  callChunk(int ref, Actor& actor, double sec, const std::string& where,
-                    std::string& err);
-    void  setBeat(double beat, double sec) { beat_ = beat; sec_ = sec; }
+                    std::string& err,
+                    const LuaMessageParams* params = nullptr);
+    void  setBeat(double beat, double sec);
     double beat() const { return beat_; }
     double sec()  const { return sec_; }
     void  setSongDir(const std::string& d) { songDir_ = d; }
@@ -295,13 +343,18 @@ public:
     // Charts size their render targets with it and then scale the display
     // sprite by SCREEN_WIDTH/DisplayWidth -- handing back the virtual size
     // made that ratio 1 and the AFT a corner crop of the framebuffer.
-    void  setDisplaySize(int w, int h) { dispW_ = w; dispH_ = h; }
+    void  setDisplaySize(int w, int h);
     int   displayW() const { return dispW_; }
     int   displayH() const { return dispH_; }
-    // Per-frame ApplyGameCommand calls: accepted but not applied, counted
-    // so the gap is reported rather than silent.
-    void  noteGameCommand() { ++gameCmds_; }
-    int   gameCommands() const { return gameCmds_; }
+    // Stock SM5 ModsLevel_Song state. The current value approaches the target
+    // using the target's speed, exactly like PlayerOptions::Approach().
+    void  pushPlayerOptions(int pn);
+    void  applyGameCommand(const std::string& command, int player);
+    bool  playerMods(int pn, float beat, Mods& mods, PostFx& fx,
+                     float& mx, float& my, float& mz) const;
+    int   livePlayerCount() const { return requestedPlayers_; }
+    void  collectActorGlobals(std::map<std::string, Actor*>& out);
+    void  setActorGlobal(const std::string& name, Actor& actor);
 
 private:
     struct CallState;
@@ -313,9 +366,14 @@ private:
     // a chart calls Create() once, but a re-entered InitCommand must not leak.
     void aftCreate(Actor& a);
     bool invokeChunk(int ref, Actor& actor, const std::string& where,
-                     std::string& err);
+                     std::string& err,
+                     const LuaMessageParams* params = nullptr);
     static int actorIndex(lua_State* L);
     static int actorCall(lua_State* L);
+    static int playerOptionsIndex(lua_State* L);
+    static int playerOptionsCall(lua_State* L);
+    void  applyModString(int pn, const std::string& mods);
+    void  advancePlayerOptions(double sec);
 
     lua_State* L_ = nullptr;
     ActorTree* tree_ = nullptr;   // owns the named-texture registry
@@ -324,8 +382,12 @@ private:
     std::string songDir_;
     std::vector<std::string> pending_;
     std::vector<std::string> log_;
-    int gameCmds_ = 0;
     int dispW_ = 1920, dispH_ = 1080;
+    float poCurrent_[2][MOD_COUNT] = {};
+    float poTarget_[2][MOD_COUNT] = {};
+    float poSpeed_[2][MOD_COUNT] = {};
+    double poClock_ = -1.0;
+    int requestedPlayers_ = 0;
 };
 
 // --- the scheduler ---------------------------------------------------------
@@ -366,6 +428,11 @@ public:
     // skewX, summed over trees. False = identity (the common case).
     bool fieldXf(int pn, double sec, float& rx, float& ry, float& rz,
                  float& sk);
+    bool playerMods(int pn, double sec, float beat, Mods& mods, PostFx& fx,
+                    float& mx, float& my, float& mz) const;
+    int livePlayerCount() const;
+    void broadcast(const std::string& msg, double sec);
+    void setAutoplay(bool enabled) { autoplay_ = enabled; }
     void pump(Renderer& R, double sec);
     void drawBackground(Renderer& R, double sec);
     void drawForeground(Renderer& R, double sec);
@@ -376,7 +443,15 @@ private:
     std::vector<Slot> trees_;
     int dispW_ = 1920, dispH_ = 1080;
     const Chart* chart_ = nullptr;
+    SmTiming smTiming_;
+    bool haveSmTiming_ = false;
+    bool autoplay_ = true;
+    size_t judgmentCursor_ = 0;
+    double judgmentClock_ = -1.0;
     std::vector<std::string> log_;
+    void syncActorGlobals();
+    void broadcastJudgment(double sec, int player);
+    friend class ActorTree;
 };
 
 }  // namespace nc

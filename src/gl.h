@@ -22,6 +22,7 @@ typedef ptrdiff_t GLintptr;
 #define GL_LINK_STATUS                    0x8B82
 #define GL_INFO_LOG_LENGTH                0x8B84
 #define GL_FRAMEBUFFER                    0x8D40
+#define GL_FRAMEBUFFER_BINDING            0x8CA6
 #define GL_RENDERBUFFER                   0x8D41
 #define GL_COLOR_ATTACHMENT0              0x8CE0
 #define GL_DEPTH_ATTACHMENT               0x8D00
@@ -36,6 +37,8 @@ typedef ptrdiff_t GLintptr;
 // Half-float colour, for an ActorFrameTexture asked to EnableFloat. A
 // feedback target that accumulates in 8 bits bands visibly.
 #define GL_RGBA16F                        0x881A
+#define GL_RGB8                           0x8051
+#define GL_RGB16F                         0x881B
 #define GL_CLAMP_TO_EDGE                  0x812F
 #define GL_MULTISAMPLE                    0x809D
 #define GL_MIRRORED_REPEAT                0x8370

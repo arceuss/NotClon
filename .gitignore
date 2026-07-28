@@ -17,6 +17,7 @@ charts/*
 #im gatekeeping
 AGENTS.md
 devdocs/
+devtools/
 # Session tooling, not the project.
 .claude/
 

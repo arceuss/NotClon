@@ -51,7 +51,7 @@ enum ModId {
     MOD_BLINK, MOD_RANDOMVANISH,
     MOD_WAVE, MOD_BOOST,
     MOD_BRAKE,           // boost's partner accel (ArrowEffects.cpp:73-82)
-    MOD_SCROLLSPEED,
+    MOD_SCROLLSPEED, MOD_DRAWSIZEBACK,
     // the rotation family (quadUpRot) + tiny's per-note zoom
     MOD_DIZZY, MOD_CONFUSION, MOD_ROLL, MOD_TWIRL, MOD_TINY,
     // receptor fade (ReceptorArrowRow.cpp:40-43); dims the fret stack only
@@ -89,7 +89,7 @@ enum ModId {
     // Waveform shape parameters. Divisor terms of the form (period*K)+K, so 0
     // is the identity -- adding them cannot change an existing modchart.
     MOD_DRUNKPERIOD, MOD_BUMPYPERIOD, MOD_WAVEPERIOD, MOD_TORNADOPERIOD,
-    MOD_CONFUSIONOFFSET, MOD_CONFUSIONYOFFSET,
+    MOD_CONFUSIONOFFSET, MOD_CONFUSIONXOFFSET, MOD_CONFUSIONYOFFSET,
     // New periodic shapes over the same yOffset input.
     MOD_ZIGZAG, MOD_ZIGZAGPERIOD,
     MOD_SAWTOOTH, MOD_SAWTOOTHPERIOD,
@@ -102,9 +102,11 @@ enum ModId {
     MOD_BEATOFFSET, MOD_BEATMULT,
     MOD_BEATY, MOD_BEATYOFFSET, MOD_BEATYMULT,
     MOD_BEATZ, MOD_BEATZOFFSET, MOD_BEATZMULT,
-    // Per-column movey, NotITG's 0-based spelling. Contiguous and in column
-    // order: the unpack indexes them as MOD_MOVEY0 + col.
+    // Per-column movement and tiny, NotITG's 0-based spelling. Contiguous
+    // within each family; the SM5 Lua bridge maps its 1-based method names.
+    MOD_MOVEX0, MOD_MOVEX1, MOD_MOVEX2, MOD_MOVEX3, MOD_MOVEX4,
     MOD_MOVEY0, MOD_MOVEY1, MOD_MOVEY2, MOD_MOVEY3, MOD_MOVEY4,
+    MOD_TINY0, MOD_TINY1, MOD_TINY2, MOD_TINY3, MOD_TINY4,
     MOD_ZIGZAGZ, MOD_ZIGZAGZPERIOD,
     MOD_SAWTOOTHZ, MOD_SAWTOOTHZPERIOD,
     MOD_DIGITALZ, MOD_DIGITALZPERIOD, MOD_DIGITALZOFFSET, MOD_DIGITALZSTEPS,
@@ -157,6 +159,8 @@ int modBgCount();                            // how many are registered so far
 const char* modName(int id);
 int         modFromName(const std::string& name);   // -1 if unknown
 float       modDefault(int id);
+void        modValuesToState(const float* values, float beat, Mods& mods,
+                             PostFx& fx, float& mx, float& my, float& mz);
 // True for a knob that is stored and displayed but not read by drawFrame.
 inline bool modIsStub(int id) { return id >= MOD_STUB_FIRST && id < MOD_COUNT; }
 

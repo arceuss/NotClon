@@ -483,7 +483,10 @@ int main(int argc, char** argv) {
         // it is edited live, so the player-2 mirror is rebuilt each frame --
         // a copy plus a keyframe scan, well inside an editor frame budget,
         // and the alternative is a dirty-flag threaded through every edit.
-        if (doc.players == 2) {
+        if (actors && actors->livePlayerCount() >= 2) {
+            docP2 = doc;                 // non-null selects the two-field camera
+            opt.doc2 = &docP2;           // live PlayerOptions supply both values
+        } else if (doc.players == 2) {
             doc.forPlayer = 1;
             docP2 = doc;
             docP2.forPlayer = 2;

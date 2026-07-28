@@ -213,8 +213,9 @@ struct RenderOpts {
     // Where the mods come from. Null falls back to the hardcoded R.E.M. III
     // modchart in modchart.h, which is what notclon.exe still does by default.
     const ModDoc* doc = nullptr;
-    // Player 2's modchart. Non-null = draw TWO playfields, CH's own 2P
-    // layout: identical camera, viewport shifted half a screen each way.
+    // Player 2's modchart. Non-null = draw TWO playfields in the visible
+    // left/right halves of CH's offset camera rects, each with half-screen
+    // aspect so the complete highway remains on-screen.
     const ModDoc* doc2 = nullptr;
 };
 
@@ -237,7 +238,7 @@ public:
     FieldEval evalField(const Chart& chart, double beat, const RenderOpts& o,
                         const ModDoc* doc, int plr);
     void drawField(const Chart& chart, double beat, const RenderOpts& o,
-                   FieldEval& E, int vpX, float scrollNow,
+                   FieldEval& E, int vpX, int vpW, float scrollNow,
                    float songTime, double nowSec, float bpm);
 
     // Requires a current GL context. assetDir must end with a separator.
@@ -260,6 +261,28 @@ public:
                        GLuint tex, int blend, bool zWrite, bool zTest, bool clearZ,
                        float u0 = 0.0f, float v0 = 0.0f,
                        float u1 = 1.0f, float v1 = 1.0f);
+    void drawActorQuad3D(float cx, float cy, float cz,
+                         float localX, float localY, float w, float h,
+                         float rotXDeg, float rotYDeg, float rotZDeg, float skewX,
+                         float fovDeg, float vanishX, float vanishY,
+                         float fadeLeft, float fadeRight,
+                         float fadeTop, float fadeBottom,
+                         float r, float g, float b, float a,
+                         GLuint tex, int blend, bool zWrite, bool zTest, bool clearZ,
+                         float u0 = 0.0f, float v0 = 0.0f,
+                         float u1 = 1.0f, float v1 = 1.0f);
+    void drawActorText(const std::string& text,
+                       float cx, float cy, float cz, float zoomX, float zoomY,
+                       float rotXDeg, float rotYDeg, float rotZDeg, float skewX,
+                       float fovDeg, float vanishX, float vanishY,
+                       float r, float g, float b, float a,
+                       int blend, bool zWrite, bool zTest, bool clearZ);
+    void drawActorPlayerSource(int pn, float x, float y,
+                               float z, float zoomX, float zoomY,
+                               float rotXDeg, float rotYDeg, float rotZDeg,
+                               float skewX, float fovDeg,
+                               float vanishX, float vanishY,
+                               float r, float g, float b, float a);
     // Null = no actor folders, and the passes are skipped entirely -- which is
     // what keeps this hash-neutral.
     void setActorLayer(ActorLayer* a) { actors_ = a; }
@@ -282,7 +305,7 @@ private:
     void destroyFbos();
     double lastHit(int lane, double now) const;
 
-    Mat4 mvp_{};
+    Mat4 mvp_{}, mvp2_{};
     GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0, cover_ = 0, piu_ = 0;
     GLuint avao_ = 0, avbo_ = 0;
     double actorBeat_ = 0.0;
@@ -291,6 +314,7 @@ private:
     Background* bg_ = nullptr;
     GLuint vao_ = 0, vbo_ = 0, qvao_ = 0, qvbo_ = 0;
     GLuint fbo_ = 0, colorTex_ = 0, postFbo_ = 0, postTex_ = 0;
+    GLuint playerSourceFbo_[2] = {}, playerSourceTex_[2] = {};
     // Depth attachment on fbo_ ONLY, for the actor layer's z-mask
     // (blend,noeffect + zwrite writes it; ztest reads it). The highway never
     // enables depth testing -- every CH layer is ZWrite Off and the painter
@@ -309,6 +333,9 @@ private:
     Tex texPiuTap_[3], texPiuRecep_[3], texPiuHoldBody_[3], texPiuHoldCap_[3];
     Tex texPiuFlash_;
     Tex texFretB_, texFretH_, texLift_, texHLight_;
+    Tex actorFont_;
+    int actorFontWidth_[256] = {};
+    int actorFontAdvance_[256] = {};
 
     std::vector<ch::Vtx> v_;
     std::vector<double>  hitTimes_[5];

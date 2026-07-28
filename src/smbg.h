@@ -18,11 +18,14 @@
 
 namespace nc {
 
-// Just enough of TimingData: #OFFSET, #BPMS, #STOPS.
+// The SM5 timing subset used by these charts: #OFFSET, #BPMS, #STOPS, with
+// legacy negative/huge BPMs normalized into warp segments by the same state
+// machine as NotesLoaderSM::ProcessBPMsAndStops.
 struct SmTiming {
     double offset = 0.0;                          // #OFFSET, seconds
     std::vector<std::pair<long, double>> bpms;    // (row, bpm), sorted
     std::vector<std::pair<long, double>> stops;   // (row, seconds), sorted
+    std::vector<std::pair<long, long>> warps;     // (start row, length), sorted
 
     // MSD rule: '//' to end-of-line is erased to spaces before anything else
     // (MsdFile.cpp:43-52), so a comment inside a value cannot leak into it.
@@ -49,11 +52,13 @@ struct SmTiming {
 
     // `raw` is the whole .sm text; comments may or may not be stripped already.
     void parse(const std::string& raw) {
+        offset = 0.0;
+        bpms.clear(); stops.clear(); warps.clear();
         const std::string s = stripComments(raw);
         std::string v;
         if (tagValue(s, "OFFSET", v)) offset = atof(v.c_str());
-        auto pairs = [](const std::string& body,
-                        std::vector<std::pair<long, double>>& out) {
+        auto pairs = [](const std::string& body) {
+            std::vector<std::pair<double, double>> out;
             size_t a = 0;
             while (a <= body.size()) {
                 size_t b = body.find(',', a);
@@ -61,44 +66,165 @@ struct SmTiming {
                     a, b == std::string::npos ? std::string::npos : b - a);
                 const size_t eq = t.find('=');
                 if (eq != std::string::npos) {
-                    // BeatToNoteRow quantisation, NoteTypes.h:156,203.
-                    const long row = lrint(atof(t.c_str()) * 48.0);
-                    out.push_back({row, atof(t.c_str() + eq + 1)});
+                    out.push_back({atof(t.c_str()), atof(t.c_str() + eq + 1)});
                 }
                 if (b == std::string::npos) break;
                 a = b + 1;
             }
-            std::sort(out.begin(), out.end());
+            std::stable_sort(out.begin(), out.end());
+            return out;
         };
-        if (tagValue(s, "BPMS", v)) pairs(v, bpms);
-        if (tagValue(s, "STOPS", v)) pairs(v, stops);
-        if (bpms.empty()) bpms.push_back({0, 120.0});
+        std::vector<std::pair<double, double>> rawBpms, rawStops;
+        if (tagValue(s, "BPMS", v)) rawBpms = pairs(v);
+        if (tagValue(s, "STOPS", v)) rawStops = pairs(v);
+
+        constexpr double FAST_BPM_WARP = 9999999.0;
+        auto addBpm = [&](double beat, double bpm) {
+            bpms.push_back({lrint(beat * 48.0), bpm});
+        };
+        auto addStop = [&](double beat, double sec) {
+            stops.push_back({lrint(beat * 48.0), sec});
+        };
+        auto addWarp = [&](double start, double end) {
+            const long row = lrint(start * 48.0);
+            const long len = lrint(end * 48.0) - row;
+            if (len > 0) warps.push_back({row, len});
+        };
+
+        size_t si = 0, bi = 0;
+        while (si < rawStops.size() && rawStops[si].first < 0.0) {
+            // m_fBeat0OffsetInSeconds starts at -#OFFSET; SM subtracts a
+            // pre-zero stop from it, which is offset += stop in this form.
+            offset += rawStops[si].second;
+            ++si;
+        }
+        double bpm = 0.0;
+        while (bi < rawBpms.size() && rawBpms[bi].first <= 0.0)
+            bpm = rawBpms[bi++].second;
+        if (bpm == 0.0) {
+            if (bi < rawBpms.size()) bpm = rawBpms[bi++].second;
+            else bpm = 60.0;
+        }
+
+        double prevBeat = 0.0, warpStart = -1.0, preWarpBpm = 0.0;
+        double timeOffset = 0.0;
+        if (bpm > 0.0 && bpm <= FAST_BPM_WARP) addBpm(0.0, bpm);
+
+        while (bi < rawBpms.size() || si < rawStops.size()) {
+            const bool isBpm = si == rawStops.size() ||
+                (bi < rawBpms.size() && rawBpms[bi].first <= rawStops[si].first);
+            const auto change = isBpm ? rawBpms[bi] : rawStops[si];
+            if (bpm <= FAST_BPM_WARP) {
+                timeOffset += (change.first - prevBeat) * 60.0 / bpm;
+                if (warpStart >= 0.0 && bpm > 0.0 && timeOffset > 0.0) {
+                    const double warpEnd = change.first - timeOffset * bpm / 60.0;
+                    addWarp(warpStart, warpEnd);
+                    if (bpm != preWarpBpm) addBpm(warpStart, bpm);
+                    warpStart = -1.0;
+                }
+            }
+            prevBeat = change.first;
+
+            if (isBpm) {
+                if (warpStart < 0.0 &&
+                    (change.second < 0.0 || change.second > FAST_BPM_WARP)) {
+                    warpStart = change.first;
+                    preWarpBpm = bpm;
+                    timeOffset = 0.0;
+                } else if (warpStart < 0.0) {
+                    addBpm(change.first, change.second);
+                }
+                bpm = change.second;
+                ++bi;
+            } else {
+                if (warpStart < 0.0 && change.second < 0.0) {
+                    warpStart = change.first;
+                    preWarpBpm = bpm;
+                    timeOffset = change.second;
+                } else if (warpStart < 0.0) {
+                    addStop(change.first, change.second);
+                } else {
+                    timeOffset += change.second;
+                    if (change.second > 0.0 && timeOffset > 0.0) {
+                        addWarp(warpStart, change.first);
+                        addStop(change.first, timeOffset);
+                        if (bpm < 0.0 || bpm > FAST_BPM_WARP) {
+                            warpStart = change.first;
+                            timeOffset = 0.0;
+                        } else {
+                            if (bpm != preWarpBpm) addBpm(warpStart, bpm);
+                            warpStart = -1.0;
+                        }
+                    }
+                }
+                ++si;
+            }
+        }
+        if (warpStart >= 0.0) {
+            const double warpEnd = (bpm < 0.0 || bpm > FAST_BPM_WARP)
+                ? 99999999.0 : prevBeat - timeOffset * bpm / 60.0;
+            addWarp(warpStart, warpEnd);
+            if (bpm != preWarpBpm) addBpm(warpStart, bpm);
+        }
+
+        std::stable_sort(bpms.begin(), bpms.end());
+        std::stable_sort(stops.begin(), stops.end());
+        std::stable_sort(warps.begin(), warps.end());
+        // TimingData keeps one segment of each type at a row. Later BPMs win;
+        // simultaneous stops add.
+        std::vector<std::pair<long, double>> cleanBpms;
+        for (const auto& p : bpms) {
+            if (!cleanBpms.empty() && cleanBpms.back().first == p.first)
+                cleanBpms.back().second = p.second;
+            else cleanBpms.push_back(p);
+        }
+        bpms.swap(cleanBpms);
+        std::vector<std::pair<long, double>> cleanStops;
+        for (const auto& p : stops) {
+            if (!cleanStops.empty() && cleanStops.back().first == p.first)
+                cleanStops.back().second += p.second;
+            else cleanStops.push_back(p);
+        }
+        stops.swap(cleanStops);
+        if (bpms.empty()) bpms.push_back({0, 60.0});
     }
 
-    // Port of TimingData::GetElapsedTimeFromBeat (openitg TimingData.cpp:
-    // 252-290), minus the m_fGlobalOffsetSeconds user preference. Quantises to
-    // rows with lrint(beat*48) exactly as BeatToNoteRow does, so a change at
-    // beat 224.0000001 still counts against the stop row at 224.
+    // Elapsed audio seconds at a source-SM beat. Warp ranges contribute zero
+    // time; a stop at exactly `beat` has not happened yet.
     double beatToSec(double beat) const {
         double t = -offset;
-        const long row = lrint(beat * 48.0);
+        if (beat < 0.0) return t + beat * 60.0 / bpms.front().second;
         for (const auto& s : stops) {
-            // "The exact beat of a stop comes before the stop, not after, so
-            // use >=, not >." -- TimingData.cpp:261-263. A change AT the stop
-            // beat excludes its own stop.
-            if (s.first >= row) break;
+            if (double(s.first) / 48.0 >= beat) break;
             t += s.second;
         }
-        long r = row;
         for (size_t i = 0; i < bpms.size(); ++i) {
-            const double bps = bpms[i].second / 60.0;
-            if (i + 1 == bpms.size()) return t + (double(r) / 48.0) / bps;
-            const long rowsIn = std::min(bpms[i + 1].first - bpms[i].first, r);
-            t += (double(rowsIn) / 48.0) / bps;
-            r -= rowsIn;
-            if (r <= 0) return t;
+            const double start = std::max(0.0, double(bpms[i].first) / 48.0);
+            const double end = std::min(beat, i + 1 < bpms.size()
+                ? double(bpms[i + 1].first) / 48.0 : beat);
+            if (end <= start) continue;
+            double visible = end - start;
+            for (const auto& w : warps) {
+                const double ws = double(w.first) / 48.0;
+                const double we = double(w.first + w.second) / 48.0;
+                visible -= std::max(0.0, std::min(end, we) - std::max(start, ws));
+            }
+            t += std::max(0.0, visible) * 60.0 / bpms[i].second;
+            if (end == beat) break;
         }
         return t;
+    }
+
+    // Largest source beat reached at `sec`. This definition naturally holds a
+    // stop at its row and chooses the far end of a zero-time warp.
+    double secToBeat(double sec) const {
+        double lo = -64.0, hi = 1.0;
+        while (beatToSec(hi) <= sec && hi < 134217728.0) hi *= 2.0;
+        for (int i = 0; i < 80; ++i) {
+            const double mid = (lo + hi) * 0.5;
+            if (beatToSec(mid) <= sec) lo = mid; else hi = mid;
+        }
+        return lo;
     }
 };
 
