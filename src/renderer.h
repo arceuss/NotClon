@@ -213,12 +213,32 @@ struct RenderOpts {
     // Where the mods come from. Null falls back to the hardcoded R.E.M. III
     // modchart in modchart.h, which is what notclon.exe still does by default.
     const ModDoc* doc = nullptr;
+    // Player 2's modchart. Non-null = draw TWO playfields, CH's own 2P
+    // layout: identical camera, viewport shifted half a screen each way.
+    const ModDoc* doc2 = nullptr;
 };
 
 // ---------------------------------------------------------------------------
 class Renderer {
 public:
     int W = 1920, H = 1080;
+
+    // One player's evaluated mod state + the matrices built from it.
+    struct FieldEval {
+        Mods mods; PostFx fx;
+        float mx = 0, my = 0, mz = 0;
+        float bgKnobs[MAX_BG_UNIFORMS] = {};
+        unsigned bgDriven = 0;
+        float fieldX = 0.5f, fieldY = 0.5f;
+        float noteSpeed = 10.0f;
+        float piuT = 0.0f;
+        Mat4 mvpEff{};
+    };
+    FieldEval evalField(const Chart& chart, double beat, const RenderOpts& o,
+                        const ModDoc* doc, int plr);
+    void drawField(const Chart& chart, double beat, const RenderOpts& o,
+                   FieldEval& E, int vpX, float scrollNow,
+                   float songTime, double nowSec, float bpm);
 
     // Requires a current GL context. assetDir must end with a separator.
     bool init(int w, int h, const std::string& assetDir);

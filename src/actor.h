@@ -217,7 +217,7 @@ public:
     struct NamedTex { GLuint id = 0; int w = 0, h = 0; };
     std::map<std::string, NamedTex>& namedTextures() { return namedTex_; }
     // See ActorLayer::drainLuaMods. One tree, one lua_State, one `mods` table.
-    int drainLuaMods(ModDoc& doc, int resolution);
+    int drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution);
 
 private:
     std::unique_ptr<Actor> root_;
@@ -349,7 +349,7 @@ public:
     //
     // Each row is {beat, len_or_end, modstring, 'len'|'end', pn?}. Returns how
     // many entries were added. Call after loading and before ModDoc::rebuild.
-    int drainLuaMods(ModDoc& doc, int resolution);
+    int drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution);
 
     // Step every tree's command loop to `sec`. See ActorTree::update.
     void pump(Renderer& R, double sec);

@@ -475,6 +475,7 @@ int main(int argc, char** argv) {
     // The active source is always printed, because the failure mode here is
     // silent: you get a picture either way and it is simply the wrong one.
     nc::ModDoc doc;
+    nc::ModDoc doc2;                 // player 2, when a chart drives one
     if (randMods) {
         if (randCount < 1) randCount = 1;
         doc = randomModchart(chart, randSeed, randCount);
@@ -566,11 +567,24 @@ int main(int argc, char** argv) {
         // complete. Draining is a no-op for a tree with no `mods` global,
         // which is every chart that predates this.
         if (!actors.empty() && !opt.noMods) {
-            const int n = actors.drainLuaMods(doc, chart.resolution);
+            // Seed player 2 with everything player 1 already has (a .ncmod
+            // loaded before the drain applies to both fields); the drain then
+            // routes pn rows to their own doc and pn-less rows to both. doc2
+            // only takes effect if the drain actually put something in it.
+            doc2 = doc;
+            const size_t d2before = doc2.entries.size();
+            const int n = actors.drainLuaMods(doc, &doc2, chart.resolution);
             if (n > 0) {
                 doc.rebuild(chart);
                 opt.doc = &doc;
                 opt.noMods = false;
+                if (doc2.entries.size() != d2before &&
+                    doc2.entries.size() != doc.entries.size()) {
+                    doc2.rebuild(chart);
+                    opt.doc2 = &doc2;
+                    printf("modchart: two playfields (%zu / %zu entries)%c",
+                           doc.entries.size(), doc2.entries.size(), 10);
+                }
             }
         }
         for (const auto& m : actors.log()) printf("actor: %s%c", m.c_str(), 10);

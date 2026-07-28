@@ -1000,7 +1000,7 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
 
 // --- the Lua mod table -> ModDoc --------------------------------------------
 // See the contract on ActorLayer::drainLuaMods.
-int ActorTree::drainLuaMods(ModDoc& doc, int resolution) {
+int ActorTree::drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution) {
     if (!lua_ || !lua_->L()) return 0;
     lua_State* L = lua_->L();
     int added = 0;
@@ -1026,20 +1026,19 @@ int ActorTree::drainLuaMods(ModDoc& doc, int resolution) {
             if (lua_isstring(L, -1)) modstr = lua_tostring(L, -1);  lua_pop(L, 1);
             lua_rawgeti(L, -1, 4);
             if (lua_isstring(L, -1)) kind = lua_tostring(L, -1);    lua_pop(L, 1);
-            // Row 5 is the player number. NotClon draws ONE playfield, so a
-            // per-player row would be applied to the only field there is --
-            // which for gat means P1's and P2's mirrored values fighting over
-            // the same knob. Drop them and say how many, rather than render
-            // something the author never wrote.
-            bool perPlayer = false;
+            // Row 5 is the player number. 0/absent drives both fields; 1 or 2
+            // drives that player's own -- these charts mirror values between
+            // the two, so folding them into one field would have P1's and
+            // P2's rows fighting over the same knob.
+            int pn = 0;
             lua_rawgeti(L, -1, 5);
-            perPlayer = !lua_isnil(L, -1);
+            if (!lua_isnil(L, -1)) pn = int(lua_tonumber(L, -1));
             lua_pop(L, 1);
 
             lua_pop(L, 1);   // the row; key stays for lua_next
 
             if (modstr.empty() || kind == "error") continue;
-            if (perPlayer) { ++perPlayerDropped_; continue; }
+            if (pn != 0 && !doc2) { ++perPlayerDropped_; continue; }
 
             const int tick = int(beat * resolution + 0.5);
             int len = 0;
@@ -1055,6 +1054,13 @@ int ActorTree::drainLuaMods(ModDoc& doc, int resolution) {
             // tick is the smallest thing that still fires.
             if (len == 0 && span > 0.0) len = 1;
 
+            // pn 0 -> both docs; pn 1 -> player 1's; pn 2 -> player 2's.
+            if (doc2 && pn != 1) {
+                const int b2 = int(doc2->entries.size());
+                addModString(*doc2, modstr, tick, len, st);
+                if (pn == 2) { added += int(doc2->entries.size()) - b2; continue; }
+                st.entries -= int(doc2->entries.size()) - b2;   // counted once
+            }
             const int before = int(doc.entries.size());
             addModString(doc, modstr, tick, len, st);
             added += int(doc.entries.size()) - before;
@@ -2009,7 +2015,7 @@ bool ActorLayer::loadFromSm(const std::string& smPath, const std::string& songDi
 }
 
 
-int ActorLayer::drainLuaMods(ModDoc& doc, int resolution) {
+int ActorLayer::drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution) {
     int n = 0;
     for (Slot& sl : trees_) {
         if (!sl.tree) continue;
@@ -2018,7 +2024,7 @@ int ActorLayer::drainLuaMods(ModDoc& doc, int resolution) {
         // Take only what is new. A mod the chart asks for and we silently do
         // not have is the single most misleading thing this can do.
         const size_t before = sl.tree->log().size();
-        n += sl.tree->drainLuaMods(doc, resolution);
+        n += sl.tree->drainLuaMods(doc, doc2, resolution);
         for (size_t i = before; i < sl.tree->log().size(); ++i)
             log_.push_back(sl.tree->log()[i]);
     }

@@ -874,37 +874,34 @@ void Renderer::drawLayer(GLuint tex, int blend, float glow) {
 }
 
 // ---------------------------------------------------------------------------
-void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
-                         GLuint postTarget) {
-    const double nowSec   = chart.beatToSec(beat);
-    const float  songTime  = float(nowSec);
-    // The scroll axis. Identical to songTime unless the chart carries ncstop
-    // markers, in which case it freezes during each stop while the audio (and
-    // every time-driven effect: mod phases, fret anims) runs on -- the SM stop
-    // look. ssec() is the identity when there are no stops, RETURNING THE SAME
-    // DOUBLE, so every subtraction below is bit-identical to the old code and
-    // the pinned hashes stay pinned.
-    const bool  hasStops  = !chart.stops.empty();
-    const float scrollNow = hasStops ? float(chart.scrollSec(nowSec)) : songTime;
-    auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
+// One player's evaluated modchart state and the matrices built from it.
+// Split out of drawFrame so a second playfield is a second call, not a
+// second copy of five hundred lines.
+Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
+                                        const RenderOpts& o,
+                                        const ModDoc* doc, int plr) {
+    (void)plr;
+    FieldEval E;
+    Mods& mods = E.mods; PostFx& fx = E.fx;
+    float& mx = E.mx; float& my = E.my; float& mz = E.mz;
+    float (&bgKnobs)[MAX_BG_UNIFORMS] = E.bgKnobs;
+    unsigned& bgDriven = E.bgDriven;
+    float& noteSpeed = E.noteSpeed;
+    float& piuT = E.piuT;
+    Mat4& mvpEff = E.mvpEff;
     const float bpm = float(chart.bpmAt(beat));
-    actorBeat_ = beat;                     // the actor effect clock
-    Mods mods; PostFx fx;
-    float mx = 0, my = 0, mz = 0;
+    (void)bpm;
     // bg.<name> knob values for shader background layers. The trailing evalAt
     // argument defaults to null, so the editor's call sites are untouched; the
     // mask says which slots the document actually drives -- undriven uniforms
     // are never set, so a shader's own defaults survive (modfile.h).
-    float bgKnobs[MAX_BG_UNIFORMS] = {};
     // The strike line in screen UV, for shaders that want to protect or
     // target the playfield. Filled by the background block below and reused
     // by the --fxshader pass; the 0.5,0.5 default is screen centre.
-    float fieldX = 0.5f, fieldY = 0.5f;
-    unsigned bgDriven = 0;
-    if (o.doc) {
-        o.doc->evalAt(chart, beat * chart.resolution, mods, fx, mx, my, mz,
+    if (doc) {
+        doc->evalAt(chart, beat * chart.resolution, mods, fx, mx, my, mz,
                       bg_ ? bgKnobs : nullptr);
-        bgDriven = o.doc->bgUsedMask();
+        bgDriven = doc->bgUsedMask();
     }
     else       modchartAt(beat, mods, fx);
     if (o.noMods) { mods = Mods{}; mx = my = mz = 0; bgDriven = 0; }
@@ -915,7 +912,7 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     // has to happen HERE, before mvp_/mvpEff are built from my, not next to the
     // hidePlayfield test further down: down there my has already been baked
     // into the matrices and the subtraction is a no-op.
-    const float piuT = mods.piu < 0.0f ? 0.0f : (mods.piu > 1.0f ? 1.0f : mods.piu);
+    piuT = mods.piu < 0.0f ? 0.0f : (mods.piu > 1.0f ? 1.0f : mods.piu);
     // Measured, not guessed: banding the frame at 99% shows the last of the
     // board leaving the bottom band at 2.38 units, so 2.5 has it fully gone by
     // ~95% -- just before the pad finishes seating, which is what keeps 99%
@@ -928,7 +925,7 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     // Deviation, documented: ITG applies boost/wave to the PRE-scale offset;
     // folding here makes them see the post-scale one. * 1.0f is exact, so the
     // default is bit-identical.
-    const float noteSpeed = o.noteSpeed * mods.scrollspeed;
+    noteSpeed = o.noteSpeed * mods.scrollspeed;
 
     // ---- whole-field transform: tilt, mini, wag ---------------------------
     // OITG applies perspective mods to the whole notefield actor
@@ -942,7 +939,7 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     // the receptor row, and rotating about the strike line already is that.
     // wag is the Actor effect from Saitama's lua layer: rotZ of the field,
     // wag% * 21 degrees on a 2-beat bgm-clock sine.
-    Mat4 mvpEff = mvp_;
+    mvpEff = mvp_;
     {
         const float tiltDeg = 30.0f * mods.tilt;
         float zoom = 1.0f - 0.5f * mods.mini;
@@ -968,52 +965,26 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
         }
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
-    glViewport(0, 0, W, H);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    return E;
+}
 
-    // #BGCHANGES media (stills / movies / shaders): the true back plane, drawn
-    // into fbo_ so post processes it -- NotITG's layout.xml captures background
-    // + playfields and runs post.frag on the result. Keys off nowSec, the
-    // AUDIO time, never scrollNow: stops freeze the scroll axis, not the film.
-    // Null bg_ skips the pass entirely, which is what keeps the pinned hashes
-    // pinned (the baselines render REM III, which has no .sm).
-    if (bg_) {
-        // `field`: the strike line's centre in imageCoord space (y down), for
-        // shader layers' corridor masks. Projected through mvpEff -- the SAME
-        // tilt/mini/wag transform the columns get, which is why this cannot
-        // use mvp_ -- plus the uOffset displacement, at STRIKE_Z = 0
-        // (devdocs/spec/background.md section 2.5, corrected for mvpEff).
-        const float ox = o.px + mx, oy = o.py + my;
-        const float oz = ch::STRIKE_Z + o.pz + mz;
-        const float* mm = mvpEff.m;
-        const float cx = mm[0]*ox + mm[4]*oy + mm[8]*oz  + mm[12];
-        const float cy = mm[1]*ox + mm[5]*oy + mm[9]*oz  + mm[13];
-        const float cw = mm[3]*ox + mm[7]*oy + mm[11]*oz + mm[15];
-        if (cw != 0.0f) { fieldX = cx/cw*0.5f + 0.5f; fieldY = 0.5f - cy/cw*0.5f; }
-        bg_->draw(W, H, nowSec, float(beat), bpm, fieldX, fieldY,
-                  bgKnobs, bgDriven);
-    }
-    // #BGCHANGES actor folders: behind the highway, over the media layer.
-    // Media entries and folder entries are one SM layer; NotClon splits them
-    // by handler, and actor trees composite over the media plane.
-    if (actors_) actors_->drawBackground(*this, songTime);
-
-    // cover: the BrightnessOverlay. It is a child of the Background actor
-    // (Background.cpp:225 AddChild(&m_Brightness), added after every layer), so
-    // it darkens the whole background plane -- media AND background actor trees
-    // -- and nothing in front of it. That is exactly here: after both background
-    // passes, before the first highway quad. Skipped entirely at 0, which is
-    // what keeps the pinned hashes pinned.
-    if (mods.cover != 0.0f) {
-        glUseProgram(cover_);
-        glBindVertexArray(qvao_);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // Actor's BLEND_NORMAL
-        glUniform1f(glGetUniformLocation(cover_, "uAlpha"), mods.cover);
-        glDrawArrays(GL_TRIANGLES, 0, 3);
-    }
-
+// Draw one playfield at a horizontal viewport shift, from one player's
+// evaluated state. vpX = 0 is today's single-player frame, bit for bit;
+// +-W/2 is CH's own two-player layout (GameManager.cs:756 gives each
+// player's camera a viewport rect offset of half a screen, with the camera
+// itself identical).
+void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
+                         FieldEval& E, int vpX, float scrollNow,
+                         float songTime, double nowSec, float bpm) {
+    Mods& mods = E.mods;
+    float& mx = E.mx; float& my = E.my; float& mz = E.mz;
+    const float noteSpeed = E.noteSpeed;
+    const float piuT = E.piuT;
+    Mat4& mvpEff = E.mvpEff;
+    (void)nowSec;
+    const bool hasStops = !chart.stops.empty();
+    auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
+    glViewport(vpX, 0, W, H);
     glUseProgram(prog_);
     glUniformMatrix4fv(glGetUniformLocation(prog_, "uMVP"), 1, GL_FALSE, mvpEff.m);
     glUniform1i(glGetUniformLocation(prog_, "uTex"), 0);
@@ -1397,6 +1368,85 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     if (piuMode)
         drawPiu(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm);
 
+}
+
+void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
+                         GLuint postTarget) {
+    const double nowSec   = chart.beatToSec(beat);
+    const float  songTime  = float(nowSec);
+    // The scroll axis. Identical to songTime unless the chart carries ncstop
+    // markers, in which case it freezes during each stop while the audio (and
+    // every time-driven effect: mod phases, fret anims) runs on -- the SM stop
+    // look. ssec() is the identity when there are no stops, RETURNING THE SAME
+    // DOUBLE, so every subtraction below is bit-identical to the old code and
+    // the pinned hashes stay pinned.
+    const bool  hasStops  = !chart.stops.empty();
+    const float scrollNow = hasStops ? float(chart.scrollSec(nowSec)) : songTime;
+    auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
+    const float bpm = float(chart.bpmAt(beat));
+    actorBeat_ = beat;                     // the actor effect clock
+    FieldEval E = evalField(chart, beat, o, o.doc, 1);
+    Mods& mods = E.mods; PostFx& fx = E.fx;
+    float& mx = E.mx; float& my = E.my; float& mz = E.mz;
+    float (&bgKnobs)[MAX_BG_UNIFORMS] = E.bgKnobs;
+    unsigned& bgDriven = E.bgDriven;
+    float& fieldX = E.fieldX; float& fieldY = E.fieldY;
+    Mat4& mvpEff = E.mvpEff;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
+    glViewport(0, 0, W, H);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // #BGCHANGES media (stills / movies / shaders): the true back plane, drawn
+    // into fbo_ so post processes it -- NotITG's layout.xml captures background
+    // + playfields and runs post.frag on the result. Keys off nowSec, the
+    // AUDIO time, never scrollNow: stops freeze the scroll axis, not the film.
+    // Null bg_ skips the pass entirely, which is what keeps the pinned hashes
+    // pinned (the baselines render REM III, which has no .sm).
+    if (bg_) {
+        // `field`: the strike line's centre in imageCoord space (y down), for
+        // shader layers' corridor masks. Projected through mvpEff -- the SAME
+        // tilt/mini/wag transform the columns get, which is why this cannot
+        // use mvp_ -- plus the uOffset displacement, at STRIKE_Z = 0
+        // (devdocs/spec/background.md section 2.5, corrected for mvpEff).
+        const float ox = o.px + mx, oy = o.py + my;
+        const float oz = ch::STRIKE_Z + o.pz + mz;
+        const float* mm = mvpEff.m;
+        const float cx = mm[0]*ox + mm[4]*oy + mm[8]*oz  + mm[12];
+        const float cy = mm[1]*ox + mm[5]*oy + mm[9]*oz  + mm[13];
+        const float cw = mm[3]*ox + mm[7]*oy + mm[11]*oz + mm[15];
+        if (cw != 0.0f) { fieldX = cx/cw*0.5f + 0.5f; fieldY = 0.5f - cy/cw*0.5f; }
+        bg_->draw(W, H, nowSec, float(beat), bpm, fieldX, fieldY,
+                  bgKnobs, bgDriven);
+    }
+    // #BGCHANGES actor folders: behind the highway, over the media layer.
+    // Media entries and folder entries are one SM layer; NotClon splits them
+    // by handler, and actor trees composite over the media plane.
+    if (actors_) actors_->drawBackground(*this, songTime);
+
+    // cover: the BrightnessOverlay. It is a child of the Background actor
+    // (Background.cpp:225 AddChild(&m_Brightness), added after every layer), so
+    // it darkens the whole background plane -- media AND background actor trees
+    // -- and nothing in front of it. That is exactly here: after both background
+    // passes, before the first highway quad. Skipped entirely at 0, which is
+    // what keeps the pinned hashes pinned.
+    if (mods.cover != 0.0f) {
+        glUseProgram(cover_);
+        glBindVertexArray(qvao_);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);   // Actor's BLEND_NORMAL
+        glUniform1f(glGetUniformLocation(cover_, "uAlpha"), mods.cover);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+
+    // Two playfields when the modchart drives a second player. Same camera,
+    // half-screen viewport shift each way -- CH's own 2P layout.
+    drawField(chart, beat, o, E, o.doc2 ? -W / 2 : 0,
+              scrollNow, songTime, nowSec, bpm);
+    if (o.doc2) {
+        FieldEval E2 = evalField(chart, beat, o, o.doc2, 2);
+        drawField(chart, beat, o, E2, W / 2, scrollNow, songTime, nowSec, bpm);
+    }
+    glViewport(0, 0, W, H);
     // #FGCHANGES actor folders: in front of the playfield. Drawn INSIDE fbo_,
     // so the post chain processes them -- which is what NotITG's layout.xml
     // does (its captured region spans background + playfields, and post.frag
