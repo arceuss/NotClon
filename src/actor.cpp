@@ -1540,6 +1540,7 @@ int LuaHost::actorCall(lua_State* L) {
             actor->spriteAnimate = lua_toboolean(L, 2) != 0;
             lua_pushvalue(L, 1);
             return 1;
+        default: break;
     }
 
     auto found = host->call_->actors.find(actor);
