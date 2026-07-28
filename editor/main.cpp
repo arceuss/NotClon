@@ -290,6 +290,7 @@ int main(int argc, char** argv) {
         }
         smBesidePath = smBeside;
         actors = std::make_unique<nc::ActorLayer>();
+        actors->setChart(&chart);
         if (!smBeside.empty()) {
             std::string aerr;
             actors->loadFromSm(smBeside, dir, aerr);

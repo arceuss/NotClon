@@ -156,12 +156,22 @@ bool xmlParse(const std::string& t, size_t& i, XmlNode& out) {
 // and ','.
 struct Cmd { std::string verb; std::vector<std::string> args; std::string lua; };
 
+bool isLuaCommand(const std::string& src) {
+    const std::string s = trimws(src);
+    if (s.empty() || s[0] != '%') return false;
+    size_t p = 1;
+    if (s.compare(p, 8, "function") != 0) return false;
+    p += 8;
+    while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+    return p < s.size() && s[p] == '(';
+}
+
 std::vector<Cmd> parseChain(const std::string& src) {
     std::vector<Cmd> out;
     const std::string s = trimws(src);
     if (s.empty()) return out;
     // Whole-attribute Lua chunk.
-    if (s.compare(0, 10, "%function(") == 0) {
+    if (isLuaCommand(s)) {
         Cmd c; c.verb = "%lua"; c.lua = s;
         out.push_back(c);
         return out;
@@ -221,13 +231,20 @@ float argf(const Cmd& c, size_t i, float d = 0.0f) {
 
 }  // namespace
 
+Actor::~Actor() {
+    if (aftFbo) glDeleteFramebuffers(1, &aftFbo);
+    if (aftTex) glDeleteTextures(1, &aftTex);
+}
+
 const ActorCommand* Actor::findCommandEntry(const std::string& name) const {
-    for (const auto& c : commands) if (c.name == name) return &c;
+    for (auto it = commands.rbegin(); it != commands.rend(); ++it)
+        if (it->name == name) return &*it;
     return nullptr;
 }
 
 ActorCommand* Actor::findCommandEntry(const std::string& name) {
-    for (auto& c : commands) if (c.name == name) return &c;
+    for (auto it = commands.rbegin(); it != commands.rend(); ++it)
+        if (it->name == name) return &*it;
     return nullptr;
 }
 
@@ -303,6 +320,57 @@ void emit(Sched& S, int prop, int n, const float* to) {
 }
 
 void emit1(Sched& S, int prop, float v) { emit(S, prop, 1, &v); }
+ActorState evalActor(const Actor& a, double sec);
+void settleTweens(Sched& S, bool finish) {
+    bool touched[PROP_COUNT] = {};
+    double end = S.t;
+    for (const Seg& s : S.a->segs) {
+        if (s.t1 > S.t) {
+            touched[s.prop] = true;
+            end = std::max(end, double(s.t1));
+        }
+    }
+    if (end == S.t) return;
+    const ActorState target = evalActor(*S.a, finish ? end : S.t);
+    S.a->segs.erase(std::remove_if(S.a->segs.begin(), S.a->segs.end(),
+        [&](const Seg& s) { return s.t1 > float(S.t); }), S.a->segs.end());
+    S.cur = target;
+    S.dur = 0;
+    S.ease = Ease::Instant;
+    for (int prop = 0; prop < PROP_COUNT; ++prop) {
+        if (!touched[prop]) continue;
+        switch (prop) {
+            case PROP_X: emit1(S, prop, target.x); break;
+            case PROP_Y: emit1(S, prop, target.y); break;
+            case PROP_Z: emit1(S, prop, target.z); break;
+            case PROP_ZOOMX: emit1(S, prop, target.zoomX); break;
+            case PROP_ZOOMY: emit1(S, prop, target.zoomY); break;
+            case PROP_ZOOMZ: emit1(S, prop, target.zoomZ); break;
+            case PROP_ROTX: emit1(S, prop, target.rotX); break;
+            case PROP_ROTY: emit1(S, prop, target.rotY); break;
+            case PROP_ROTZ: emit1(S, prop, target.rotZ); break;
+            case PROP_DIFFUSE: {
+                const float v[4] = {target.r, target.g, target.b, target.a};
+                emit(S, prop, 4, v);
+            } break;
+            case PROP_DIFFUSEALPHA: emit1(S, prop, target.a); break;
+            case PROP_GLOWALPHA: emit1(S, prop, target.glowA); break;
+            case PROP_HIDDEN: emit1(S, prop, target.hidden ? 1.0f : 0.0f); break;
+            case PROP_SIZE: {
+                const float v[2] = {target.sizeX, target.sizeY};
+                emit(S, prop, 2, v);
+            } break;
+            case PROP_HALIGN: emit1(S, prop, float(target.horizAlign)); break;
+            case PROP_VALIGN: emit1(S, prop, float(target.vertAlign)); break;
+            case PROP_BLEND: emit1(S, prop, float(target.blend)); break;
+            case PROP_ZWRITE: emit1(S, prop, target.zWrite ? 1.0f : 0.0f); break;
+            case PROP_ZTEST: emit1(S, prop, target.zTest ? 1.0f : 0.0f); break;
+            case PROP_CLEARZ: emit1(S, prop, target.clearZ ? 1.0f : 0.0f); break;
+            default: break;
+        }
+    }
+}
+
 
 void scheduleChain(Actor& a, const std::string& text, double atSec,
                    ActorState startState, int depth, LuaHost* lua);
@@ -557,20 +625,25 @@ static void parseSpriteFile(const std::string& path, Actor& a) {
 // time -- see the note on Actor::spriteFrames.
 static void spriteUV(const Actor& a, double sec,
                      float& u0, float& v0, float& u1, float& v1) {
-    u0 = 0.0f; v0 = 0.0f; u1 = 1.0f; v1 = 1.0f;
-    if (a.spriteFrames.empty() || a.spriteTotal <= 0.0f) return;
-    double t = fmod(sec, double(a.spriteTotal));
-    if (t < 0) t += a.spriteTotal;
-    size_t k = 0;
-    for (; k + 1 < a.spriteFrames.size(); ++k) {
-        if (t < a.spriteDelays[k]) break;
-        t -= a.spriteDelays[k];
+    const int cols = a.sheetCols > 0 ? a.sheetCols : 1;
+    const int rows = a.sheetRows > 0 ? a.sheetRows : 1;
+    int idx = a.spriteState;
+    if (a.spriteAnimate && !a.spriteFrames.empty() && a.spriteTotal > 0.0f) {
+        double t = fmod(sec, double(a.spriteTotal));
+        if (t < 0) t += a.spriteTotal;
+        size_t k = 0;
+        for (; k + 1 < a.spriteFrames.size(); ++k) {
+            if (t < a.spriteDelays[k]) break;
+            t -= a.spriteDelays[k];
+        }
+        idx = a.spriteFrames[k];
     }
-    const int idx = a.spriteFrames[k];
-    const int col = a.sheetCols > 0 ? idx % a.sheetCols : 0;
-    const int row = a.sheetCols > 0 ? idx / a.sheetCols : 0;
-    const float cw = 1.0f / float(a.sheetCols > 0 ? a.sheetCols : 1);
-    const float ch = 1.0f / float(a.sheetRows > 0 ? a.sheetRows : 1);
+    const int cells = cols * rows;
+    idx = cells > 0 ? ((idx % cells) + cells) % cells : 0;
+    const int col = idx % cols;
+    const int row = idx / cols;
+    const float cw = 1.0f / float(cols);
+    const float ch = 1.0f / float(rows);
     u0 = col * cw; u1 = u0 + cw;
     v0 = row * ch; v1 = v0 + ch;
 }
@@ -751,7 +824,7 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
 void compileActorLua(Actor& a, LuaHost& lua, std::map<std::string, int>& cache,
                      std::vector<std::string>* warn) {
     for (ActorCommand& c : a.commands) {
-        if (trimws(c.text).compare(0, 10, "%function(") != 0) continue;
+        if (!isLuaCommand(c.text)) continue;
         const auto found = cache.find(c.text);
         if (found != cache.end()) {
             c.luaRef = found->second;
@@ -781,7 +854,7 @@ void scheduleActor(Actor& a, double startSec, LuaHost& lua,
             double endSec = startSec;
             for (const Seg& s : a.segs) endSec = std::max(endSec, double(s.t1));
             st = evalActor(a, endSec);
-        } else if (trimws(ini->text).compare(0, 10, "%function(") != 0) {
+        } else if (!isLuaCommand(ini->text)) {
             Sched S; S.a = &a; S.t = startSec; S.cur = st;
             runCmds(S, parseChain(ini->text), 0, &lua);
             st = S.cur;
@@ -807,7 +880,7 @@ void scheduleActorOn(Actor& a, double startSec, LuaHost& lua,
             const std::string where = (a.name.empty() ? a.type : a.name) + ".OnCommand";
             if (!lua.callChunk(on->luaRef, a, startSec, where, err) && warn)
                 warn->push_back(where + ": " + err);
-        } else if (trimws(on->text).compare(0, 10, "%function(") != 0) {
+        } else if (!isLuaCommand(on->text)) {
             scheduleChain(a, on->text, startSec, a.onBase, 0, &lua);
         }
     }
@@ -827,7 +900,7 @@ void dispatchActorCommand(Actor& a, const std::string& cmd, double sec,
             const std::string where = (a.name.empty() ? a.type : a.name) + "." + cmd;
             if (!lua.callChunk(c->luaRef, a, sec, where, err))
                 lua.note(where + ": " + err);
-        } else if (trimws(c->text).compare(0, 10, "%function(") != 0) {
+        } else if (!isLuaCommand(c->text)) {
             scheduleChain(a, c->text, sec, st, 0, &lua);
         }
     }
@@ -843,15 +916,23 @@ const std::vector<std::string>& ActorTree::log() const {
     static const std::vector<std::string> empty;
     return lua_ ? lua_->log() : empty;
 }
+void ActorTree::setChart(const Chart* chart) {
+    chart_ = chart;
+    if (lua_) lua_->setChart(chart);
+}
+
 
 
 bool ActorTree::load(const std::string& dir, double startSec, std::string& err) {
     dir_ = dir;
     startSec_ = startSec;
     root_.reset();
+    namedTex_.clear();
+    gameCmdReported_ = false;
     lua_ = std::make_unique<LuaHost>();
     if (!lua_->open(err)) return false;
     lua_->setTree(this);   // so an AFT can publish its texture by name
+    lua_->setChart(chart_);
     const size_t slash = dir.find_last_of("/\\");
     lua_->setSongDir(slash == std::string::npos ? "." : dir.substr(0, slash));
     lua_->setBeat(0.0, startSec);
@@ -1014,8 +1095,8 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         w.x = parent.x + lx * c - ly * sn;
         w.y = parent.y + lx * sn + ly * c;
     }
-    w.zoomX = parent.zoomX * st.zoomX;
-    w.zoomY = parent.zoomY * st.zoomY;
+    w.zoomX = parent.zoomX * st.zoomX * a.baseZoomX;
+    w.zoomY = parent.zoomY * st.zoomY * a.baseZoomY;
     w.rotZ = parent.rotZ + st.rotZ;
     w.rotX = parent.rotX + st.rotX;
     w.rotY = parent.rotY + st.rotY;
@@ -1092,6 +1173,94 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
 
 }  // namespace
 
+
+void ActorTree::enqueue(double t, Actor& a, const std::string& cmd) {
+    // Runaway guard: a body that queues itself with no sleep would append
+    // forever inside one pump step. 4096 is far above any real chart's
+    // in-flight count and well below anything that would stall a frame.
+    if (pending_.size() > 4096) return;
+    Pending p{t, &a, cmd};
+    auto it = std::upper_bound(pending_.begin(), pending_.end(), p,
+        [](const Pending& x, const Pending& y) { return x.t < y.t; });
+    pending_.insert(it, p);
+}
+
+void ActorTree::runPending(double sec, int maxSteps) {
+    if (!lua_) return;
+    int steps = 0;
+    const size_t queued = pending_.size();
+    while (!pending_.empty() && pending_.front().t <= sec) {
+        if (++steps > maxSteps) {
+            if (!pumpOverrun_) {
+                pumpOverrun_ = true;
+                lua_->note("command pump hit its step cap; the chart is "
+                           "behind where it should be");
+            }
+            break;
+        }
+        const Pending p = pending_.front();
+        pending_.erase(pending_.begin());
+        if (!p.a) continue;
+        const ActorCommand* c = p.a->findCommandEntry(p.cmd + "Command");
+        if (!c) continue;
+        // The body runs AS OF ITS SCHEDULED TIME, not the frame time: a chart
+        // that steps 0.02s at a time must see each of those instants, or its
+        // beat-gated branches are skipped wholesale.
+        const double eventBeat = chart_ ? chart_->secToBeat(p.t) : pumpBeat_;
+        lua_->setBeat(eventBeat, p.t);
+        lua_->chunkStart   = p.t;
+        lua_->pendingSleep = 0.0;
+        if (c->luaRef >= 0) {
+            std::string err;
+            const std::string where =
+                (p.a->name.empty() ? p.a->type : p.a->name) + "." + c->name;
+            if (!lua_->callChunk(c->luaRef, *p.a, p.t, where, err))
+                lua_->note(where + ": " + err);
+        } else if (!isLuaCommand(c->text)) {
+            scheduleChain(*p.a, c->text, p.t, p.a->onBase, 0, lua_.get());
+        }
+        dispatchPending(p.t);   // MESSAGEMAN:Broadcast from inside the body
+    }
+    if (steps > pumpRan_) pumpRan_ = steps;
+    if (queued && !pumpEverRan_) {
+        pumpEverRan_ = true;
+        char m[96];
+        snprintf(m, sizeof m, "command pump started (%d queued)", int(queued));
+        lua_->note(m);
+    }
+}
+
+void ActorTree::update(double sec, double beat, int maxSteps) {
+    if (!root_ || !lua_) return;
+    if (sec < startSec_) return;
+
+    // First call: arm the pump from whatever Init/On queued.
+    if (luaClock_ < 0.0) luaClock_ = startSec_;
+
+    // Backwards seek. The loop's cursors only move forward, so there is
+    // nothing to rewind -- the tree is rebuilt and replayed. Deterministic and
+    // identical to what an encode produced, but it costs a replay, which is
+    // why the editor feels a scrub backwards and an encode never does.
+    if (sec < luaClock_ - 1e-6) {
+        std::string err;
+        const std::string d = dir_;
+        const double st = startSec_;
+        pending_.clear();
+        pumpOverrun_ = false;
+        luaClock_ = -1.0;
+        if (!load(d, st, err)) return;
+        luaClock_ = startSec_;
+    }
+
+    pumpBeat_ = beat;
+    runPending(sec, maxSteps);
+    if (!gameCmdReported_ && lua_->gameCommands() > 0) {
+        gameCmdReported_ = true;
+        lua_->note("GAMESTATE:ApplyGameCommand is accepted but not applied");
+    }
+    luaClock_ = sec;
+}
+
 void ActorTree::draw(Renderer& R, double sec) {
     if (!root_ || sec < startSec_) return;
     if (lua_) lua_->setBeat(R.actorBeat(), sec);
@@ -1115,25 +1284,46 @@ struct LuaActorRef {
 };
 
 enum ActorMethod {
-    AM_X, AM_Y, AM_ZOOM, AM_ZOOMTO, AM_ZOOMX, AM_ZOOMY,
-    AM_VISIBLE, AM_HIDDEN, AM_DIFFUSEALPHA, AM_DIFFUSE, AM_ROTZ,
-    AM_LINEAR, AM_SLEEP, AM_FINISH, AM_FILTER, AM_PLAY, AM_QUEUE, AM_GETCHILD,
+    AM_X, AM_Y, AM_Z, AM_ZOOM, AM_ZOOMTO, AM_ZOOMX, AM_ZOOMY, AM_ZOOMZ,
+    AM_VISIBLE, AM_HIDDEN, AM_DIFFUSEALPHA, AM_DIFFUSE,
+    AM_ROTX, AM_ROTY, AM_ROTZ,
+    AM_LINEAR, AM_ACCEL, AM_DECEL, AM_SPRING, AM_BOUNCEBEGIN, AM_BOUNCEEND,
+    AM_SLEEP, AM_FINISH, AM_STOP, AM_FILTER, AM_PLAY, AM_QUEUE,
+    AM_QUEUEMESSAGE, AM_GETCHILD,
+    AM_GETX, AM_GETY, AM_GETZ, AM_GETZOOM, AM_GETROT,
+    AM_SETSTATE, AM_ANIMATE,
+    AM_BOB, AM_BOUNCE, AM_WAG, AM_VIBRATE, AM_STOPEFFECT,
+    AM_EFFECTMAG, AM_EFFECTPERIOD, AM_EFFECTCLOCK,
     // ActorFrameTexture
     AM_AFT_NAME, AM_AFT_W, AM_AFT_H, AM_AFT_CREATE, AM_AFT_GETTEX,
     AM_AFT_DEPTH, AM_AFT_ALPHA, AM_AFT_FLOAT, AM_AFT_PRESERVE,
     // plain actor methods that were reaching the unsupported path
-    AM_SETTEXTURE, AM_BLEND, AM_BASEZOOMX, AM_BASEZOOMY, AM_ADDX, AM_ADDY
+    AM_SETTEXTURE, AM_BLEND, AM_BASEZOOMX, AM_BASEZOOMY,
+    AM_ADDX, AM_ADDY, AM_ADDZ
 };
 
 struct ActorMethodDef { const char* name; ActorMethod method; };
 const ActorMethodDef ACTOR_METHODS[] = {
-    {"x", AM_X}, {"y", AM_Y}, {"zoom", AM_ZOOM}, {"zoomto", AM_ZOOMTO},
-    {"zoomx", AM_ZOOMX}, {"zoomy", AM_ZOOMY}, {"visible", AM_VISIBLE},
-    {"hidden", AM_HIDDEN}, {"diffusealpha", AM_DIFFUSEALPHA},
-    {"diffuse", AM_DIFFUSE}, {"rotationz", AM_ROTZ}, {"linear", AM_LINEAR},
+    {"x", AM_X}, {"y", AM_Y}, {"z", AM_Z},
+    {"zoom", AM_ZOOM}, {"zoomto", AM_ZOOMTO},
+    {"zoomx", AM_ZOOMX}, {"zoomy", AM_ZOOMY}, {"zoomz", AM_ZOOMZ},
+    {"visible", AM_VISIBLE}, {"hidden", AM_HIDDEN},
+    {"diffusealpha", AM_DIFFUSEALPHA}, {"diffuse", AM_DIFFUSE},
+    {"rotationx", AM_ROTX}, {"rotationy", AM_ROTY}, {"rotationz", AM_ROTZ},
+    {"linear", AM_LINEAR}, {"accelerate", AM_ACCEL},
+    {"decelerate", AM_DECEL}, {"spring", AM_SPRING},
+    {"bouncebegin", AM_BOUNCEBEGIN}, {"bounceend", AM_BOUNCEEND},
     {"sleep", AM_SLEEP}, {"finishtweening", AM_FINISH},
-    {"SetTextureFiltering", AM_FILTER}, {"playcommand", AM_PLAY},
-    {"queuecommand", AM_QUEUE}, {"GetChild", AM_GETCHILD},
+    {"stoptweening", AM_STOP}, {"SetTextureFiltering", AM_FILTER},
+    {"playcommand", AM_PLAY}, {"queuecommand", AM_QUEUE},
+    {"queuemessage", AM_QUEUEMESSAGE}, {"GetChild", AM_GETCHILD},
+    {"GetX", AM_GETX}, {"GetY", AM_GETY}, {"GetZ", AM_GETZ},
+    {"GetZoom", AM_GETZOOM}, {"getrotation", AM_GETROT},
+    {"setstate", AM_SETSTATE}, {"animate", AM_ANIMATE},
+    {"bob", AM_BOB}, {"bounce", AM_BOUNCE}, {"wag", AM_WAG},
+    {"vibrate", AM_VIBRATE}, {"stopeffect", AM_STOPEFFECT},
+    {"effectmagnitude", AM_EFFECTMAG}, {"effectperiod", AM_EFFECTPERIOD},
+    {"effectclock", AM_EFFECTCLOCK},
     {"SetTextureName", AM_AFT_NAME}, {"SetWidth", AM_AFT_W},
     {"SetHeight", AM_AFT_H}, {"Create", AM_AFT_CREATE},
     {"GetTexture", AM_AFT_GETTEX},
@@ -1141,7 +1331,7 @@ const ActorMethodDef ACTOR_METHODS[] = {
     {"EnableFloat", AM_AFT_FLOAT}, {"EnablePreserveTexture", AM_AFT_PRESERVE},
     {"SetTexture", AM_SETTEXTURE}, {"blend", AM_BLEND},
     {"basezoomx", AM_BASEZOOMX}, {"basezoomy", AM_BASEZOOMY},
-    {"addx", AM_ADDX}, {"addy", AM_ADDY},
+    {"addx", AM_ADDX}, {"addy", AM_ADDY}, {"addz", AM_ADDZ},
 };
 
 
@@ -1150,6 +1340,11 @@ const ActorMethodDef ACTOR_METHODS[] = {
 // process cannot cross-talk.
 LuaHost* hostOf(lua_State* L) {
     return static_cast<LuaHost*>(lua_touserdata(L, lua_upvalueindex(1)));
+}
+int lua_nc_sec(lua_State* L) {
+    LuaHost* h = hostOf(L);
+    lua_pushnumber(L, h ? h->sec() : 0.0);
+    return 1;
 }
 int lua_nc_beat(lua_State* L) {
     LuaHost* h = hostOf(L);
@@ -1165,6 +1360,13 @@ int lua_nc_broadcast(lua_State* L) {
     LuaHost* h = hostOf(L);
     const char* m = lua_tostring(L, 1);
     if (h && m) h->queueBroadcast(m);
+    return 0;
+}
+// Counts what a per-frame ApplyGameCommand asked for, so the gap is visible
+// rather than silent. Reported once per run by the tree.
+int lua_nc_gamecmd(lua_State* L) {
+    LuaHost* h = hostOf(L);
+    if (h) h->noteGameCommand();
     return 0;
 }
 int lua_nc_trace(lua_State* L) {
@@ -1322,7 +1524,22 @@ int LuaHost::actorCall(lua_State* L) {
             lua_pushvalue(L, 1);
             return 1;
         }
-        default: break;
+        case AM_BASEZOOMX:
+            actor->baseZoomX = float(luaL_optnumber(L, 2, 1.0));
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_BASEZOOMY:
+            actor->baseZoomY = float(luaL_optnumber(L, 2, 1.0));
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_SETSTATE:
+            actor->spriteState = int(luaL_optinteger(L, 2, 0));
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_ANIMATE:
+            actor->spriteAnimate = lua_toboolean(L, 2) != 0;
+            lua_pushvalue(L, 1);
+            return 1;
     }
 
     auto found = host->call_->actors.find(actor);
@@ -1346,6 +1563,7 @@ int LuaHost::actorCall(lua_State* L) {
     switch (method) {
         case AM_X: emit1(S, PROP_X, number(2)); break;
         case AM_Y: emit1(S, PROP_Y, number(2)); break;
+        case AM_Z: emit1(S, PROP_Z, number(2)); break;
         case AM_ZOOM: {
             const float z = number(2, 1.0f);
             emit1(S, PROP_ZOOMX, z);
@@ -1357,6 +1575,10 @@ int LuaHost::actorCall(lua_State* L) {
         } break;
         case AM_ZOOMX: emit1(S, PROP_ZOOMX, number(2, 1.0f)); break;
         case AM_ZOOMY: emit1(S, PROP_ZOOMY, number(2, 1.0f)); break;
+        case AM_ZOOMZ: emit1(S, PROP_ZOOMZ, number(2, 1.0f)); break;
+        case AM_ADDX: emit1(S, PROP_X, S.cur.x + number(2)); break;
+        case AM_ADDY: emit1(S, PROP_Y, S.cur.y + number(2)); break;
+        case AM_ADDZ: emit1(S, PROP_Z, S.cur.z + number(2)); break;
         case AM_VISIBLE: emit1(S, PROP_HIDDEN, boolean(2, true) ? 0.0f : 1.0f); break;
         case AM_HIDDEN: emit1(S, PROP_HIDDEN, boolean(2, true) ? 1.0f : 0.0f); break;
         case AM_DIFFUSEALPHA: emit1(S, PROP_DIFFUSEALPHA, number(2, 1.0f)); break;
@@ -1373,17 +1595,59 @@ int LuaHost::actorCall(lua_State* L) {
             }
             emit(S, PROP_DIFFUSE, 4, colour);
         } break;
+        case AM_ROTX: emit1(S, PROP_ROTX, number(2)); break;
+        case AM_ROTY: emit1(S, PROP_ROTY, number(2)); break;
         case AM_ROTZ: emit1(S, PROP_ROTZ, number(2)); break;
         case AM_LINEAR: S.dur = number(2); S.ease = Ease::Linear; break;
+        case AM_ACCEL: S.dur = number(2); S.ease = Ease::Accelerate; break;
+        case AM_DECEL: S.dur = number(2); S.ease = Ease::Decelerate; break;
+        case AM_SPRING: S.dur = number(2); S.ease = Ease::Spring; break;
+        case AM_BOUNCEBEGIN: S.dur = number(2); S.ease = Ease::BounceBegin; break;
+        case AM_BOUNCEEND: S.dur = number(2); S.ease = Ease::BounceEnd; break;
         case AM_SLEEP:
+            // Two effects, both real: it advances the tween cursor, and it
+            // delays whatever this body queues afterwards.
             S.t += number(2);
             S.dur = 0;
             S.ease = Ease::Instant;
+            host->pendingSleep += number(2);
             break;
         case AM_FINISH:
-            S.dur = 0;
-            S.ease = Ease::Instant;
+            settleTweens(S, true);
             break;
+        case AM_STOP:
+            settleTweens(S, false);
+            break;
+        case AM_GETX: lua_pushnumber(L, S.cur.x); return 1;
+        case AM_GETY: lua_pushnumber(L, S.cur.y); return 1;
+        case AM_GETZ: lua_pushnumber(L, S.cur.z); return 1;
+        case AM_GETZOOM: lua_pushnumber(L, S.cur.zoomX); return 1;
+        case AM_GETROT:
+            lua_pushnumber(L, S.cur.rotX);
+            lua_pushnumber(L, S.cur.rotY);
+            lua_pushnumber(L, S.cur.rotZ);
+            return 3;
+        case AM_BLEND: {
+            const char* value = lua_tostring(L, 2);
+            const std::string b = value ? lower(value) : "normal";
+            emit1(S, PROP_BLEND, b == "add" ? 1.0f :
+                                (b == "noeffect" ? 2.0f : 0.0f));
+        } break;
+        case AM_BOB: actor->effect.kind = Effect::Bob; break;
+        case AM_BOUNCE: actor->effect.kind = Effect::Bounce; break;
+        case AM_WAG: actor->effect.kind = Effect::Wag; break;
+        case AM_VIBRATE: actor->effect.kind = Effect::Vibrate; break;
+        case AM_STOPEFFECT: actor->effect.kind = Effect::None; break;
+        case AM_EFFECTMAG:
+            actor->effect.magX = number(2);
+            actor->effect.magY = number(3);
+            actor->effect.magZ = number(4);
+            break;
+        case AM_EFFECTPERIOD: actor->effect.period = number(2, 1.0f); break;
+        case AM_EFFECTCLOCK: {
+            const char* value = lua_tostring(L, 2);
+            actor->effect.beatClock = value && lower(value) == "bgm";
+        } break;
         case AM_FILTER: {
             const bool filter = boolean(2, true);
             if (actor->textureFiltering != filter) {
@@ -1391,9 +1655,23 @@ int LuaHost::actorCall(lua_State* L) {
                 actor->textureFilterDirty = true;
             }
         } break;
+        case AM_QUEUEMESSAGE: {
+            const char* name = luaL_checkstring(L, 2);
+            host->queueBroadcast(name);
+        } break;
         case AM_PLAY:
         case AM_QUEUE: {
             const char* name = luaL_checkstring(L, 2);
+            // Scheduled, not called: a body that ends `sleep(t)
+            // queuecommand('Update')` is arming itself for later, and running
+            // it inline turns the chart's main loop into 8 recursive frames at
+            // load time that then stop forever.
+            if (host->tree_) {
+                host->tree_->enqueue(host->chunkStart + host->pendingSleep,
+                                     *actor, name);
+                lua_pushvalue(L, 1);
+                return 1;
+            }
             if (host->call_->depth < 8) {
                 ++host->call_->depth;
                 if (const ActorCommand* command =
@@ -1402,7 +1680,7 @@ int LuaHost::actorCall(lua_State* L) {
                         std::string err;
                         if (!host->invokeChunk(command->luaRef, *actor, command->name, err))
                             host->note(command->name + ": " + err);
-                    } else if (trimws(command->text).compare(0, 10, "%function(") != 0) {
+                    } else if (!isLuaCommand(command->text)) {
                         runCmds(S, parseChain(command->text), host->call_->depth, host);
                     }
                 }
@@ -1466,8 +1744,10 @@ bool LuaHost::open(std::string& err) {
     struct Reg { const char* name; lua_CFunction fn; };
     const Reg natives[] = {
         {"__nc_beat", lua_nc_beat},
+        {"__nc_sec", lua_nc_sec},
         {"__nc_songdir", lua_nc_songdir},
         {"__nc_broadcast", lua_nc_broadcast},
+        {"__nc_gamecmd", lua_nc_gamecmd},
         {"__nc_trace", lua_nc_trace},
     };
     for (const Reg& r : natives) {
@@ -1503,16 +1783,41 @@ bool LuaHost::open(std::string& err) {
         "end\n"
         "ABSORB = absorb\n"
         "SCREENMAN = absorb()\n"
-        "PREFSMAN = { GetPreference = function() return '' end }\n"
+        "PREFSMAN = { GetPreference = function() return '' end,\n"
+        "             SetPreference = function() end }\n"
         "DISPLAY = { GetVendor = function() return '' end,\n"
         "            GetDisplayWidth = function() return SCREEN_WIDTH end,\n"
         "            GetDisplayHeight = function() return SCREEN_HEIGHT end }\n"
         "Trace = function(v) __nc_trace(tostring(v)) end\n"
         "MESSAGEMAN = { Broadcast = function(self, m) __nc_broadcast(m) end }\n"
+        "local playerStats = {\n"
+        "  GetActualDancePoints = function() return 0 end,\n"
+        "  GetPossibleDancePoints = function() return 1 end,\n"
+        "}\n"
+        "local stageStats = {\n"
+        "  GetPlayerStageStats = function() return playerStats end,\n"
+        "}\n"
+        "local song = {\n"
+        "  GetSongDir = function() return __nc_songdir() end,\n"
+        "  GetDisplayFullTitle = function() return '' end,\n"
+        "}\n"
+        "local songPosition = { GetMusicSeconds = function() return __nc_sec() end }\n"
+        "PLAYER_1 = 1\n"
+        "PLAYER_2 = 2\n"
+        "STATSMAN = { GetCurStageStats = function() return stageStats end }\n"
         "GAMESTATE = {\n"
         "  GetSongBeat = function() return __nc_beat() end,\n"
         "  GetSongBeatVisible = function() return __nc_beat() end,\n"
-        "  GetCurrentSong = function() return { GetSongDir = function() return __nc_songdir() end } end,\n"
+        "  GetCurMusicSeconds = function() return __nc_sec() end,\n"
+        "  GetSongPosition = function() return songPosition end,\n"
+        "  GetCurrentSong = function() return song end,\n"
+        "  GetPlayerStageStats = function() return playerStats end,\n"
+        "  GetCurStageStats = function() return stageStats end,\n"
+        "  GetCurrentSteps = function() return absorb() end,\n"
+        "  IsPlayerEnabled = function() return true end,\n"
+        "  ApplyGameCommand = function(self, command, player) __nc_gamecmd(command, player) end,\n"
+        "  SetShaderFlag = function() end,\n"
+        "  SetShaderFlagNum = function() end,\n"
         "}\n";
     if (luaL_dostring(L_, boot) != 0) {
         err = lua_tostring(L_, -1) ? lua_tostring(L_, -1) : "boot failed";
@@ -1559,10 +1864,16 @@ void ActorLayer::addFolder(const std::string& songDir, const std::string& sub,
     Slot s;
     s.e.startSec = startSec; s.e.dir = songDir + "/" + sub; s.e.foreground = foreground;
     s.tree = std::make_unique<ActorTree>();
+    s.tree->setChart(chart_);
     std::string err;
     if (!s.tree->load(s.e.dir, startSec, err)) { log_.push_back(err); return; }
     for (const std::string& entry : s.tree->log()) log_.push_back(entry);
     trees_.push_back(std::move(s));
+}
+
+void ActorLayer::setChart(const Chart* chart) {
+    chart_ = chart;
+    for (auto& s : trees_) s.tree->setChart(chart);
 }
 
 bool ActorLayer::loadFromSm(const std::string& smPath, const std::string& songDir,
@@ -1635,13 +1946,35 @@ int ActorLayer::drainLuaMods(ModDoc& doc, int resolution) {
     return n;
 }
 
+void ActorLayer::pump(Renderer& R, double sec) {
+    // Every tree, not just the ones about to be drawn: the loop that drives a
+    // chart lives in one tree and moves actors in all of them. Called from
+    // both draw paths because a chart may be foreground-only or
+    // background-only; ActorTree::update is idempotent within a frame (its
+    // clock only moves forward), so the second call is free.
+    for (auto& s : trees_)
+        if (s.tree->ok() && sec >= s.e.startSec) {
+            // Take whatever the step logged. The tree's log was merged into
+            // ours when it LOADED, so anything a command body reports at draw
+            // time -- a Lua error above all -- would otherwise be stranded
+            // where nothing prints it, and the chart would just silently stop
+            // animating. That is how this loop's first failure went unseen.
+            const size_t before = s.tree->log().size();
+            s.tree->update(sec, R.actorBeat());
+            for (size_t i = before; i < s.tree->log().size(); ++i)
+                log_.push_back(s.tree->log()[i]);
+        }
+}
+
 void ActorLayer::drawBackground(Renderer& R, double sec) {
+    pump(R, sec);
     for (auto& s : trees_)
         if (!s.e.foreground && s.tree->ok() && sec >= s.e.startSec)
             s.tree->draw(R, sec);
 }
 
 void ActorLayer::drawForeground(Renderer& R, double sec) {
+    pump(R, sec);
     for (auto& s : trees_)
         if (s.e.foreground && s.tree->ok() && sec >= s.e.startSec)
             s.tree->draw(R, sec);

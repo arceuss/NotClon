@@ -72,21 +72,33 @@ Messages work the SM way: `MESSAGEMAN:Broadcast('Flash')` runs every actor's
 
 The embedded Lua exposes a deliberately small surface:
 
-- `GAMESTATE:GetSongBeat()` — the current beat
+- `GAMESTATE:GetSongBeat()` / `GetSongBeatVisible()` — the beat at the
+  command's scheduled instant
+- `GAMESTATE:GetCurMusicSeconds()` and
+  `GAMESTATE:GetSongPosition():GetMusicSeconds()` — that instant in seconds
 - `GAMESTATE:GetCurrentSong():GetSongDir()` — the song folder
+- `STATSMAN:GetCurStageStats()` and the player-stage-stat accessors used by
+  classic modfiles. Offline rendering has no live score, so dance points are
+  reported as zero.
+- `GAMESTATE:ApplyGameCommand(...)` is accepted so a runtime loop survives,
+  but it does not mutate NotClon's playfield. Player mods still come from the
+  imported Lua `mods` tables / `.ncmod`; a command-line render reports this
+  limitation once when the method is used.
 - `MESSAGEMAN:Broadcast('Name')` — trigger `NameMessageCommand`s
 - `SCREEN_WIDTH`, `SCREEN_HEIGHT`, `SCREEN_CENTER_X`, and `SCREEN_CENTER_Y` —
   the virtual-screen constants (`640`, `480`, `320`, and `240`)
+- `DISPLAY` and `PREFSMAN` compatibility methods used during actor setup
 - `Trace(value)` — append a value to the actor diagnostic log
-- `self` is the current actor in `InitCommand`, `OnCommand`, and
-  `*MessageCommand` Lua bodies. Setters such as `x`, `y`, `zoom`, `zoomto`,
-  `diffuse`, `visible`, `linear`, `sleep`, `playcommand`, `queuecommand`, and
-  `SetTextureFiltering` return `self`, so chained calls work.
+- `self` is persistent actor userdata. Position, rotation, zoom, colour,
+  tween, effect, state, getter, texture and command methods return `self` where
+  StepMania does, so chains work.
+- `ActorFrameTexture` setup (`SetTextureName`, `SetWidth`, `SetHeight`,
+  `Enable*`, `Create`, `GetTexture`) and `Sprite:SetTexture` work for the
+  screen-capture chains used by classic NotITG files.
 - Lua globals persist across every actor in the same tree. Actors can register
   themselves in a table during one command and be retrieved by a later command.
-- `SCREENMAN` — accepted but inert: theme-UI calls like
-  `SCREENMAN:GetTopScreen():GetChild('Overlay'):hidden(1)` are safely absorbed,
-  since NotClon has no theme UI to hide
+- `SCREENMAN` is accepted but inert: theme-UI and ActorProxy calls are safely
+  absorbed, since NotClon has no StepMania screen/player tree to manipulate.
 
 ## Background shaders
 
@@ -163,15 +175,22 @@ shader gives them.
 
 Honest list, so you don't fight the tool:
 
-- `%function` bodies run for `InitCommand`, `OnCommand`, and
-  `*MessageCommand`, with actor setters captured into the same seekable
-  timelines as XML command chains. Per-frame `UpdateCommand` loops are not
-  executed — schedule effects with command chains and messages instead, or
-  drive the playfield from the `.ncmod` modchart.
+- `%function` bodies run for `InitCommand`, `OnCommand`, `*MessageCommand` and
+  self-requeued `UpdateCommand` loops. Each queued event sees the beat for its
+  own scheduled second, not the final preview beat. Forward rendering steps the
+  loop once; a cold or backward seek reloads the tree and deterministically
+  replays it from activation.
+- Actor mutations made by Lua are captured into the same `Seg` timelines as
+  XML command chains. ActorFrameTexture contents persist while rendering
+  forward; a cold seek reconstructs command state but cannot reconstruct
+  pixel feedback from frames that were never rendered, so feedback begins at
+  the sought frame.
 - Unsupported actor methods are absorbing no-ops that return `self`, keeping
   method chains alive. Command-line renders report each distinct method once
   as `actor: unsupported Actor method: <name>`; check this before assuming a
   Lua setter took effect.
+- `GAMESTATE:ApplyGameCommand` does not apply per-frame PlayerOptions; use the
+  imported Lua mod tables or `.ncmod` for playfield modifiers.
 - `NoteCrossed*` message broadcasts (per-column note triggers) are not emitted.
 - 3D perspective on actors is approximated: `rotationx/y` render as
   foreshortening rather than true vanishing-point perspective.

@@ -548,6 +548,7 @@ int main(int argc, char** argv) {
     // its own images. If a .sm sits beside the chart its #FGCHANGES/#BGCHANGES
     // schedule them; --actor adds one by hand at a beat.
     nc::ActorLayer actors;
+    actors.setChart(&chart);
     if (!noActors) {
         std::string aerr;
         for (const auto& av : actorArgs) {
@@ -732,6 +733,12 @@ int main(int argc, char** argv) {
             for (int y = H - 1; y >= 0; --y)
                 fwrite(&pixels[size_t(y) * W * 3], 1, size_t(W) * 3, p);
             _pclose(p);
+            // After the render, not before: a command body only runs
+            // during the frame, so its diagnostics do not exist at
+            // load time. This is what makes a chart that silently
+            // stops animating diagnosable.
+            for (const auto& m : actors.log())
+                printf("actor: %s%c", m.c_str(), 10);
             printf("wrote preview.png at beat %.2f\n", previewBeat);
         } else {
             flipRows();
