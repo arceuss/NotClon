@@ -201,7 +201,13 @@ std::vector<Cmd> parseChain(const std::string& src) {
 
 // SM's virtual resolution. Actor coordinates are in these units; the layer
 // projects them onto whatever the render target actually is.
-const float SCREEN_W = 640.0f, SCREEN_H = 480.0f;
+// The virtual screen. Height is pinned at 480; width follows the output
+// aspect (854 at 16:9), which is how SM5 and current NotITG run widescreen --
+// charts scale themselves by SCREEN_WIDTH/640 and center on SCREEN_CENTER_X.
+// Mutable because the aspect is only known once the output size is set;
+// ActorLayer::setDisplaySize writes it before any tree loads.
+float SCREEN_W = 640.0f;
+const float SCREEN_H = 480.0f;
 
 float argf(const Cmd& c, size_t i, float d = 0.0f) {
     if (i >= c.args.size()) return d;
@@ -1923,6 +1929,16 @@ bool LuaHost::open(std::string& err) {
         err = lua_tostring(L_, -1) ? lua_tostring(L_, -1) : "boot failed";
         lua_close(L_); L_ = nullptr; return false;
     }
+    // Override the boot's 4:3 screen constants with the aspect-following
+    // virtual screen. Done from C so the values match SCREEN_W exactly --
+    // charts scale themselves by SCREEN_WIDTH/640, and a Lua constant that
+    // disagrees with the projection would misplace everything it positions.
+    {
+        const double vw = (dispH_ > 0) ? 480.0 * dispW_ / dispH_ : 640.0;
+        lua_pushnumber(L_, vw);           lua_setglobal(L_, "SCREEN_WIDTH");
+        lua_pushnumber(L_, vw * 0.5);     lua_setglobal(L_, "SCREEN_CENTER_X");
+        lua_pushnumber(L_, vw);           lua_setglobal(L_, "SCREEN_RIGHT");
+    }
     return true;
 }
 
@@ -1966,6 +1982,9 @@ void ActorLayer::addFolder(const std::string& songDir, const std::string& sub,
     s.tree = std::make_unique<ActorTree>();
     s.tree->setChart(chart_);
     s.tree->setDisplaySize(dispW_, dispH_);
+    // The chain-verb constants (argf's SCREEN_WIDTH etc.) must agree with the
+    // Lua globals and the projection, so all three derive from one number.
+    if (dispH_ > 0) SCREEN_W = 480.0f * float(dispW_) / float(dispH_);
     std::string err;
     if (!s.tree->load(s.e.dir, startSec, err)) { log_.push_back(err); return; }
     for (const std::string& entry : s.tree->log()) log_.push_back(entry);

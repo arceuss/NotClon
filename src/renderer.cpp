@@ -95,9 +95,13 @@ layout(location=1) in vec2 aUV;
 layout(location=2) in vec4 aCol;
 out vec2 vUV; out vec4 vCol;
 uniform float uDepth;
+// Half the virtual screen. Height is pinned at 480 (240 here); width follows
+// the output aspect -- SM5 and current NotITG both run widescreen this way,
+// and charts scale themselves by SCREEN_WIDTH/640. Defaults keep 4:3.
+uniform vec2 uVirtHalf = vec2(320.0, 240.0);
 void main() {
     vUV = aUV; vCol = aCol;
-    gl_Position = vec4(aPos.x / 320.0 - 1.0, 1.0 - aPos.y / 240.0, uDepth, 1.0);
+    gl_Position = vec4(aPos.x / uVirtHalf.x - 1.0, 1.0 - aPos.y / uVirtHalf.y, uDepth, 1.0);
 }
 )";
 
@@ -814,6 +818,8 @@ void Renderer::drawActorQuad(float cx, float cy, float w, float h, float rotZDeg
     glDepthFunc(zTest ? GL_LEQUAL : GL_ALWAYS);
     glDepthMask(zWrite ? GL_TRUE : GL_FALSE);
     glUniform1f(glGetUniformLocation(actor_, "uDepth"), blend == 2 ? -0.1f : 0.1f);
+    glUniform2f(glGetUniformLocation(actor_, "uVirtHalf"),
+                240.0f * float(W) / float(H), 240.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(glGetUniformLocation(actor_, "uTex"), 0);
