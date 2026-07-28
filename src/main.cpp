@@ -549,6 +549,8 @@ int main(int argc, char** argv) {
     // schedule them; --actor adds one by hand at a beat.
     nc::ActorLayer actors;
     actors.setChart(&chart);
+    // Before loading: AFTs size themselves from DISPLAY at InitCommand time.
+    actors.setDisplaySize(W, H);
     if (!noActors) {
         std::string aerr;
         for (const auto& av : actorArgs) {

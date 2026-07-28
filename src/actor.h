@@ -85,11 +85,18 @@ enum {
 // An Actor effect (bob/bounce/spin/wag/pulse/vibrate). Pure function of the
 // effect clock, so it survives seeking for free.
 struct Effect {
-    enum Kind { None, Bob, Bounce, Spin, Wag, Pulse, Vibrate } kind = None;
+    enum Kind { None, Bob, Bounce, Spin, Wag, Pulse, Vibrate,
+                DiffuseShift, DiffuseBlink } kind = None;
     float magX = 0, magY = 0, magZ = 0;
     float period = 1.0f;
     float delay = 0.0f;
     bool  beatClock = false;                // effectclock,'bgm'
+    // effectcolor1/effectcolor2, for the diffuse effects. They MULTIPLY the
+    // actor's own diffuse (SM5 Actor::UpdateInternal), which is what lets a
+    // chart park a glow at diffusealpha 0 with the effect armed and fade the
+    // whole thing in later -- replacing the diffuse would pin it visible.
+    float c1[4] = {1, 1, 1, 1};
+    float c2[4] = {1, 1, 1, 1};
 };
 struct ActorCommand {
     std::string name;
@@ -198,12 +205,17 @@ public:
     // forward is exact and is what an encode does. Seeking BACKWARDS cannot be
     // stepped, so the tree is rebuilt and replayed from the start; that is
     // deterministic and matches the encode, at the cost of the replay.
+    void setDisplaySize(int w, int h);   // store + forward to the Lua env
     void update(double sec, double beat, int maxSteps = 20000);
     void setChart(const Chart* chart);
 
     // Textures published by an ActorFrameTexture's SetTextureName, so a later
     // Texture="<name>" or SetTexture() resolves to the live render target.
-    std::map<std::string, GLuint>& namedTextures() { return namedTex_; }
+    // id + pixel size: the display sprite's natural size must be the
+    // AFT's real allocation or the chart's virt/real basezoom math is
+    // scaling the wrong number.
+    struct NamedTex { GLuint id = 0; int w = 0, h = 0; };
+    std::map<std::string, NamedTex>& namedTextures() { return namedTex_; }
     // See ActorLayer::drainLuaMods. One tree, one lua_State, one `mods` table.
     int drainLuaMods(ModDoc& doc, int resolution);
 
@@ -213,7 +225,7 @@ private:
     double startSec_ = 0.0;
     std::unique_ptr<LuaHost> lua_;
     const Chart* chart_ = nullptr;
-    std::map<std::string, GLuint> namedTex_;
+    std::map<std::string, NamedTex> namedTex_;
     int perPlayerDropped_ = 0;
     // Commands waiting to fire, earliest first.
     struct Pending { double t; Actor* a; std::string cmd; };
@@ -222,6 +234,7 @@ private:
     bool   pumpOverrun_ = false;  // hit maxSteps; reported once
     bool   gameCmdReported_ = false;
     double pumpBeat_ = 0.0;
+    int dispW_ = 1920, dispH_ = 1080;
     int    pumpRan_ = 0;
     bool   pumpEverRan_ = false;
     void   runPending(double sec, int maxSteps);
@@ -268,6 +281,13 @@ public:
     std::vector<std::string>& pendingBroadcasts() { return pending_; }
     const std::vector<std::string>& log() const { return log_; }
     void  note(const std::string& s);
+    // The REAL output size in pixels, for DISPLAY:GetDisplayWidth/Height.
+    // Charts size their render targets with it and then scale the display
+    // sprite by SCREEN_WIDTH/DisplayWidth -- handing back the virtual size
+    // made that ratio 1 and the AFT a corner crop of the framebuffer.
+    void  setDisplaySize(int w, int h) { dispW_ = w; dispH_ = h; }
+    int   displayW() const { return dispW_; }
+    int   displayH() const { return dispH_; }
     // Per-frame ApplyGameCommand calls: accepted but not applied, counted
     // so the gap is reported rather than silent.
     void  noteGameCommand() { ++gameCmds_; }
@@ -295,6 +315,7 @@ private:
     std::vector<std::string> pending_;
     std::vector<std::string> log_;
     int gameCmds_ = 0;
+    int dispW_ = 1920, dispH_ = 1080;
 };
 
 // --- the scheduler ---------------------------------------------------------
@@ -306,6 +327,9 @@ public:
 
     // Reads the .sm beside the chart (if any) for #FGCHANGES/#BGCHANGES, or
     // takes explicit folders. Trees are loaded once, up front.
+    // Must be called BEFORE loading: an AFT sizes itself in InitCommand,
+    // which runs at load, long before the first pump.
+    void setDisplaySize(int w, int h) { dispW_ = w; dispH_ = h; }
     bool loadFromSm(const std::string& smPath, const std::string& songDir,
                     std::string& err);
     void addFolder(const std::string& songDir, const std::string& sub,
@@ -336,6 +360,7 @@ public:
 private:
     struct Slot { Entry e; std::unique_ptr<ActorTree> tree; };
     std::vector<Slot> trees_;
+    int dispW_ = 1920, dispH_ = 1080;
     const Chart* chart_ = nullptr;
     std::vector<std::string> log_;
 };

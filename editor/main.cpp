@@ -291,6 +291,7 @@ int main(int argc, char** argv) {
         smBesidePath = smBeside;
         actors = std::make_unique<nc::ActorLayer>();
         actors->setChart(&chart);
+        actors->setDisplaySize(outW, outH);   // before load -- AFTs size at Init
         if (!smBeside.empty()) {
             std::string aerr;
             actors->loadFromSm(smBeside, dir, aerr);

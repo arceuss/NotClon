@@ -442,7 +442,14 @@ void runCmds(Sched& S, const std::vector<Cmd>& cmds, int depth, LuaHost* lua) {
         else if (v == "effectperiod") S.a->effect.period = argf(c, 0, 1);
         else if (v == "effectdelay")  S.a->effect.delay  = argf(c, 0);
         else if (v == "effectclock")  S.a->effect.beatClock =
-                                          (!c.args.empty() && lower(c.args[0]) == "bgm");
+                                          (!c.args.empty() && (lower(c.args[0]) == "bgm" ||
+                                                               lower(c.args[0]) == "beat"));
+        else if (v == "diffuseshift") S.a->effect.kind = Effect::DiffuseShift;
+        else if (v == "diffuseblink") S.a->effect.kind = Effect::DiffuseBlink;
+        else if (v == "effectcolor1" || v == "effectcolor2") {
+            float* dst = (v == "effectcolor1") ? S.a->effect.c1 : S.a->effect.c2;
+            for (int i = 0; i < 4; ++i) dst[i] = argf(c, size_t(i), 1.0f);
+        }
         // --- control ---
         else if (v == "queuecommand" || v == "playcommand") {
             if (!c.args.empty() && depth < 8) {
@@ -532,6 +539,22 @@ void applyEffect(const Actor& a, ActorState& st, double sec, double beat) {
             const float h2 = sinf(q * 78.2330f) * 43758.547f;
             st.x += e.magX * ((h1 - floorf(h1)) * 2.0f - 1.0f);
             st.y += e.magY * ((h2 - floorf(h2)) * 2.0f - 1.0f);
+        } break;
+        case Effect::DiffuseShift: {
+            // A cosine crossfade between the two effect colors, multiplied
+            // into the actor's own diffuse (SM5 Actor::UpdateInternal).
+            const float t = (cosf(ph * 2.0f * 3.14159265f) + 1.0f) * 0.5f;
+            const float r = e.c1[0] * t + e.c2[0] * (1.0f - t);
+            const float g = e.c1[1] * t + e.c2[1] * (1.0f - t);
+            const float b = e.c1[2] * t + e.c2[2] * (1.0f - t);
+            const float al = e.c1[3] * t + e.c2[3] * (1.0f - t);
+            st.r *= r; st.g *= g; st.b *= b; st.a *= al;
+        } break;
+        case Effect::DiffuseBlink: {
+            // Hard toggle each half period -- this is a strobe, not a fade.
+            const float fr = ph - floorf(ph);
+            const float* c = fr < 0.5f ? e.c1 : e.c2;
+            st.r *= c[0]; st.g *= c[1]; st.b *= c[2]; st.a *= c[3];
         } break;
         default: break;
     }
@@ -651,13 +674,17 @@ static void spriteUV(const Actor& a, double sec,
 void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
                 double startSec, std::vector<std::string>* warn) {
     a.type = n.tag;
-    if (a.type == "Layer" || a.type == "AutoActor" || a.type == "Laer") {
-        // <Laer> is a typo in Saitama2000's lua/default.xml. SM's loader keys
-        // off Type= and treats any unknown tag as a generic actor, so the file
-        // works in-game; reproduce that rather than dropping the node.
-        const std::string* t = n.attr("Type");
-        a.type = t ? *t : "Sprite";
-    }
+    // SM's loader keys off Type= and the TAG NAME IS NOISE -- charts use
+    // arbitrary spellings freely, some as draw-order tricks, some as in-jokes.
+    // Keying the Type= read off a whitelist of known tags left every unlisted
+    // tag with its tag name as its type, and drawActor treats any
+    // non-ActorFrame type as a sprite -- so a container element with an
+    // unlisted tag rendered as an untextured 64x64 quad: a white square
+    // sitting exactly where its children draw.
+    if (const std::string* t = n.attr("Type")) a.type = *t;
+    else if (a.type != "ActorFrame" && a.type != "quad" && a.type != "Quad" &&
+             a.type != "Sprite" && a.type != "CODE")
+        a.type = "Sprite";               // Layer/AutoActor/anything else
     if (const std::string* nm = n.attr("Name")) a.name = *nm;
     // Text= means File= is a font, not an image. Recorded before the File=
     // branch so the font name never reaches the texture loader.
@@ -932,6 +959,8 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
     lua_ = std::make_unique<LuaHost>();
     if (!lua_->open(err)) return false;
     lua_->setTree(this);   // so an AFT can publish its texture by name
+    // Before ANY chunk runs: the AFT sizes itself in InitCommand.
+    lua_->setDisplaySize(dispW_, dispH_);
     lua_->setChart(chart_);
     const size_t slash = dir.find_last_of("/\\");
     lua_->setSongDir(slash == std::string::npos ? "." : dir.substr(0, slash));
@@ -1075,7 +1104,7 @@ namespace {
 // would have to thread through every recursive call to be read by one leaf
 // case; ActorTree::draw sets this immediately before walking and there is one
 // draw at a time, so the narrower plumbing is not worth the noise.
-static std::map<std::string, GLuint>* g_namedTex = nullptr;
+static std::map<std::string, ActorTree::NamedTex>* g_namedTex = nullptr;
 
 void drawActor(Renderer& R, Actor& a, double sec, double beat,
                const ActorState& parent) {
@@ -1123,8 +1152,13 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
             if (g_namedTex) {
                 auto it = g_namedTex->find(a.file.substr(1));
                 if (it != g_namedTex->end()) {
-                    a.tex.id = it->second;
-                    a.tex.w = a.tex.h = 0;      // size comes from zoomto
+                    a.tex.id = it->second.id;
+                    // Natural size = the AFT's real allocation, so the
+                    // chart's basezoom(virt/real) scales it back to
+                    // exactly virtual-screen size.
+                    a.tex.w = it->second.w;
+                    a.tex.h = it->second.h;
+                    a.sheetCols = a.sheetRows = 1;
                     a.texLoaded = true;
                 }
             }
@@ -1133,6 +1167,17 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
             FILE* f = fopen(a.file.c_str(), "rb");
             if (f) { fclose(f); a.tex = gl_loadTex(a.file, false, /*flipY=*/false); }
             a.texLoaded = true;
+        }
+        // A Sprite whose texture never resolved must draw NOTHING. The
+        // untextured white quad is Quad's contract, not a fallback: a missing
+        // file or an AFT name that has not been published yet would otherwise
+        // paint a white rectangle exactly where the intended art belongs (the
+        // load-time warning already says which file). Quad and CODE still
+        // draw untextured -- that is what they are for.
+        if (!a.tex.id && a.type != "Quad" && a.type != "quad" &&
+            a.type != "CODE") {
+            for (auto& c : a.children) drawActor(R, *c, sec, beat, w);
+            return;
         }
         if (a.tex.id && a.textureFilterDirty) {
             glBindTexture(GL_TEXTURE_2D, a.tex.id);
@@ -1145,10 +1190,14 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         // whose sheet is 2x1 would otherwise draw at double width.
         const int cols = a.sheetCols > 0 ? a.sheetCols : 1;
         const int rows = a.sheetRows > 0 ? a.sheetRows : 1;
+        // An untextured actor with no explicit size is 1x1, as SM's Quad is.
+        // 64 here was a guess, and it is exactly the size of the stray white
+        // square a bare function-holder Def.Quad painted at the origin -- a
+        // chart idiom that relies on the default being invisible.
         float sw = (w.sizeX > 0) ? w.sizeX
-                                 : float(a.tex.w ? a.tex.w / cols : 64);
+                                 : float(a.tex.w ? a.tex.w / cols : 1);
         float sh = (w.sizeY > 0) ? w.sizeY
-                                 : float(a.tex.h ? a.tex.h / rows : 64);
+                                 : float(a.tex.h ? a.tex.h / rows : 1);
         sw *= w.zoomX; sh *= w.zoomY;
         float ox = 0, oy = 0;
         if (st.horizAlign < 0) ox = sw * 0.5f;
@@ -1228,6 +1277,11 @@ void ActorTree::runPending(double sec, int maxSteps) {
         snprintf(m, sizeof m, "command pump started (%d queued)", int(queued));
         lua_->note(m);
     }
+}
+
+void ActorTree::setDisplaySize(int w, int h) {
+    dispW_ = w; dispH_ = h;
+    if (lua_) lua_->setDisplaySize(w, h);
 }
 
 void ActorTree::update(double sec, double beat, int maxSteps) {
@@ -1369,6 +1423,16 @@ int lua_nc_gamecmd(lua_State* L) {
     if (h) h->noteGameCommand();
     return 0;
 }
+int lua_nc_dispw(lua_State* L) {
+    LuaHost* h = hostOf(L);
+    lua_pushnumber(L, h ? h->displayW() : 1920);
+    return 1;
+}
+int lua_nc_disph(lua_State* L) {
+    LuaHost* h = hostOf(L);
+    lua_pushnumber(L, h ? h->displayH() : 1080);
+    return 1;
+}
 int lua_nc_trace(lua_State* L) {
     LuaHost* h = hostOf(L);
     const char* s = lua_tostring(L, 1);
@@ -1432,7 +1496,7 @@ void LuaHost::aftCreate(Actor& a) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     if (tree_ && !a.aftName.empty())
-        tree_->namedTextures()[a.aftName] = a.aftTex;
+        tree_->namedTextures()[a.aftName] = {a.aftTex, a.aftW, a.aftH};
     note("ActorFrameTexture '" + a.aftName + "' created");
 }
 
@@ -1668,8 +1732,24 @@ int LuaHost::actorCall(lua_State* L) {
             // it inline turns the chart's main loop into 8 recursive frames at
             // load time that then stop forever.
             if (host->tree_) {
-                host->tree_->enqueue(host->chunkStart + host->pendingSleep,
-                                     *actor, name);
+                const double when = host->chunkStart + host->pendingSleep;
+                if (method == AM_PLAY) {
+                    // SM's ActorFrame::PlayCommand runs on self AND every
+                    // descendant; queuecommand queues on self only. The
+                    // stacked-sprite animation idiom depends on the recursion:
+                    // playcommand('Attack') on the character frame is what
+                    // reaches the AttackCommand on each grandchild sheet, and
+                    // without it no pose ever switches.
+                    struct W { static void go(ActorTree* t, double tm,
+                                              Actor& x, const char* n) {
+                        if (x.findCommandEntry(std::string(n) + "Command"))
+                            t->enqueue(tm, x, n);
+                        for (auto& c : x.children) go(t, tm, *c, n);
+                    } };
+                    W::go(host->tree_, when, *actor, name);
+                } else {
+                    host->tree_->enqueue(when, *actor, name);
+                }
                 lua_pushvalue(L, 1);
                 return 1;
             }
@@ -1749,6 +1829,8 @@ bool LuaHost::open(std::string& err) {
         {"__nc_songdir", lua_nc_songdir},
         {"__nc_broadcast", lua_nc_broadcast},
         {"__nc_gamecmd", lua_nc_gamecmd},
+        {"__nc_dispw", lua_nc_dispw},
+        {"__nc_disph", lua_nc_disph},
         {"__nc_trace", lua_nc_trace},
     };
     for (const Reg& r : natives) {
@@ -1787,8 +1869,8 @@ bool LuaHost::open(std::string& err) {
         "PREFSMAN = { GetPreference = function() return '' end,\n"
         "             SetPreference = function() end }\n"
         "DISPLAY = { GetVendor = function() return '' end,\n"
-        "            GetDisplayWidth = function() return SCREEN_WIDTH end,\n"
-        "            GetDisplayHeight = function() return SCREEN_HEIGHT end }\n"
+        "            GetDisplayWidth = function() return __nc_dispw() end,\n"
+        "            GetDisplayHeight = function() return __nc_disph() end }\n"
         "Trace = function(v) __nc_trace(tostring(v)) end\n"
         "MESSAGEMAN = { Broadcast = function(self, m) __nc_broadcast(m) end }\n"
         "local playerStats = {\n"
@@ -1866,6 +1948,7 @@ void ActorLayer::addFolder(const std::string& songDir, const std::string& sub,
     s.e.startSec = startSec; s.e.dir = songDir + "/" + sub; s.e.foreground = foreground;
     s.tree = std::make_unique<ActorTree>();
     s.tree->setChart(chart_);
+    s.tree->setDisplaySize(dispW_, dispH_);
     std::string err;
     if (!s.tree->load(s.e.dir, startSec, err)) { log_.push_back(err); return; }
     for (const std::string& entry : s.tree->log()) log_.push_back(entry);
@@ -1961,6 +2044,7 @@ void ActorLayer::pump(Renderer& R, double sec) {
             // where nothing prints it, and the chart would just silently stop
             // animating. That is how this loop's first failure went unseen.
             const size_t before = s.tree->log().size();
+            s.tree->setDisplaySize(R.W, R.H);
             s.tree->update(sec, R.actorBeat());
             for (size_t i = before; i < s.tree->log().size(); ++i)
                 log_.push_back(s.tree->log()[i]);
