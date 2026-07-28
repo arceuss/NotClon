@@ -1000,7 +1000,7 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
 
 // --- the Lua mod table -> ModDoc --------------------------------------------
 // See the contract on ActorLayer::drainLuaMods.
-int ActorTree::drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution) {
+int ActorTree::drainLuaMods(ModDoc& doc, int resolution) {
     if (!lua_ || !lua_->L()) return 0;
     lua_State* L = lua_->L();
     int added = 0;
@@ -1038,7 +1038,6 @@ int ActorTree::drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution) {
             lua_pop(L, 1);   // the row; key stays for lua_next
 
             if (modstr.empty() || kind == "error") continue;
-            if (pn != 0 && !doc2) { ++perPlayerDropped_; continue; }
 
             const int tick = int(beat * resolution + 0.5);
             int len = 0;
@@ -1054,15 +1053,16 @@ int ActorTree::drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution) {
             // tick is the smallest thing that still fires.
             if (len == 0 && span > 0.0) len = 1;
 
-            // pn 0 -> both docs; pn 1 -> player 1's; pn 2 -> player 2's.
-            if (doc2 && pn != 1) {
-                const int b2 = int(doc2->entries.size());
-                addModString(*doc2, modstr, tick, len, st);
-                if (pn == 2) { added += int(doc2->entries.size()) - b2; continue; }
-                st.entries -= int(doc2->entries.size()) - b2;   // counted once
-            }
+            // Tagged, not routed: entries carry their player and the doc
+            // records that a second field is wanted -- exactly what a saved
+            // .ncmod round-trips through `pn=` and `#players 2`.
             const int before = int(doc.entries.size());
             addModString(doc, modstr, tick, len, st);
+            if (pn != 0) {
+                doc.players = 2;
+                for (size_t k = before; k < doc.entries.size(); ++k)
+                    doc.entries[k].pn = pn;
+            }
             added += int(doc.entries.size()) - before;
         }
         lua_pop(L, 1);   // the table
@@ -1070,13 +1070,6 @@ int ActorTree::drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution) {
 
     for (const std::string& u : st.unknown)
         lua_->note("mod token not implemented: " + u);
-    if (perPlayerDropped_) {
-        char m[128];
-        snprintf(m, sizeof m, "%d per-player mod rows dropped -- one playfield",
-                 perPlayerDropped_);
-        lua_->note(m);
-        perPlayerDropped_ = 0;
-    }
     return added;
 }
 
@@ -2015,7 +2008,7 @@ bool ActorLayer::loadFromSm(const std::string& smPath, const std::string& songDi
 }
 
 
-int ActorLayer::drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution) {
+int ActorLayer::drainLuaMods(ModDoc& doc, int resolution) {
     int n = 0;
     for (Slot& sl : trees_) {
         if (!sl.tree) continue;
@@ -2024,7 +2017,7 @@ int ActorLayer::drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution) {
         // Take only what is new. A mod the chart asks for and we silently do
         // not have is the single most misleading thing this can do.
         const size_t before = sl.tree->log().size();
-        n += sl.tree->drainLuaMods(doc, doc2, resolution);
+        n += sl.tree->drainLuaMods(doc, resolution);
         for (size_t i = before; i < sl.tree->log().size(); ++i)
             log_.push_back(sl.tree->log()[i]);
     }

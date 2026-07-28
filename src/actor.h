@@ -62,6 +62,7 @@ struct ActorState {
     float sizeX = -1, sizeY = -1;           // <0 = use the texture's own size
     int   horizAlign = 0;                   // -1 left, 0 centre, +1 right
     int   vertAlign = 0;
+    float skewX = 0;                        // x += skewX * y, SM's skewx
     int   blend = 0;                        // 0 normal, 1 add, 2 noeffect
     bool  zWrite = false, zTest = false, clearZ = false;
 };
@@ -79,7 +80,7 @@ enum {
     PROP_X, PROP_Y, PROP_Z, PROP_ZOOMX, PROP_ZOOMY, PROP_ZOOMZ,
     PROP_ROTX, PROP_ROTY, PROP_ROTZ, PROP_DIFFUSE, PROP_DIFFUSEALPHA,
     PROP_GLOWALPHA, PROP_HIDDEN, PROP_SIZE, PROP_HALIGN, PROP_VALIGN,
-    PROP_BLEND, PROP_ZWRITE, PROP_ZTEST, PROP_CLEARZ, PROP_COUNT
+    PROP_BLEND, PROP_ZWRITE, PROP_ZTEST, PROP_CLEARZ, PROP_SKEWX, PROP_COUNT
 };
 
 // An Actor effect (bob/bounce/spin/wag/pulse/vibrate). Pure function of the
@@ -217,10 +218,16 @@ public:
     struct NamedTex { GLuint id = 0; int w = 0, h = 0; };
     std::map<std::string, NamedTex>& namedTextures() { return namedTex_; }
     // See ActorLayer::drainLuaMods. One tree, one lua_State, one `mods` table.
-    int drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution);
+    int drainLuaMods(ModDoc& doc, int resolution);
+    // The notefield proxies behind the chart-side Plr(pn): synthetic
+    // actors outside the draw tree whose evaluated state the renderer
+    // folds into each player's field transform. This is how a chart
+    // skews or spins the notefield itself.
+    Actor& plrProxy(int i) { return plrProxy_[i & 1]; }
 
 private:
     std::unique_ptr<Actor> root_;
+    Actor plrProxy_[2];
     std::string dir_;
     double startSec_ = 0.0;
     std::unique_ptr<LuaHost> lua_;
@@ -349,9 +356,13 @@ public:
     //
     // Each row is {beat, len_or_end, modstring, 'len'|'end', pn?}. Returns how
     // many entries were added. Call after loading and before ModDoc::rebuild.
-    int drainLuaMods(ModDoc& doc, ModDoc* doc2, int resolution);
+    int drainLuaMods(ModDoc& doc, int resolution);
 
     // Step every tree's command loop to `sec`. See ActorTree::update.
+    // Player pn's notefield transform at `sec`: rotX/rotY/rotZ degrees +
+    // skewX, summed over trees. False = identity (the common case).
+    bool fieldXf(int pn, double sec, float& rx, float& ry, float& rz,
+                 float& sk);
     void pump(Renderer& R, double sec);
     void drawBackground(Renderer& R, double sec);
     void drawForeground(Renderer& R, double sec);

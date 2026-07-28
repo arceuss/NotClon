@@ -174,6 +174,11 @@ struct ModEntry {
     // `tick` is: the entry keeps meaning what it meant if the tempo map moves.
     int   len      = 0;
 
+    // Which playfield this entry attacks: 0 = both, 1 or 2 = that player
+    // only. Meaningful when the document's `players` is 2; saved as a
+    // trailing `pn=N` token, omitted when 0.
+    int   pn       = 0;
+
     // Muting an entry is an authoring affordance, not part of the OITG model:
     // it is how you A/B a change without losing the values you tuned. To turn
     // a mod off *in the chart* you add another entry at 0% -- that is what
@@ -190,6 +195,16 @@ public:
     // which is a comment to anything that does not know about it. Empty if the
     // file did not name one.
     std::string chartDir;
+
+    // 1 or 2. Written as `#players 2` (a comment to other readers); the
+    // importer/drain sets it automatically when a source modfile drives a
+    // second player.
+    int players = 1;
+
+    // rebuild() keeps entries whose pn is 0 or equals this. Two rendered
+    // fields are two ModDoc instances sharing one entry list -- the
+    // filter is what makes them differ.
+    int forPlayer = 0;
 
     // Shaders this modchart drives, written as `#bgshader` / `#fxshader` /
     // `#fxchain` lines. Same reasoning as chartDir: a .ncmod that names
@@ -214,7 +229,7 @@ public:
 
     // All four mutators re-run rebuild(), so the document is always evaluable.
     void add(const Chart& c, int tick, int mod, float percent, float approach,
-             int len = 0);
+             int len = 0, int pn = 0);
     void set(const Chart& c, size_t i, const ModEntry& e);
     void erase(const Chart& c, size_t i);
     void clear(const Chart& c);

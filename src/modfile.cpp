@@ -181,8 +181,14 @@ int modFromName(const std::string& name) {
 void ModDoc::rebuild(const Chart& c) {
     keys_.clear();
     bgUsed_ = 0;
+    // The player filter: an entry attacking the other player simply does not
+    // exist for this doc's timeline. Two fields = two docs over one entry
+    // list, differing only in forPlayer.
+    auto takes = [this](const ModEntry& e) {
+        return e.enabled && (e.pn == 0 || forPlayer == 0 || e.pn == forPlayer);
+    };
     for (const ModEntry& e : entries)
-        if (e.enabled && e.mod >= MOD_BG_BASE && e.mod < MOD_SLOTS)
+        if (takes(e) && e.mod >= MOD_BG_BASE && e.mod < MOD_SLOTS)
             bgUsed_ |= 1u << (e.mod - MOD_BG_BASE);
     std::stable_sort(entries.begin(), entries.end(),
                      [](const ModEntry& a, const ModEntry& b) { return a.tick < b.tick; });
@@ -195,7 +201,7 @@ void ModDoc::rebuild(const Chart& c) {
     std::vector<int> ev;
     ev.reserve(entries.size() * 2);
     for (const ModEntry& e : entries) {
-        if (!e.enabled) continue;
+        if (!takes(e)) continue;
         ev.push_back(e.tick);
         if (e.len > 0) ev.push_back(e.tick + e.len);
     }
@@ -251,7 +257,7 @@ void ModDoc::rebuild(const Chart& c) {
         // still has to walk past it.
         while (i < entries.size() && entries[i].tick <= tick) {
             const ModEntry& e = entries[i];
-            if (!e.enabled) { ++i; continue; }
+            if (!takes(e)) { ++i; continue; }
             if (e.len > 0) {
                 live[e.mod].push_back(i);
             } else {
@@ -393,10 +399,10 @@ void ModDoc::evalAt(const Chart& c, double tick, Mods& m, PostFx& fx,
 
 // ---------------------------------------------------------------------------
 void ModDoc::add(const Chart& c, int tick, int mod, float percent, float approach,
-                 int len) {
+                 int len, int pn) {
     ModEntry e;
     e.tick = tick; e.mod = mod; e.percent = percent; e.approach = approach;
-    e.len = len;
+    e.len = len; e.pn = pn;
     entries.push_back(e);
     rebuild(c);
 }
@@ -469,13 +475,17 @@ bool ModDoc::load(const std::string& path) {
         else if (s.compare(0, 9, "#fxchain ") == 0) {
             fxChain = nc_trim(s.substr(9)); continue;
         }
+        else if (s.compare(0, 9, "#players ") == 0) {
+            players = atoi(s.c_str() + 9) >= 2 ? 2 : 1;
+            continue;
+        }
         else if (s[0] == '#') continue;
 
         int tick = 0;
-        char star[64] = {0}, name[128] = {0}, lenTok[64] = {0};
+        char star[64] = {0}, name[128] = {0}, lenTok[64] = {0}, pnTok[64] = {0};
         float percent = 0.0f;
-        const int n = sscanf(s.c_str(), "%d %63s %f %127s %63s",
-                             &tick, star, &percent, name, lenTok);
+        const int n = sscanf(s.c_str(), "%d %63s %f %127s %63s %63s",
+                             &tick, star, &percent, name, lenTok, pnTok);
         if (n < 4) {
             fprintf(stderr, "%s:%d: cannot parse '%s'\n", path.c_str(), lineNo, s.c_str());
             continue;
@@ -485,16 +495,23 @@ bool ModDoc::load(const std::string& path) {
             fprintf(stderr, "%s:%d: unknown mod '%s'\n", path.c_str(), lineNo, name);
             continue;
         }
-        int len = 0;
-        if (n == 5) {
-            if (strncmp(lenTok, "len=", 4) == 0) len = atoi(lenTok + 4);
-            else fprintf(stderr, "%s:%d: ignoring trailing '%s' (expected len=<ticks>)\n",
-                         path.c_str(), lineNo, lenTok);
+        int len = 0, pn = 0;
+        // len= and pn= are both optional and order-free.
+        for (const char* tok : {lenTok, pnTok}) {
+            if (!tok[0]) continue;
+            if      (strncmp(tok, "len=", 4) == 0) len = atoi(tok + 4);
+            else if (strncmp(tok, "pn=", 3) == 0)  pn  = atoi(tok + 3);
+            else fprintf(stderr, "%s:%d: ignoring trailing '%s'"
+                         " (expected len=<ticks> or pn=<player>)%c",
+                         path.c_str(), lineNo, tok, 10);
         }
+        if (pn < 0 || pn > 2) pn = 0;
+        (void)n;
         const float approach = (star[0] == '*') ? float(atof(star + 1)) : float(atof(star));
         ModEntry e;
         e.tick = tick; e.mod = id; e.percent = percent / 100.0f;
         e.approach = approach; e.len = len < 0 ? 0 : len; e.enabled = enabled;
+        e.pn = pn;
         entries.push_back(e);
     }
     fclose(f);
@@ -511,6 +528,7 @@ bool ModDoc::save(const std::string& path) const {
     for (const auto& p : bgShaders) fprintf(f, "#bgshader %s%c", p.c_str(), 10);
     for (const auto& p : fxShaders) fprintf(f, "#fxshader %s%c", p.c_str(), 10);
     if (!fxChain.empty()) fprintf(f, "#fxchain %s%c", fxChain.c_str(), 10);
+    if (players == 2) fprintf(f, "#players 2%c", 10);
     fprintf(f, "# tick   *approach   percent   mod%c%c", 10, 10);
     // The "#! " prefix is folded into the tick field's width so muted lines
     // stay in the same columns as live ones.
@@ -519,6 +537,7 @@ bool ModDoc::save(const std::string& path) const {
                 e.enabled ? 8 : 5, e.tick, e.approach, e.percent * 100.0f,
                 modName(e.mod));
         if (e.len > 0) fprintf(f, "   len=%d", e.len);
+        if (e.pn != 0) fprintf(f, "   pn=%d", e.pn);
         fprintf(f, "%c", 10);
     }
     fclose(f);

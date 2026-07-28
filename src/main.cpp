@@ -567,25 +567,24 @@ int main(int argc, char** argv) {
         // complete. Draining is a no-op for a tree with no `mods` global,
         // which is every chart that predates this.
         if (!actors.empty() && !opt.noMods) {
-            // Seed player 2 with everything player 1 already has (a .ncmod
-            // loaded before the drain applies to both fields); the drain then
-            // routes pn rows to their own doc and pn-less rows to both. doc2
-            // only takes effect if the drain actually put something in it.
-            doc2 = doc;
-            const size_t d2before = doc2.entries.size();
-            const int n = actors.drainLuaMods(doc, &doc2, chart.resolution);
+            const int n = actors.drainLuaMods(doc, chart.resolution);
             if (n > 0) {
                 doc.rebuild(chart);
                 opt.doc = &doc;
                 opt.noMods = false;
-                if (doc2.entries.size() != d2before &&
-                    doc2.entries.size() != doc.entries.size()) {
-                    doc2.rebuild(chart);
-                    opt.doc2 = &doc2;
-                    printf("modchart: two playfields (%zu / %zu entries)%c",
-                           doc.entries.size(), doc2.entries.size(), 10);
-                }
             }
+        }
+        // Two playfields whenever the document says so -- from a `#players 2`
+        // header or from a drained modfile that drove player 2. One entry
+        // list, two docs differing only in the player filter.
+        if (opt.doc == &doc && doc.players == 2) {
+            doc.forPlayer = 1;
+            doc.rebuild(chart);
+            doc2 = doc;
+            doc2.forPlayer = 2;
+            doc2.rebuild(chart);
+            opt.doc2 = &doc2;
+            printf("modchart: two playfields%c", 10);
         }
         for (const auto& m : actors.log()) printf("actor: %s%c", m.c_str(), 10);
         if (!actors.empty()) R.setActorLayer(&actors);

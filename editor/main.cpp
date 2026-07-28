@@ -165,6 +165,7 @@ int main(int argc, char** argv) {
 
     nc::Chart chart;
     nc::ModDoc doc;
+    nc::ModDoc docP2;    // player-2 mirror when doc.players == 2
     std::string chartDir;
     bool haveChart = false;
     int  lastTick = chart.resolution * 16;
@@ -328,6 +329,7 @@ int main(int argc, char** argv) {
 
     // "Add mod" form state
     int   formMod = nc::MOD_DRUNK;
+    int   formPn = 0;                // 0 both, 1/2 that player (2P docs)
     float formPercent = 50.0f;
     float formApproach = 1.0f;
     int   formLen = 0;      // ticks; 0 = holds until something else changes it
@@ -477,6 +479,20 @@ int main(int argc, char** argv) {
         // the alternative is change-detection on two checkboxes plus openChart.
         R.setBackground(!noBg && bg ? bg.get() : nullptr);
         R.setActorLayer(!noActors && actors ? actors.get() : nullptr);
+        // Two-field preview. The document is the single source of truth and
+        // it is edited live, so the player-2 mirror is rebuilt each frame --
+        // a copy plus a keyframe scan, well inside an editor frame budget,
+        // and the alternative is a dirty-flag threaded through every edit.
+        if (doc.players == 2) {
+            doc.forPlayer = 1;
+            docP2 = doc;
+            docP2.forPlayer = 2;
+            docP2.rebuild(chart);
+            opt.doc2 = &docP2;
+        } else {
+            doc.forPlayer = 0;
+            opt.doc2 = nullptr;
+        }
         R.drawFrame(chart, tick / double(chart.resolution), opt, R.postFbo());
 
         int winW = 0, winH = 0;
@@ -605,6 +621,13 @@ int main(int argc, char** argv) {
                 modComboItems(formMod, dummy);
                 ImGui::EndCombo();
             }
+            if (doc.players == 2) {
+                ImGui::SetNextItemWidth(150);
+                { const char* pi[] = {"both", "P1", "P2"};
+                ImGui::Combo("player", &formPn, pi, 3); }
+            } else {
+                formPn = 0;
+            }
             ImGui::SetNextItemWidth(150);
             ImGui::DragFloat("percent", &formPercent, 1.0f, -400.0f, 400.0f, "%.0f%%");
             ImGui::SetNextItemWidth(150);
@@ -642,7 +665,7 @@ int main(int argc, char** argv) {
             ImGui::Text("-> tick %d  (beat %.3f)", addTick,
                         addTick / double(chart.resolution));
             if (ImGui::Button("Add", ImVec2(-1, 0))) {
-                doc.add(chart, addTick, formMod, formPercent / 100.0f, formApproach, formLen);
+                doc.add(chart, addTick, formMod, formPercent / 100.0f, formApproach, formLen, formPn);
                 status = "added";
             }
             // Turning a mod off *in the chart* means scheduling it back to
@@ -663,6 +686,12 @@ int main(int argc, char** argv) {
                 if (ImGui::BeginCombo("mod##sel", nc::modName(e.mod))) {
                     modComboItems(e.mod, changed);
                     ImGui::EndCombo();
+                }
+                if (doc.players == 2) {
+                    ImGui::SetNextItemWidth(150);
+                    const char* pi[] = {"both", "P1", "P2"};
+                    if (ImGui::Combo("player##sel", &e.pn, pi, 3))
+                        changed = true;
                 }
                 // Dragging these re-evaluates every frame, so the preview
                 // follows the slider -- that is the whole point of tuning here
@@ -806,6 +835,18 @@ int main(int argc, char** argv) {
             ImGui::SeparatorText("Render");
             ImGui::Checkbox("playfield only", &opt.playfield);
             ImGui::Checkbox("no post", &opt.noPost);
+            // Player count lives IN the document (#players), so a saved
+            // .ncmod reopens with both fields. Entries then carry pn=.
+            {
+                int pl = doc.players == 2 ? 1 : 0;
+                ImGui::SetNextItemWidth(110);
+                const char* pli[] = {"1 player", "2 players"};
+                if (ImGui::Combo("players", &pl, pli, 2)) {
+                    doc.players = pl ? 2 : 1;
+                    doc.forPlayer = pl ? 1 : 0;
+                    doc.rebuild(chart);
+                }
+            }
             ImGui::Checkbox("no mods", &opt.noMods);
             ImGui::Checkbox("no bot", &opt.noBot);
             ImGui::Checkbox("no background", &noBg);
