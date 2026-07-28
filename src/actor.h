@@ -261,6 +261,9 @@ public:
     bool  open(std::string& err);
     // The tree that owns the named-texture registry an AFT publishes into.
     void  setTree(ActorTree* t) { tree_ = t; }
+    ActorTree* treePtr() const { return tree_; }
+    // Push an actor userdata; the binding surface for natives like Plr.
+    void pushActor(Actor& actor);
     const Chart* chart() const { return chart_; }
     void  setChart(const Chart* chart) { chart_ = chart; }
     // `sleep` inside a command body does not tween -- it delays whatever that
@@ -303,7 +306,7 @@ public:
 private:
     struct CallState;
     CallState* call_ = nullptr;
-    void pushActor(Actor& actor);
+
     // Lua stack index -> the Actor it wraps, or null if it is not one.
     Actor* toActor(lua_State* L, int idx);
     // Allocate an AFT's texture+FBO and publish it under its name. Idempotent:

@@ -965,6 +965,45 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
         }
     }
 
+    // The chart-side notefield handle: Plr(pn):rotationx/y/z and skewx from
+    // the actor layer, folded in AFTER tilt/mini/wag so the chart's transform
+    // composes over the modchart's, matching SM where both land on the same
+    // notefield actor. Identity when no chart drives a proxy -- which is
+    // every chart until one calls Plr() -- so the pinned baselines never see
+    // this branch.
+    if (actors_) {
+        float prx = 0, pry = 0, prz = 0, psk = 0;
+        if (actors_->fieldXf(plr, fieldSec_, prx, pry, prz, psk)) {
+            // SM screen space is Y-down; ours is Y-up. Conjugating by
+            // diag(1,-1,1) negates the X and Z rotations and the skew term.
+            const float ax = -prx * 3.14159265f / 180.0f;
+            const float ay =  pry * 3.14159265f / 180.0f;
+            const float az = -prz * 3.14159265f / 180.0f;
+            Mat4 R{};
+            const float cX = cosf(ax), sX = sinf(ax);
+            const float cY = cosf(ay), sY = sinf(ay);
+            const float cZ = cosf(az), sZ = sinf(az);
+            // Rz * Ry * Rx, SM's actor rotation order.
+            R.m[0]  =  cZ * cY;
+            R.m[1]  =  sZ * cY;
+            R.m[2]  = -sY;
+            R.m[4]  =  cZ * sY * sX - sZ * cX;
+            R.m[5]  =  sZ * sY * sX + cZ * cX;
+            R.m[6]  =  cY * sX;
+            R.m[8]  =  cZ * sY * cX + sZ * sX;
+            R.m[9]  =  sZ * sY * cX - cZ * sX;
+            R.m[10] =  cY * cX;
+            R.m[15] = 1.0f;
+            if (psk != 0.0f) {
+                Mat4 S{};
+                S.m[0] = S.m[5] = S.m[10] = S.m[15] = 1.0f;
+                S.m[4] = -psk;                   // x += skew * y, sign per above
+                R = mat_mul(R, S);
+            }
+            mvpEff = mat_mul(mvpEff, R);
+        }
+    }
+
     return E;
 }
 
@@ -1385,6 +1424,7 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
     const float bpm = float(chart.bpmAt(beat));
     actorBeat_ = beat;                     // the actor effect clock
+    fieldSec_ = songTime;                  // the field-proxy eval clock
     FieldEval E = evalField(chart, beat, o, o.doc, 1);
     Mods& mods = E.mods; PostFx& fx = E.fx;
     float& mx = E.mx; float& my = E.my; float& mz = E.mz;

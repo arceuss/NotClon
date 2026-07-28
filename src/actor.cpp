@@ -287,6 +287,7 @@ void emit(Sched& S, int prop, int n, const float* to) {
         case PROP_ROTX: from = &S.cur.rotX; break;
         case PROP_ROTY: from = &S.cur.rotY; break;
         case PROP_ROTZ: from = &S.cur.rotZ; break;
+        case PROP_SKEWX: from = &S.cur.skewX; break;
         case PROP_DIFFUSEALPHA: from = &S.cur.a; break;
         case PROP_GLOWALPHA: from = &S.cur.glowA; break;
         default: break;
@@ -349,6 +350,7 @@ void settleTweens(Sched& S, bool finish) {
             case PROP_ROTX: emit1(S, prop, target.rotX); break;
             case PROP_ROTY: emit1(S, prop, target.rotY); break;
             case PROP_ROTZ: emit1(S, prop, target.rotZ); break;
+            case PROP_SKEWX: emit1(S, prop, target.skewX); break;
             case PROP_DIFFUSE: {
                 const float v[4] = {target.r, target.g, target.b, target.a};
                 emit(S, prop, 4, v);
@@ -407,6 +409,7 @@ void runCmds(Sched& S, const std::vector<Cmd>& cmds, int depth, LuaHost* lua) {
         else if (v == "rotationx") emit1(S, PROP_ROTX, argf(c, 0));
         else if (v == "rotationy") emit1(S, PROP_ROTY, argf(c, 0));
         else if (v == "rotationz") emit1(S, PROP_ROTZ, argf(c, 0));
+        else if (v == "skewx")     emit1(S, PROP_SKEWX, argf(c, 0));
         // --- colour ---
         else if (v == "diffuse") { const float d[4] = {argf(c,0,1), argf(c,1,1),
                                                        argf(c,2,1), argf(c,3,1)};
@@ -495,6 +498,7 @@ ActorState evalActor(const Actor& a, double sec) {
             case PROP_ROTX: st.rotX = L(0); break;
             case PROP_ROTY: st.rotY = L(0); break;
             case PROP_ROTZ: st.rotZ = L(0); break;
+            case PROP_SKEWX: st.skewX = L(0); break;
             case PROP_DIFFUSEALPHA: st.a = L(0); break;
             case PROP_GLOWALPHA: st.glowA = L(0); break;
             case PROP_DIFFUSE: st.r = L(0); st.g = L(1); st.b = L(2); st.a = L(3); break;
@@ -1339,7 +1343,7 @@ struct LuaActorRef {
 enum ActorMethod {
     AM_X, AM_Y, AM_Z, AM_ZOOM, AM_ZOOMTO, AM_ZOOMX, AM_ZOOMY, AM_ZOOMZ,
     AM_VISIBLE, AM_HIDDEN, AM_DIFFUSEALPHA, AM_DIFFUSE,
-    AM_ROTX, AM_ROTY, AM_ROTZ,
+    AM_ROTX, AM_ROTY, AM_ROTZ, AM_SKEWX,
     AM_LINEAR, AM_ACCEL, AM_DECEL, AM_SPRING, AM_BOUNCEBEGIN, AM_BOUNCEEND,
     AM_SLEEP, AM_FINISH, AM_STOP, AM_FILTER, AM_PLAY, AM_QUEUE,
     AM_QUEUEMESSAGE, AM_GETCHILD,
@@ -1363,6 +1367,7 @@ const ActorMethodDef ACTOR_METHODS[] = {
     {"visible", AM_VISIBLE}, {"hidden", AM_HIDDEN},
     {"diffusealpha", AM_DIFFUSEALPHA}, {"diffuse", AM_DIFFUSE},
     {"rotationx", AM_ROTX}, {"rotationy", AM_ROTY}, {"rotationz", AM_ROTZ},
+    {"skewx", AM_SKEWX},
     {"linear", AM_LINEAR}, {"accelerate", AM_ACCEL},
     {"decelerate", AM_DECEL}, {"spring", AM_SPRING},
     {"bouncebegin", AM_BOUNCEBEGIN}, {"bounceend", AM_BOUNCEEND},
@@ -1421,6 +1426,16 @@ int lua_nc_gamecmd(lua_State* L) {
     LuaHost* h = hostOf(L);
     if (h) h->noteGameCommand();
     return 0;
+}
+// Plr(pn): the chart-side handle on player pn's notefield. The proxy is a
+// synthetic actor outside the draw tree; the renderer folds its evaluated
+// rotation/skew into that player's field transform each frame.
+int lua_nc_plr(lua_State* L) {
+    LuaHost* h = hostOf(L);
+    const int pn = int(luaL_optnumber(L, 1, 1));
+    if (!h || !h->treePtr()) { lua_pushnil(L); return 1; }
+    h->pushActor(h->treePtr()->plrProxy(pn - 1));
+    return 1;
 }
 int lua_nc_dispw(lua_State* L) {
     LuaHost* h = hostOf(L);
@@ -1660,6 +1675,7 @@ int LuaHost::actorCall(lua_State* L) {
             emit(S, PROP_DIFFUSE, 4, colour);
         } break;
         case AM_ROTX: emit1(S, PROP_ROTX, number(2)); break;
+        case AM_SKEWX: emit1(S, PROP_SKEWX, number(2)); break;
         case AM_ROTY: emit1(S, PROP_ROTY, number(2)); break;
         case AM_ROTZ: emit1(S, PROP_ROTZ, number(2)); break;
         case AM_LINEAR: S.dur = number(2); S.ease = Ease::Linear; break;
@@ -1828,6 +1844,7 @@ bool LuaHost::open(std::string& err) {
         {"__nc_songdir", lua_nc_songdir},
         {"__nc_broadcast", lua_nc_broadcast},
         {"__nc_gamecmd", lua_nc_gamecmd},
+        {"__nc_plr", lua_nc_plr},
         {"__nc_dispw", lua_nc_dispw},
         {"__nc_disph", lua_nc_disph},
         {"__nc_trace", lua_nc_trace},
@@ -1871,6 +1888,7 @@ bool LuaHost::open(std::string& err) {
         "            GetDisplayWidth = function() return __nc_dispw() end,\n"
         "            GetDisplayHeight = function() return __nc_disph() end }\n"
         "Trace = function(v) __nc_trace(tostring(v)) end\n"
+        "Plr = function(pn) return __nc_plr(pn) end\n"
         "MESSAGEMAN = { Broadcast = function(self, m) __nc_broadcast(m) end }\n"
         "local playerStats = {\n"
         "  GetActualDancePoints = function() return 0 end,\n"
@@ -2007,6 +2025,23 @@ bool ActorLayer::loadFromSm(const std::string& smPath, const std::string& songDi
     return true;
 }
 
+
+bool ActorLayer::fieldXf(int pn, double sec, float& rx, float& ry, float& rz,
+                         float& sk) {
+    rx = ry = rz = sk = 0.0f;
+    bool any = false;
+    for (Slot& sl : trees_) {
+        if (!sl.tree || !sl.tree->ok()) continue;
+        const ActorState st = evalActor(sl.tree->plrProxy(pn - 1), sec);
+        // Summed across trees: two charts driving one field add, the same way
+        // two mod entries on one knob would.
+        if (st.rotX != 0 || st.rotY != 0 || st.rotZ != 0 || st.skewX != 0) {
+            rx += st.rotX; ry += st.rotY; rz += st.rotZ; sk += st.skewX;
+            any = true;
+        }
+    }
+    return any;
+}
 
 int ActorLayer::drainLuaMods(ModDoc& doc, int resolution) {
     int n = 0;
