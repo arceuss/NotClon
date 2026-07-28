@@ -558,6 +558,18 @@ int main(int argc, char** argv) {
         }
         if (actorArgs.empty() && !smBeside.empty())
             actors.loadFromSm(smBeside, chartDir, aerr);
+        // A NotITG-lineage chart keeps its modchart in a Lua table rather than
+        // in #MODS, so the actor tree has to be loaded before the modchart is
+        // complete. Draining is a no-op for a tree with no `mods` global,
+        // which is every chart that predates this.
+        if (!actors.empty() && !opt.noMods) {
+            const int n = actors.drainLuaMods(doc, chart.resolution);
+            if (n > 0) {
+                doc.rebuild(chart);
+                opt.doc = &doc;
+                opt.noMods = false;
+            }
+        }
         for (const auto& m : actors.log()) printf("actor: %s%c", m.c_str(), 10);
         if (!actors.empty()) R.setActorLayer(&actors);
     }

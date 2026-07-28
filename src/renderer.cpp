@@ -648,7 +648,7 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
             // until tilt turns the field), so it is mapped to a small zoom:
             // nearer reads as bigger. A deviation, and a visible one is better
             // than a knob that silently does nothing.
-            const float zoomB = 1.0f + GetYPosBump(mods, lane, yOff) / 512.0f;
+            const float zoomB = 1.0f + GetYPosBump(mods, lane, yOff, float(beat), bpm) / 512.0f;
             const float hw = HALF * noteZoom * zoomB * fx;
             const float hh = HALF * noteZoom * zoomB * fy;
 
@@ -755,7 +755,7 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
 void Renderer::drawActorQuad(float cx, float cy, float w, float h, float rotZDeg,
                              float r, float g, float b, float a,
                              GLuint tex, int blend, bool zWrite, bool zTest,
-                             bool clearZ) {
+                             bool clearZ, float u0, float v0, float u1, float v1) {
     // blend,noeffect writes depth with NO colour, so it must still draw at
     // alpha 0 -- that is the whole point of a mask actor.
     if (a <= 0.0f && blend != 2) return;
@@ -769,8 +769,8 @@ void Renderer::drawActorQuad(float cx, float cy, float w, float h, float rotZDeg
         o[4] = r; o[5] = g; o[6] = b; o[7] = a;
     };
     float q[6][8];
-    P(-hw, -hh, 0, 0, q[0]); P(hw, -hh, 1, 0, q[1]); P(hw, hh, 1, 1, q[2]);
-    P(-hw, -hh, 0, 0, q[3]); P(hw,  hh, 1, 1, q[4]); P(-hw, hh, 0, 1, q[5]);
+    P(-hw, -hh, u0, v0, q[0]); P(hw, -hh, u1, v0, q[1]); P(hw, hh, u1, v1, q[2]);
+    P(-hw, -hh, u0, v0, q[3]); P(hw,  hh, u1, v1, q[4]); P(-hw, hh, u0, v1, q[5]);
 
     glUseProgram(actor_);
     glBindVertexArray(avao_);
@@ -1174,7 +1174,7 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
         // it is our knob. Guarded so the all-zero case never touches a vertex.
         const float wdx = pxToUnits(GetXPos(mods, lane, 0.0f, songTime,
                                             float(beat), bpm));
-        const float wdy = pxToUnits(GetYPosBump(mods, lane, 0.0f)) * 0.5f;
+        const float wdy = pxToUnits(GetYPosBump(mods, lane, 0.0f, float(beat), bpm)) * 0.5f;
         const float wdz = ApplyScrollZ(mods, 0.0f);
         if (wdx != 0.0f || wdy != 0.0f || wdz != 0.0f)
             for (int i = 0; i < 7; ++i)
@@ -1267,6 +1267,9 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
         // Consumption stays in the raw scroll domain (time-anchored); the far
         // cull and the behind-the-eye clamp act on the DRAWN z, which only
         // differs under reverse/centered.
+        // No column here: the cull is a per-NOTE decision taken before the
+        // lane loop, so it uses the whole-field reverse. The per-column
+        // percent applies where each lane's gem is placed.
         const float zDraw = ApplyScrollZ(mods, z);
         if (zDraw > ch::NOTE_CULL_FAR || zDraw < -3.0f || z <= nearCull) continue;
         float alpha = fminf(1.0f, fmaxf(0.0f,
@@ -1318,9 +1321,15 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
         }
 
         for (int lane = 0; lane < 5; ++lane) {
+            // dizzyholds: a hold's head does not spin unless asked
+            // (ArrowEffects.cpp:906). Identical to rotZ when the lane carries
+            // no sustain or dizzy is off, so this costs nothing by default.
+            const float rotZL = (n.sustain[lane] > 0.0)
+                ? -GetRotationZ(mods, float(n.beat), float(beat), true)
+                : rotZ;
             if (!(n.frets & (1 << lane))) continue;
             float px2 = GetXPos(mods, lane, yOff, songTime, float(beat), bpm);
-            float bump = GetYPosBump(mods, lane, yOff);
+            float bump = GetYPosBump(mods, lane, yOff, float(beat), bpm);
             float cx = ch::noteX(lane) + pxToUnits(px2);
             if (mods.tiny != 0.0f) cx *= tinyCol;   // SM5 :561-566
             float by = pxToUnits(bump) * 0.5f;
@@ -1362,14 +1371,14 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
             // Body: frame 2 strum/HOPO, frame 3 tap. Tinted per fret.
             float bu0 = isTap ? 0.6f : 0.4f, bu1 = isTap ? 0.8f : 0.6f;
             ch::quadUpRot(v_, cx, by, zDraw, hx0, hy0, hx1, hy1,
-                          rotX, rotY, rotZ, noteZoom, bu0,0.0f,bu1,1.0f,
+                          rotX, rotY, rotZL, noteZoom, bu0,0.0f,bu1,1.0f,
                           tintN[0], tintN[1], tintN[2], alpha);
             drawLayer(texNotes_.id, ch::BLEND_SPRITE, noteGlow);
 
             if (!isTap) {   // taps have no anim layer
                 float au0 = float(animFrame)/16.0f, au1 = float(animFrame+1)/16.0f;
                 ch::quadUpRot(v_, cx, by, zDraw, hx0, ha0, hx1, ha1,
-                              rotX, rotY, rotZ, noteZoom, au0,0.0f,au1,1.0f,
+                              rotX, rotY, rotZL, noteZoom, au0,0.0f,au1,1.0f,
                               tintA[0], tintA[1], tintA[2], alpha);
                 drawLayer(texAnim_.id, ch::BLEND_SPRITE, noteGlow);
             }
@@ -1377,7 +1386,7 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
             // Head: frame 0 strum/tap (alt_taps defaults false), frame 1 HOPO
             float hu0 = isHopo ? 0.2f : 0.0f, hu1 = isHopo ? 0.4f : 0.2f;
             ch::quadUpRot(v_, cx, by, zDraw, hx0, hy0, hx1, hy1,
-                          rotX, rotY, rotZ, noteZoom, hu0,0.0f,hu1,1.0f,
+                          rotX, rotY, rotZL, noteZoom, hu0,0.0f,hu1,1.0f,
                           1,1,1, alpha);
             drawLayer(texNotes_.id, ch::BLEND_SPRITE, noteGlow);
         }

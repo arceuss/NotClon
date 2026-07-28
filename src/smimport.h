@@ -12,6 +12,8 @@
 // is visible instead of implied.
 #pragma once
 
+#include "modfile.h"
+
 #include <string>
 #include <vector>
 
@@ -26,6 +28,19 @@ struct SmImportOpts {
     // behaviour but changes every gem's sprite.
     bool allStrum = false;
 };
+
+// What a mod-string parse produced. Separate from SmImportReport because the
+// Lua actor bridge parses the same grammar without importing anything.
+struct ModStringStats {
+    int entries = 0, intervals = 0;
+    std::vector<std::string> unknown;   // token names with no knob
+    std::vector<std::string> stubbed;   // parsed but not rendered
+};
+
+// One OITG mod string ("*10 50 flip, *5 no drunk") -> entries in `doc` at
+// `tick`, live for `len` ticks (0 = until something else changes the knob).
+void addModString(ModDoc& doc, const std::string& modsField,
+                  int tick, int len, ModStringStats& st);
 
 struct SmImportReport {
     bool        ok = false;

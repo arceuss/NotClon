@@ -233,9 +233,13 @@ public:
     // program and VBO. Deliberately not routed through drawLayer/SCENE_FS:
     // that path is what the pinned hashes certify, and an actor has different
     // blending, no premultiply and an ortho projection.
+    // u0..v1 select a sub-rectangle of the texture, for a .sprite's sheet.
+    // Defaulted to the whole image so every existing caller is unchanged.
     void drawActorQuad(float cx, float cy, float w, float h, float rotZDeg,
                        float r, float g, float b, float a,
-                       GLuint tex, int blend, bool zWrite, bool zTest, bool clearZ);
+                       GLuint tex, int blend, bool zWrite, bool zTest, bool clearZ,
+                       float u0 = 0.0f, float v0 = 0.0f,
+                       float u1 = 1.0f, float v1 = 1.0f);
     // Null = no actor folders, and the passes are skipped entirely -- which is
     // what keeps this hash-neutral.
     void setActorLayer(ActorLayer* a) { actors_ = a; }

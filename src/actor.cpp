@@ -1,5 +1,6 @@
 #include "actor.h"
 #include "smbg.h"
+#include "smimport.h"
 
 extern "C" {
 #include "lua.h"
@@ -11,6 +12,7 @@ extern "C" {
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <map>
 
 namespace nc {
@@ -474,6 +476,105 @@ void applyEffect(const Actor& a, ActorState& st, double sec, double beat) {
 // ---------------------------------------------------------------------------
 namespace {
 
+
+// --- .sprite -----------------------------------------------------------------
+// SM's animated-sprite descriptor. An ini:
+//
+//     [Sprite]
+//     Texture=walk 2x1.png
+//     Frame0000=0
+//     Delay0000=0.5
+//
+// `Texture` resolves against the .sprite's own folder. The sheet grid comes
+// from the texture's FILENAME -- a trailing "<cols>x<rows>" -- which is the
+// same convention assets/pump uses. Without this a .sprite reaches gl_loadTex,
+// which cannot decode an ini, and the actor draws as the fallback white quad.
+static void parseSpriteFile(const std::string& path, Actor& a) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return;
+    std::string txt;
+    { char b[8192]; size_t n;
+      while ((n = fread(b, 1, sizeof b, f)) > 0) txt.append(b, n); }
+    fclose(f);
+
+    const size_t sl = path.find_last_of("/\\");
+    const std::string dir = sl == std::string::npos ? std::string(".")
+                                                    : path.substr(0, sl);
+    std::string texName;
+    std::map<int, int>   frames;      // ordinal -> frame index, kept sorted
+    std::map<int, float> delays;
+
+    size_t i = 0;
+    while (i < txt.size()) {
+        size_t e = txt.find('\n', i);
+        if (e == std::string::npos) e = txt.size();
+        const std::string line = trimws(txt.substr(i, e - i));
+        i = e + 1;
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        const std::string k = trimws(line.substr(0, eq));
+        const std::string v = trimws(line.substr(eq + 1));
+        if (lower(k) == "texture") texName = v;
+        else if (k.size() > 5 && lower(k).compare(0, 5, "frame") == 0)
+            frames[atoi(k.c_str() + 5)] = atoi(v.c_str());
+        else if (k.size() > 5 && lower(k).compare(0, 5, "delay") == 0)
+            delays[atoi(k.c_str() + 5)] = float(atof(v.c_str()));
+    }
+    if (texName.empty()) return;
+
+    a.file = dir + "/" + texName;
+    a.texLoaded = false;
+
+    // Grid from the filename: "... 2x1.png" -> 2 cols, 1 row. Anything that
+    // does not end in that pattern is a single-frame image.
+    { std::string stem = texName;
+      const size_t d = stem.find_last_of('.');
+      if (d != std::string::npos) stem = stem.substr(0, d);
+      const size_t sp = stem.find_last_of(' ');
+      if (sp != std::string::npos) {
+          const std::string g = stem.substr(sp + 1);
+          const size_t x = g.find('x');
+          if (x != std::string::npos && x > 0 && x + 1 < g.size()) {
+              const int c = atoi(g.c_str());
+              const int r = atoi(g.c_str() + x + 1);
+              if (c > 0 && r > 0) { a.sheetCols = c; a.sheetRows = r; }
+          }
+      } }
+
+    for (const auto& kv : frames) {
+        auto d = delays.find(kv.first);
+        // A frame with no delay would be shown for zero seconds, i.e. never;
+        // treat a missing one as a sensible default rather than dropping it.
+        const float sec = d == delays.end() ? 0.1f : d->second;
+        if (sec <= 0.0f) continue;
+        a.spriteFrames.push_back(kv.second);
+        a.spriteDelays.push_back(sec);
+        a.spriteTotal += sec;
+    }
+}
+
+// Which cell of the sheet is showing at `sec`, as UVs. A pure function of the
+// time -- see the note on Actor::spriteFrames.
+static void spriteUV(const Actor& a, double sec,
+                     float& u0, float& v0, float& u1, float& v1) {
+    u0 = 0.0f; v0 = 0.0f; u1 = 1.0f; v1 = 1.0f;
+    if (a.spriteFrames.empty() || a.spriteTotal <= 0.0f) return;
+    double t = fmod(sec, double(a.spriteTotal));
+    if (t < 0) t += a.spriteTotal;
+    size_t k = 0;
+    for (; k + 1 < a.spriteFrames.size(); ++k) {
+        if (t < a.spriteDelays[k]) break;
+        t -= a.spriteDelays[k];
+    }
+    const int idx = a.spriteFrames[k];
+    const int col = a.sheetCols > 0 ? idx % a.sheetCols : 0;
+    const int row = a.sheetCols > 0 ? idx / a.sheetCols : 0;
+    const float cw = 1.0f / float(a.sheetCols > 0 ? a.sheetCols : 1);
+    const float ch = 1.0f / float(a.sheetRows > 0 ? a.sheetRows : 1);
+    u0 = col * cw; u1 = u0 + cw;
+    v0 = row * ch; v1 = v0 + ch;
+}
+
 void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
                 double startSec, std::vector<std::string>* warn) {
     a.type = n.tag;
@@ -485,14 +586,67 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
         a.type = t ? *t : "Sprite";
     }
     if (const std::string* nm = n.attr("Name")) a.name = *nm;
+    // Text= means File= is a font, not an image. Recorded before the File=
+    // branch so the font name never reaches the texture loader.
+    if (n.attr("Text")) a.isText = true;
     if (const std::string* f = n.attr("File")) {
+        if (a.isText) {
+            if (warn) warn->push_back("text actor not rendered (no font support): "
+                                      + *f);
+            for (const auto& at : n.attrs) {
+                const std::string& k = at.first;
+                if (k.size() > 7 && k.compare(k.size() - 7, 7, "Command") == 0)
+                    a.commands.push_back({k, at.second});
+            }
+            for (const auto& kid : n.kids) {
+                auto c = std::make_unique<Actor>();
+                buildActor(kid, *c, dir, startSec, warn);
+                a.children.push_back(std::move(c));
+            }
+            return;
+        }
         std::string p = *f;
+        // A DIRECTORY is a nested actor tree: SM loads <folder>/default.xml.
+        // Resolved BEFORE the .xml/.sprite branches so the rewritten path goes
+        // through the nested-tree path rather than the texture loader.
+        {
+            const std::string asDir =
+                (p.size() > 1 && (p[0] == '/' || p[1] == ':')) ? p : dir + "/" + p;
+            std::error_code ec;
+            if (std::filesystem::is_directory(asDir, ec)) {
+                for (const char* nm : {"/default.xml", "/Default.xml"}) {
+                    FILE* fp = fopen((asDir + nm).c_str(), "rb");
+                    if (fp) { fclose(fp); p += nm; break; }
+                }
+            }
+        }
         // A File= naming another .xml is a NESTED ACTOR TREE, not an image --
         // SM's loader recurses into it and splices its children in here. It
         // is how a chart factors shared per-frame code out into its own file,
         // and feeding the path to the texture loader instead kills the whole
         // song on "cannot load texture .../<name>.xml".
-        if (p.size() > 4 && p.compare(p.size() - 4, 4, ".xml") == 0) {
+        if (p.size() > 7 && p.compare(p.size() - 7, 7, ".sprite") == 0) {
+            const std::string sp = (p.size() > 1 && (p[0] == '/' || p[1] == ':'))
+                                 ? p : dir + "/" + p;
+            parseSpriteFile(sp, a);
+            if (a.file.empty() && warn) warn->push_back("cannot read " + sp);
+            // parseSpriteFile has already set a.file to the SHEET it names.
+            // Falling through would overwrite that with the .sprite path
+            // itself, which the texture loader cannot decode -- so finish the
+            // node here rather than letting the generic assignment run.
+            for (const auto& at : n.attrs) {
+                const std::string& k = at.first;
+                if (k.size() > 7 && k.compare(k.size() - 7, 7, "Command") == 0)
+                    a.commands.push_back({k, at.second});
+            }
+            for (const auto& kid : n.kids) {
+                auto c = std::make_unique<Actor>();
+                buildActor(kid, *c, dir, startSec, warn);
+                a.children.push_back(std::move(c));
+            }
+            return;
+        }
+        else if (p.size() > 4 && p.compare(p.size() - 4, 4, ".xml") == 0) {
             const std::string sub = (p.size() > 1 && (p[0] == '/' || p[1] == ':'))
                                   ? p : dir + "/" + p;
             FILE* sf = fopen(sub.c_str(), "rb");
@@ -540,12 +694,47 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
         const size_t slash = p.find_last_of("/\\");
         const std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
         if (base.find('.') == std::string::npos) {
+            bool found = false;
             for (const char* ext : {".png", ".jpg", ".jpeg", ".gif", ".bmp"}) {
                 FILE* fp = fopen((dir + "/" + p + ext).c_str(), "rb");
-                if (fp) { fclose(fp); p += ext; break; }
+                if (fp) { fclose(fp); p += ext; found = true; break; }
+            }
+            // Still nothing: SM matches a texture name against a file whose
+            // stem STARTS with it, which is how a sheet keeps its dimensions
+            // in the filename -- "walk" resolves to "walk 2x1.png". Scan the
+            // folder rather than guessing the grid.
+            if (!found) {
+                const size_t sl2 = p.find_last_of("/\\");
+                const std::string sub = sl2 == std::string::npos
+                                      ? dir : dir + "/" + p.substr(0, sl2);
+                const std::string stem = sl2 == std::string::npos
+                                       ? p : p.substr(sl2 + 1);
+                std::error_code ec;
+                for (const auto& de : std::filesystem::directory_iterator(sub, ec)) {
+                    const std::string fn = de.path().filename().string();
+                    if (fn.size() <= stem.size()) continue;
+                    if (fn.compare(0, stem.size(), stem) != 0) continue;
+                    if (fn[stem.size()] != ' ') continue;   // "laugh2" is not "laugh"
+                    const std::string ext = de.path().extension().string();
+                    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" &&
+                        ext != ".gif" && ext != ".bmp") continue;
+                    p = (sl2 == std::string::npos) ? fn : p.substr(0, sl2 + 1) + fn;
+                    found = true;
+                    break;
+                }
             }
         }
         a.file = (p.size() > 1 && (p[0] == '/' || p[1] == ':')) ? p : dir + "/" + p;
+        // A texture that does not open leaves tex.id 0, and an untextured
+        // quad draws SOLID WHITE. That is indistinguishable from an actor the
+        // chart meant to be white, so say so here rather than leaving a white
+        // rectangle on screen with no explanation.
+        if (warn) {
+            FILE* probe = fopen(a.file.c_str(), "rb");
+            if (probe) fclose(probe);
+            else warn->push_back("missing texture " + a.file +
+                                 " (will draw as a white quad)");
+        }
     }
     for (const auto& at : n.attrs) {
         const std::string& k = at.first;
@@ -600,6 +789,18 @@ void scheduleActor(Actor& a, double startSec, LuaHost& lua,
     }
     a.base = st;
     a.segs.clear();
+    a.onBase = st;      // OnCommand starts from the post-Init state
+    for (auto& c : a.children) scheduleActor(*c, startSec, lua, warn);
+}
+
+// SM runs EVERY actor's InitCommand before ANY actor's OnCommand -- that is
+// the whole point of having two phases. Interleaving them per actor means an
+// OnCommand can run before a later sibling's InitCommand has published the
+// global it depends on, which is exactly how a chart that does
+// `<aft>.InitCommand: my_aft = self` and reads `my_aft` from an earlier
+// sibling's OnCommand ends up indexing nil.
+void scheduleActorOn(Actor& a, double startSec, LuaHost& lua,
+                     std::vector<std::string>* warn) {
     if (const ActorCommand* on = a.findCommandEntry("OnCommand")) {
         if (on->luaRef >= 0) {
             std::string err;
@@ -607,10 +808,10 @@ void scheduleActor(Actor& a, double startSec, LuaHost& lua,
             if (!lua.callChunk(on->luaRef, a, startSec, where, err) && warn)
                 warn->push_back(where + ": " + err);
         } else if (trimws(on->text).compare(0, 10, "%function(") != 0) {
-            scheduleChain(a, on->text, startSec, st, 0, &lua);
+            scheduleChain(a, on->text, startSec, a.onBase, 0, &lua);
         }
     }
-    for (auto& c : a.children) scheduleActor(*c, startSec, lua, warn);
+    for (auto& c : a.children) scheduleActorOn(*c, startSec, lua, warn);
 }
 
 void dispatchActorCommand(Actor& a, const std::string& cmd, double sec,
@@ -650,6 +851,7 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
     root_.reset();
     lua_ = std::make_unique<LuaHost>();
     if (!lua_->open(err)) return false;
+    lua_->setTree(this);   // so an AFT can publish its texture by name
     const size_t slash = dir.find_last_of("/\\");
     lua_->setSongDir(slash == std::string::npos ? "." : dir.substr(0, slash));
     lua_->setBeat(0.0, startSec);
@@ -678,9 +880,88 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
     std::map<std::string, int> cache;
     compileActorLua(*root_, *lua_, cache, &warn);
     scheduleActor(*root_, startSec, *lua_, &warn);
+    // Second pass: see the note on scheduleActorOn.
+    scheduleActorOn(*root_, startSec, *lua_, &warn);
     dispatchPending(startSec);
     for (const std::string& w : warn) lua_->note(w);
     return true;
+}
+
+
+// --- the Lua mod table -> ModDoc --------------------------------------------
+// See the contract on ActorLayer::drainLuaMods.
+int ActorTree::drainLuaMods(ModDoc& doc, int resolution) {
+    if (!lua_ || !lua_->L()) return 0;
+    lua_State* L = lua_->L();
+    int added = 0;
+    ModStringStats st;
+
+    // gat splits its list across `mods` and `mods2`; both are the same shape.
+    for (const char* tableName : {"mods", "mods2"}) {
+        lua_getglobal(L, tableName);
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+
+        // No ipairs: the reader in a NotITG modchart uses pairs(), so a table
+        // with a hole still dispatches every row, and stopping at the first
+        // gap would silently drop the tail.
+        lua_pushnil(L);
+        while (lua_next(L, -2)) {
+            if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+
+            double beat = 0, span = 0;
+            std::string modstr, kind = "len";
+            lua_rawgeti(L, -1, 1); beat = lua_tonumber(L, -1);      lua_pop(L, 1);
+            lua_rawgeti(L, -1, 2); span = lua_tonumber(L, -1);      lua_pop(L, 1);
+            lua_rawgeti(L, -1, 3);
+            if (lua_isstring(L, -1)) modstr = lua_tostring(L, -1);  lua_pop(L, 1);
+            lua_rawgeti(L, -1, 4);
+            if (lua_isstring(L, -1)) kind = lua_tostring(L, -1);    lua_pop(L, 1);
+            // Row 5 is the player number. NotClon draws ONE playfield, so a
+            // per-player row would be applied to the only field there is --
+            // which for gat means P1's and P2's mirrored values fighting over
+            // the same knob. Drop them and say how many, rather than render
+            // something the author never wrote.
+            bool perPlayer = false;
+            lua_rawgeti(L, -1, 5);
+            perPlayer = !lua_isnil(L, -1);
+            lua_pop(L, 1);
+
+            lua_pop(L, 1);   // the row; key stays for lua_next
+
+            if (modstr.empty() || kind == "error") continue;
+            if (perPlayer) { ++perPlayerDropped_; continue; }
+
+            const int tick = int(beat * resolution + 0.5);
+            int len = 0;
+            if (kind == "end") {
+                // The second field is an END BEAT here, not a duration.
+                const int endTick = int(span * resolution + 0.5);
+                len = endTick - tick;
+            } else {
+                len = int(span * resolution + 0.5);
+            }
+            if (len < 0) len = 0;
+            // A window that rounds away to nothing would never be live; one
+            // tick is the smallest thing that still fires.
+            if (len == 0 && span > 0.0) len = 1;
+
+            const int before = int(doc.entries.size());
+            addModString(doc, modstr, tick, len, st);
+            added += int(doc.entries.size()) - before;
+        }
+        lua_pop(L, 1);   // the table
+    }
+
+    for (const std::string& u : st.unknown)
+        lua_->note("mod token not implemented: " + u);
+    if (perPlayerDropped_) {
+        char m[128];
+        snprintf(m, sizeof m, "%d per-player mod rows dropped -- one playfield",
+                 perPlayerDropped_);
+        lua_->note(m);
+        perPlayerDropped_ = 0;
+    }
+    return added;
 }
 
 void ActorTree::broadcast(const std::string& msg, double sec) {
@@ -709,6 +990,12 @@ void ActorTree::dispatchPending(double sec) {
 // ---------------------------------------------------------------------------
 namespace {
 
+// The tree's AFT registry, for the duration of one draw walk. A parameter
+// would have to thread through every recursive call to be read by one leaf
+// case; ActorTree::draw sets this immediately before walking and there is one
+// draw at a time, so the narrower plumbing is not worth the noise.
+static std::map<std::string, GLuint>* g_namedTex = nullptr;
+
 void drawActor(Renderer& R, Actor& a, double sec, double beat,
                const ActorState& parent) {
     ActorState st = evalActor(a, sec);
@@ -734,8 +1021,34 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
     w.rotY = parent.rotY + st.rotY;
     w.a = parent.a * st.a;
 
-    if (a.type != "ActorFrame") {
-        if (!a.texLoaded && !a.file.empty()) {
+    // An ActorFrameTexture draws nothing; it CAPTURES. SM renders the AFT's
+    // preceding siblings into its texture, and for a tree drawn in order that
+    // is the framebuffer as it stands right here -- so a copy from the read
+    // buffer is the same content without a second render pass.
+    if (a.isAft) {
+        if (a.aftTex) {
+            glBindTexture(GL_TEXTURE_2D, a.aftTex);
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, a.aftW, a.aftH);
+        }
+        for (auto& c : a.children) drawActor(R, *c, sec, beat, w);
+        return;
+    }
+
+    if (a.type != "ActorFrame" && !a.isText) {
+        if (!a.texLoaded && !a.file.empty() && a.file[0] == '@') {
+            // Published by an AFT's SetTextureName. Resolved every frame until
+            // it exists, because the AFT that creates it may be built after
+            // the sprite that references it.
+            if (g_namedTex) {
+                auto it = g_namedTex->find(a.file.substr(1));
+                if (it != g_namedTex->end()) {
+                    a.tex.id = it->second;
+                    a.tex.w = a.tex.h = 0;      // size comes from zoomto
+                    a.texLoaded = true;
+                }
+            }
+        }
+        else if (!a.texLoaded && !a.file.empty()) {
             FILE* f = fopen(a.file.c_str(), "rb");
             if (f) { fclose(f); a.tex = gl_loadTex(a.file, false, /*flipY=*/false); }
             a.texLoaded = true;
@@ -747,8 +1060,14 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
             a.textureFilterDirty = false;
         }
-        float sw = (w.sizeX > 0) ? w.sizeX : float(a.tex.w ? a.tex.w : 64);
-        float sh = (w.sizeY > 0) ? w.sizeY : float(a.tex.h ? a.tex.h : 64);
+        // Natural size is ONE CELL, not the whole sheet: an unzoomed .sprite
+        // whose sheet is 2x1 would otherwise draw at double width.
+        const int cols = a.sheetCols > 0 ? a.sheetCols : 1;
+        const int rows = a.sheetRows > 0 ? a.sheetRows : 1;
+        float sw = (w.sizeX > 0) ? w.sizeX
+                                 : float(a.tex.w ? a.tex.w / cols : 64);
+        float sh = (w.sizeY > 0) ? w.sizeY
+                                 : float(a.tex.h ? a.tex.h / rows : 64);
         sw *= w.zoomX; sh *= w.zoomY;
         float ox = 0, oy = 0;
         if (st.horizAlign < 0) ox = sw * 0.5f;
@@ -761,9 +1080,12 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         // files use, where the difference from true perspective is a few px.
         const float fx = cosf(w.rotY * 3.14159265f / 180.0f);
         const float fy = cosf(w.rotX * 3.14159265f / 180.0f);
+        float su0, sv0, su1, sv1;
+        spriteUV(a, sec, su0, sv0, su1, sv1);
         R.drawActorQuad(w.x + ox, w.y + oy, sw * fabsf(fx), sh * fabsf(fy), w.rotZ,
                         w.r, w.g, w.b, w.a,
-                        a.tex.id, st.blend, st.zWrite, st.zTest, st.clearZ);
+                        a.tex.id, st.blend, st.zWrite, st.zTest, st.clearZ,
+                        su0, sv0, su1, sv1);
     }
     for (auto& c : a.children) drawActor(R, *c, sec, beat, w);
 }
@@ -774,11 +1096,13 @@ void ActorTree::draw(Renderer& R, double sec) {
     if (!root_ || sec < startSec_) return;
     if (lua_) lua_->setBeat(R.actorBeat(), sec);
     ActorState id;
+    g_namedTex = &namedTex_;
     drawActor(R, *root_, sec, R.actorBeat(), id);
+    g_namedTex = nullptr;
 }
 
 // ---------------------------------------------------------------------------
-// LuaHost -- vendored Lua 5.1.5, opened with the shim globals Saitama needs.
+// LuaHost -- vendored Lua 5.1.5, opened with the shim globals charts expect.
 // ---------------------------------------------------------------------------
 namespace {
 int lua_absorb(lua_State* L) {                 // returns itself, so chains work
@@ -793,7 +1117,12 @@ struct LuaActorRef {
 enum ActorMethod {
     AM_X, AM_Y, AM_ZOOM, AM_ZOOMTO, AM_ZOOMX, AM_ZOOMY,
     AM_VISIBLE, AM_HIDDEN, AM_DIFFUSEALPHA, AM_DIFFUSE, AM_ROTZ,
-    AM_LINEAR, AM_SLEEP, AM_FINISH, AM_FILTER, AM_PLAY, AM_QUEUE, AM_GETCHILD
+    AM_LINEAR, AM_SLEEP, AM_FINISH, AM_FILTER, AM_PLAY, AM_QUEUE, AM_GETCHILD,
+    // ActorFrameTexture
+    AM_AFT_NAME, AM_AFT_W, AM_AFT_H, AM_AFT_CREATE, AM_AFT_GETTEX,
+    AM_AFT_DEPTH, AM_AFT_ALPHA, AM_AFT_FLOAT, AM_AFT_PRESERVE,
+    // plain actor methods that were reaching the unsupported path
+    AM_SETTEXTURE, AM_BLEND, AM_BASEZOOMX, AM_BASEZOOMY, AM_ADDX, AM_ADDY
 };
 
 struct ActorMethodDef { const char* name; ActorMethod method; };
@@ -805,6 +1134,14 @@ const ActorMethodDef ACTOR_METHODS[] = {
     {"sleep", AM_SLEEP}, {"finishtweening", AM_FINISH},
     {"SetTextureFiltering", AM_FILTER}, {"playcommand", AM_PLAY},
     {"queuecommand", AM_QUEUE}, {"GetChild", AM_GETCHILD},
+    {"SetTextureName", AM_AFT_NAME}, {"SetWidth", AM_AFT_W},
+    {"SetHeight", AM_AFT_H}, {"Create", AM_AFT_CREATE},
+    {"GetTexture", AM_AFT_GETTEX},
+    {"EnableDepthBuffer", AM_AFT_DEPTH}, {"EnableAlphaBuffer", AM_AFT_ALPHA},
+    {"EnableFloat", AM_AFT_FLOAT}, {"EnablePreserveTexture", AM_AFT_PRESERVE},
+    {"SetTexture", AM_SETTEXTURE}, {"blend", AM_BLEND},
+    {"basezoomx", AM_BASEZOOMX}, {"basezoomy", AM_BASEZOOMY},
+    {"addx", AM_ADDX}, {"addy", AM_ADDY},
 };
 
 
@@ -850,6 +1187,53 @@ void LuaHost::pushActor(Actor& actor) {
     lua_setmetatable(L_, -2);
 }
 
+
+Actor* LuaHost::toActor(lua_State* L, int idx) {
+    if (!lua_isuserdata(L, idx)) return nullptr;
+    void* ud = lua_touserdata(L, idx);
+    if (!ud) return nullptr;
+    // luaL_checkudata would throw on a foreign userdata; this is a query, and
+    // a chart passing something else should get null rather than an error.
+    if (!lua_getmetatable(L, idx)) return nullptr;
+    luaL_getmetatable(L, "nc.Actor");
+    const bool ours = lua_rawequal(L, -1, -2) != 0;
+    lua_pop(L, 2);
+    return ours ? static_cast<LuaActorRef*>(ud)->actor : nullptr;
+}
+
+void LuaHost::aftCreate(Actor& a) {
+    if (a.aftTex) return;                       // Create() called twice
+    if (a.aftW <= 0) a.aftW = 512;
+    if (a.aftH <= 0) a.aftH = 512;
+
+    glGenTextures(1, &a.aftTex);
+    glBindTexture(GL_TEXTURE_2D, a.aftTex);
+    // EnableFloat asks for a float target. It exists so an accumulating
+    // feedback chain does not band, and RGBA8 is what everything else here
+    // uses; honouring it costs nothing where the driver has the format.
+    const GLint fmt = a.aftFloat ? GL_RGBA16F : GL_RGBA8;
+    glTexImage2D(GL_TEXTURE_2D, 0, fmt, a.aftW, a.aftH, 0, GL_RGBA,
+                 a.aftFloat ? GL_FLOAT : GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenFramebuffers(1, &a.aftFbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, a.aftFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, a.aftTex, 0);
+    // Cleared once, not per frame: EnablePreserveTexture(true) means the
+    // contents survive between frames, which is what a feedback effect reads.
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (tree_ && !a.aftName.empty())
+        tree_->namedTextures()[a.aftName] = a.aftTex;
+    note("ActorFrameTexture '" + a.aftName + "' created");
+}
+
 int LuaHost::actorIndex(lua_State* L) {
     LuaActorRef* ref = static_cast<LuaActorRef*>(luaL_checkudata(L, 1, "nc.Actor"));
     const char* name = luaL_checkstring(L, 2);
@@ -885,6 +1269,60 @@ int LuaHost::actorCall(lua_State* L) {
         lua_getglobal(L, "ABSORB");
         lua_call(L, 0, 1);
         return 1;
+    }
+
+    // The AFT methods run OUTSIDE the tween scheduler: they configure and
+    // allocate a render target rather than animating a property, so they must
+    // work during InitCommand, before any Sched exists for this actor.
+    switch (method) {
+        case AM_AFT_NAME: {
+            actor->isAft = true;
+            const char* nm = lua_tostring(L, 2);
+            if (nm) actor->aftName = nm;
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        case AM_AFT_W: actor->isAft = true;
+                       actor->aftW = int(lua_tonumber(L, 2));
+                       lua_pushvalue(L, 1); return 1;
+        case AM_AFT_H: actor->isAft = true;
+                       actor->aftH = int(lua_tonumber(L, 2));
+                       lua_pushvalue(L, 1); return 1;
+        case AM_AFT_DEPTH:    actor->aftDepth    = lua_toboolean(L, 2) != 0;
+                              lua_pushvalue(L, 1); return 1;
+        case AM_AFT_ALPHA:    actor->aftAlpha    = lua_toboolean(L, 2) != 0;
+                              lua_pushvalue(L, 1); return 1;
+        case AM_AFT_FLOAT:    actor->aftFloat    = lua_toboolean(L, 2) != 0;
+                              lua_pushvalue(L, 1); return 1;
+        case AM_AFT_PRESERVE: actor->aftPreserve = lua_toboolean(L, 2) != 0;
+                              lua_pushvalue(L, 1); return 1;
+        case AM_AFT_CREATE:
+            actor->isAft = true;
+            host->aftCreate(*actor);
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_AFT_GETTEX:
+            // SM hands back a texture object. Ours is the actor itself: every
+            // consumer either passes it straight to SetTexture or reads its
+            // name, and both work off the actor. Returning a distinct userdata
+            // would be a second type with one member.
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_SETTEXTURE: {
+            // SetTexture(aft) or SetTexture("name").
+            if (lua_isstring(L, 2)) {
+                const char* nm = lua_tostring(L, 2);
+                if (nm) actor->file = std::string("@") + nm;
+            } else {
+                Actor* src = host->toActor(L, 2);
+                if (src && !src->aftName.empty())
+                    actor->file = "@" + src->aftName;
+            }
+            actor->texLoaded = false;
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        default: break;
     }
 
     auto found = host->call_->actors.find(actor);
@@ -1173,6 +1611,28 @@ bool ActorLayer::loadFromSm(const std::string& smPath, const std::string& songDi
         }
     }
     return true;
+}
+
+
+int ActorLayer::drainLuaMods(ModDoc& doc, int resolution) {
+    int n = 0;
+    for (Slot& sl : trees_) {
+        if (!sl.tree) continue;
+        // The tree's log was merged into ours when it loaded, so anything the
+        // drain notes -- unimplemented tokens above all -- would be stranded.
+        // Take only what is new. A mod the chart asks for and we silently do
+        // not have is the single most misleading thing this can do.
+        const size_t before = sl.tree->log().size();
+        n += sl.tree->drainLuaMods(doc, resolution);
+        for (size_t i = before; i < sl.tree->log().size(); ++i)
+            log_.push_back(sl.tree->log()[i]);
+    }
+    if (n) {
+        char m[128];
+        snprintf(m, sizeof m, "%d mod entries from Lua", n);
+        log_.push_back(m);
+    }
+    return n;
 }
 
 void ActorLayer::drawBackground(Renderer& R, double sec) {

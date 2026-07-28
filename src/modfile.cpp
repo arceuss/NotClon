@@ -56,6 +56,51 @@ const ModInfo MODS[] = {
     {"hide",       0.0f},
     {"hideboard",  0.0f},
     {"piu",        0.0f},
+    {"suddenoffset", 0.0f},
+    {"hiddenoffset", 0.0f},
+    {"split",      0.0f},
+    {"cross",      0.0f},
+    {"alternate",  0.0f},
+    {"blind",      0.0f},
+    {"drunkperiod",   0.0f},
+    {"bumpyperiod",   0.0f},
+    {"waveperiod",    0.0f},
+    {"tornadoperiod", 0.0f},
+    {"confusionoffset",  0.0f},
+    {"confusionyoffset", 0.0f},
+    {"zigzag",        0.0f},
+    {"zigzagperiod",  0.0f},
+    {"sawtooth",      0.0f},
+    {"sawtoothperiod",0.0f},
+    {"square",        0.0f},
+    {"squareperiod",  0.0f},
+    {"digital",       0.0f},
+    {"digitalperiod", 0.0f},
+    {"digitalsteps",  0.0f},
+    {"tandrunk",      0.0f},
+    {"cosec",         0.0f},
+    {"beatoffset",    0.0f},
+    {"beatmult",      0.0f},
+    {"beaty",         0.0f},
+    {"beatyoffset",   0.0f},
+    {"beatymult",     0.0f},
+    {"beatz",         0.0f},
+    {"beatzoffset",   0.0f},
+    {"beatzmult",     0.0f},
+    {"movey0",        0.0f},
+    {"movey1",        0.0f},
+    {"movey2",        0.0f},
+    {"movey3",        0.0f},
+    {"movey4",        0.0f},
+    {"zigzagz",       0.0f},
+    {"zigzagzperiod", 0.0f},
+    {"sawtoothz",     0.0f},
+    {"sawtoothzperiod", 0.0f},
+    {"digitalz",      0.0f},
+    {"digitalzperiod",0.0f},
+    {"digitalzoffset",0.0f},
+    {"digitalzsteps", 0.0f},
+    {"dizzyholds",    0.0f},
     {"movex",      0.0f},
     {"movey",      0.0f},
     {"movez",      0.0f},
@@ -301,6 +346,35 @@ void ModDoc::evalAt(const Chart& c, double tick, Mods& m, PostFx& fx,
     m.hide      = v[MOD_HIDE];
     m.hideboard = v[MOD_HIDEBOARD];
     m.piu       = v[MOD_PIU];
+    m.suddenOffset = v[MOD_SUDDENOFFSET];
+    m.hiddenOffset = v[MOD_HIDDENOFFSET];
+    m.split     = v[MOD_SPLIT];
+    m.drunkPeriod    = v[MOD_DRUNKPERIOD];
+    m.bumpyPeriod    = v[MOD_BUMPYPERIOD];
+    m.wavePeriod     = v[MOD_WAVEPERIOD];
+    m.tornadoPeriod  = v[MOD_TORNADOPERIOD];
+    m.confusionOffset  = v[MOD_CONFUSIONOFFSET];
+    m.confusionYOffset = v[MOD_CONFUSIONYOFFSET];
+    m.zigzag    = v[MOD_ZIGZAG];    m.zigzagPeriod   = v[MOD_ZIGZAGPERIOD];
+    m.sawtooth  = v[MOD_SAWTOOTH];  m.sawtoothPeriod = v[MOD_SAWTOOTHPERIOD];
+    m.square    = v[MOD_SQUARE];    m.squarePeriod   = v[MOD_SQUAREPERIOD];
+    m.digital   = v[MOD_DIGITAL];   m.digitalPeriod  = v[MOD_DIGITALPERIOD];
+    m.digitalSteps = v[MOD_DIGITALSTEPS];
+    m.tandrunk  = v[MOD_TANDRUNK];
+    m.cosecant  = v[MOD_COSEC];
+    m.beatOffset = v[MOD_BEATOFFSET];  m.beatMult  = v[MOD_BEATMULT];
+    m.beaty = v[MOD_BEATY]; m.beatyOffset = v[MOD_BEATYOFFSET]; m.beatyMult = v[MOD_BEATYMULT];
+    m.beatz = v[MOD_BEATZ]; m.beatzOffset = v[MOD_BEATZOFFSET]; m.beatzMult = v[MOD_BEATZMULT];
+    static_assert(MOD_MOVEY4 - MOD_MOVEY0 == NUM_LANES - 1,
+                  "movey knobs must be contiguous, one per lane");
+    for (int c = 0; c < NUM_LANES; ++c) m.moveyCol[c] = v[MOD_MOVEY0 + c];
+    m.zigzagZ = v[MOD_ZIGZAGZ]; m.zigzagZPeriod = v[MOD_ZIGZAGZPERIOD];
+    m.sawtoothZ = v[MOD_SAWTOOTHZ]; m.sawtoothZPeriod = v[MOD_SAWTOOTHZPERIOD];
+    m.digitalZ = v[MOD_DIGITALZ]; m.digitalZPeriod = v[MOD_DIGITALZPERIOD];
+    m.digitalZOffset = v[MOD_DIGITALZOFFSET]; m.digitalZSteps = v[MOD_DIGITALZSTEPS];
+    m.dizzyHolds = v[MOD_DIZZYHOLDS];
+    m.cross     = v[MOD_CROSS];
+    m.alternate = v[MOD_ALTERNATE];
     m.cover     = v[MOD_COVER];
     // The two *speed knobs are phase rates, not amplitudes: they say how fast
     // the pattern crawls along the highway, so they are integrated against the

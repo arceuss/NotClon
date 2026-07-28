@@ -75,6 +75,40 @@ enum ModId {
     // NOTES: pump/default charts hold heads as taps too (NoteSkin.lua:18-19),
     // and sustains keep their CH ribbons under this mode.
     MOD_PIU,
+    // Appearance offsets. The formula already carries them (mods.h
+    // GetPercentVisible, SM5 ArrowEffects.cpp:1044-1071 GetHidden/SuddenLine);
+    // these are the knobs that were missing, not the maths.
+    MOD_SUDDENOFFSET, MOD_HIDDENOFFSET,
+    // Lane rearrangements, the same family as flip/invert
+    // (ArrowEffects.cpp:754-780 via the m_fInvertDistance table).
+    MOD_SPLIT, MOD_CROSS, MOD_ALTERNATE,
+    // Recognised and intentionally inert: `blind` hides judgment and combo
+    // text, and NotClon draws neither. Parsing it as a no-op is the honest
+    // outcome -- dropping it as unknown would imply we lost something.
+    MOD_BLIND,
+    // Waveform shape parameters. Divisor terms of the form (period*K)+K, so 0
+    // is the identity -- adding them cannot change an existing modchart.
+    MOD_DRUNKPERIOD, MOD_BUMPYPERIOD, MOD_WAVEPERIOD, MOD_TORNADOPERIOD,
+    MOD_CONFUSIONOFFSET, MOD_CONFUSIONYOFFSET,
+    // New periodic shapes over the same yOffset input.
+    MOD_ZIGZAG, MOD_ZIGZAGPERIOD,
+    MOD_SAWTOOTH, MOD_SAWTOOTHPERIOD,
+    MOD_SQUARE, MOD_SQUAREPERIOD,
+    MOD_DIGITAL, MOD_DIGITALPERIOD, MOD_DIGITALSTEPS,
+    MOD_TANDRUNK,
+    // A FLAG, not an amount: it swaps tan for cosecant in every tan-family
+    // mod (SelectTanType). NotITG spells it `cosec`, SM5 `cosecant`.
+    MOD_COSEC,
+    MOD_BEATOFFSET, MOD_BEATMULT,
+    MOD_BEATY, MOD_BEATYOFFSET, MOD_BEATYMULT,
+    MOD_BEATZ, MOD_BEATZOFFSET, MOD_BEATZMULT,
+    // Per-column movey, NotITG's 0-based spelling. Contiguous and in column
+    // order: the unpack indexes them as MOD_MOVEY0 + col.
+    MOD_MOVEY0, MOD_MOVEY1, MOD_MOVEY2, MOD_MOVEY3, MOD_MOVEY4,
+    MOD_ZIGZAGZ, MOD_ZIGZAGZPERIOD,
+    MOD_SAWTOOTHZ, MOD_SAWTOOTHZPERIOD,
+    MOD_DIGITALZ, MOD_DIGITALZPERIOD, MOD_DIGITALZOFFSET, MOD_DIGITALZSTEPS,
+    MOD_DIZZYHOLDS,
     MOD_MOVEX, MOD_MOVEY, MOD_MOVEZ,
     MOD_ABERRATION, MOD_GLOW, MOD_VIGNETTE, MOD_DESAT, MOD_SHAKE,
     // ITG m_fCover: a black quad over the BACKGROUND, under the notefield, at

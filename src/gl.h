@@ -33,6 +33,9 @@ typedef ptrdiff_t GLintptr;
 // extra sampler2Ds a shader chain binds buffers to.
 #define GL_BOOL                           0x8B56
 #define GL_SAMPLER_2D                     0x8B5E
+// Half-float colour, for an ActorFrameTexture asked to EnableFloat. A
+// feedback target that accumulates in 8 bits bands visibly.
+#define GL_RGBA16F                        0x881A
 #define GL_CLAMP_TO_EDGE                  0x812F
 #define GL_MULTISAMPLE                    0x809D
 #define GL_MIRRORED_REPEAT                0x8370

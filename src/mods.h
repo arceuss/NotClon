@@ -88,6 +88,52 @@ struct Mods {
     float piu = 0;
     float sudden = 0, hidden = 0;
     float suddenOffset = 0, hiddenOffset = 0;
+    // Per-column reverse contributions (PlayerOptions.cpp:1313-1332
+    // GetReversePercentForColumn). Not separate effects: each adds to the
+    // reverse percent of the columns it selects, so `split` reverses the right
+    // half, `alternate` every odd column, `cross` the middle band.
+    float split = 0, cross = 0, alternate = 0;
+
+    // --- waveform shape parameters -------------------------------------------
+    // Periods and phase offsets on the waveforms already computed above. Every
+    // one is a DIVISOR TERM of the form (period*K)+K, so 0 is the identity and
+    // the un-parameterised behaviour is preserved exactly.
+    float drunkPeriod = 0, drunkOffsetP = 0;
+    float bumpyPeriod = 0;
+    float wavePeriod = 0;
+    float tornadoPeriod = 0, tornadoOffsetP = 0;
+    float confusionOffset = 0, confusionYOffset = 0;
+    // New periodic shapes, same input as drunk/bumpy but a different function:
+    // triangle, ramp, step and quantised-sine (ArrowEffects.cpp:766-811).
+    float zigzag = 0, zigzagPeriod = 0, zigzagOffset = 0;
+    float sawtooth = 0, sawtoothPeriod = 0;
+    float square = 0, squarePeriod = 0, squareOffset = 0;
+    float digital = 0, digitalPeriod = 0, digitalOffset = 0, digitalSteps = 0;
+    // tan instead of cos, and `cosec` swaps that again for cosecant
+    // (SelectTanType, :142-148). NotITG spells the flag `cosec`; SM5 spells it
+    // `cosecant` and does not accept the short form.
+    float tandrunk = 0;
+    float cosecant = 0;
+    // The beat envelope's own parameters, and its Y/Z dimensions. ITG runs
+    // UpdateBeat once per dimension with independent offset/mult.
+    float beatOffset = 0, beatMult = 0;
+    float beaty = 0, beatyOffset = 0, beatyMult = 0;
+    float beatz = 0, beatzOffset = 0, beatzMult = 0;
+    // Per-column Y displacement (PlayerOptions.cpp:1105-1111, m_fMovesY).
+    //
+    // INDEX BASE: NotITG spells these movey0..movey<N-1> (column N), SM5
+    // spells the same array movey1..movey<N> -- `ssprintf("movey%d", i+1)`.
+    // NotClon reads NotITG-lineage modcharts, so movey0 is column 0 here. A
+    // chart written against SM5's spelling is off by one, which is why the
+    // SM5 ports of such charts rewrite these rows.
+    float moveyCol[NUM_LANES] = {0, 0, 0, 0, 0};
+    // Z-axis twins of the periodic shapes (ArrowEffects.cpp:1200-1290). Same
+    // functions, applied to depth instead of sideways.
+    float zigzagZ = 0, zigzagZPeriod = 0;
+    float sawtoothZ = 0, sawtoothZPeriod = 0;
+    float digitalZ = 0, digitalZPeriod = 0, digitalZOffset = 0, digitalZSteps = 0;
+    // A flag, not an amount: lets dizzy spin hold heads too.
+    float dizzyHolds = 0;
     float stealth = 0;
     // Stealth's partners (ArrowEffects.cpp:470-481). blink strobes everything
     // on a fixed clock; randomvanish blanks a band around the center line.
@@ -104,6 +150,72 @@ struct Mods {
 // ---------------------------------------------------------------------------
 // GetXPos -- lateral displacement. Tornado / drunk / flip / invert / beat.
 // ---------------------------------------------------------------------------
+// RageMath.cpp:656-665. The <0.01 nudge is upstream's, and its comment says
+// why: without it a hold flickers on the frame before it is hit.
+inline float rageSquare(float angle) {
+    float a = fmodf(angle, 2.0f * 3.14159265f);
+    if (a < 0.01f) a += 2.0f * 3.14159265f;
+    return a >= 3.14159265f ? -1.0f : 1.0f;
+}
+
+// RageMath.cpp:667-687 -- a triangle wave over 0..2pi, peaking at pi/2.
+inline float rageTriangle(float angle) {
+    const float PI_ = 3.14159265f;
+    float a = fmodf(angle, 2.0f * PI_);
+    if (a < 0.0f) a += 2.0f * PI_;
+    const float r = a * (1.0f / PI_);
+    if (r < 0.5f)  return r * 2.0f;
+    if (r < 1.5f)  return 1.0f - ((r - 0.5f) * 2.0f);
+    return -4.0f + (r * 2.0f);
+}
+
+// SelectTanType, :142-148. Cosecant is 1/sin, which is unbounded near a
+// multiple of pi; ITG lets it run, and so does this, but the caller clamps
+// what it feeds a position so one frame cannot throw a note to infinity.
+inline float selectTanType(float angle, bool isCosec) {
+    if (!isCosec) return tanf(angle);
+    const float s = sinf(angle);
+    const float lim = 1e-3f;
+    if (fabsf(s) < lim) return s < 0 ? -1.0f / lim : 1.0f / lim;
+    return 1.0f / s;
+}
+
+// UpdateBeat, ArrowEffects.cpp:192-217. Returns the +-20 envelope: a squared
+// ramp up over the first 0.2 of a beat, an eased fall to 0.5, nothing after,
+// and the sign flipped on alternate beats.
+//
+// `offset` shifts which beat it fires on and `mult` multiplies the rate
+// (SM passes (beat + accel + offset) * (mult + 1)); both are 0 by default,
+// where (mult+1) is 1 and this is the un-parameterised expression exactly.
+//
+// The bpm/150 divisor is OITG's, not SM5's: it keeps the pulse readable at
+// high tempo instead of strobing once per frame.
+inline float BeatFactor(float songBeat, float bpm, float offset, float mult) {
+    float accelTime = 0.2f, totalTime = 0.5f;
+    const float div = fmaxf(1.0f, truncf(bpm / 150.0f));
+    accelTime /= div;
+    totalTime /= div;
+
+    float beat = (songBeat + accelTime + offset) * (mult + 1.0f);
+    beat /= div;
+    if (beat < 0.0f) return 0.0f;
+    const bool evenBeat = (int(beat) % 2) != 0;
+    beat -= truncf(beat);
+    beat += 1.0f;
+    beat -= truncf(beat);
+    if (beat >= totalTime) return 0.0f;
+    float amount;
+    if (beat < accelTime) {
+        amount = scale(beat, 0.0f, accelTime, 0.0f, 1.0f);
+        amount *= amount;
+    } else {
+        amount = scale(beat, accelTime, totalTime, 1.0f, 0.0f);
+        amount = 1.0f - (1.0f - amount) * (1.0f - amount);
+    }
+    if (evenBeat) amount *= -1.0f;
+    return amount * 20.0f;                       // :216
+}
+
 inline float GetXPos(const Mods& m, int col, float yOffset, float songTime,
                      float songBeat, float bpm) {
     float x = 0.0f;
@@ -122,14 +234,56 @@ inline float GetXPos(const Mods& m, int col, float yOffset, float songTime,
         const float realX = laneXPixels(col);
         const float between = scale(realX, minX, maxX, -1.0f, 1.0f);
         float rads = acosf(fmaxf(-1.0f, fminf(1.0f, between)));
-        rads += yOffset * 6.0f / SM_SCREEN_H;
+        // :163 -- (y + offset) * ((period*freq)+freq) / SCREEN_HEIGHT, where
+        // the x-dimension frequency is 6.
+        const float TF = 6.0f;
+        rads += (yOffset + m.tornadoOffsetP) *
+                ((m.tornadoPeriod * TF) + TF) / SM_SCREEN_H;
         const float adjusted = scale(cosf(rads), -1.0f, 1.0f, minX, maxX);
         x += (adjusted - realX) * m.tornado;
     }
 
-    if (m.drunk != 0.0f)
-        x += m.drunk * cosf(songTime + col * 0.2f + yOffset * 10.0f / SM_SCREEN_H)
-             * ARROW_SIZE * 0.5f;
+    // CalculateDrunkAngle, ArrowEffects.cpp:174-180, with the theme metrics
+    // DrunkColumnFrequency 0.2 / DrunkOffsetFrequency 10 / DrunkArrowMagnitude
+    // 0.5 (metrics.ini:237-239). At period 0 and offset 0 the two frequency
+    // terms collapse to the bare constants and this is the old expression
+    // exactly -- which is what keeps it hash-neutral.
+    if (m.drunk != 0.0f || m.tandrunk != 0.0f) {
+        const float COLF = 0.2f, OFFF = 10.0f;
+        const float ang = songTime
+                        + col * ((m.drunkOffsetP * COLF) + COLF)
+                        + yOffset * ((m.drunkPeriod * OFFF) + OFFF) / SM_SCREEN_H;
+        if (m.drunk != 0.0f)
+            x += m.drunk * cosf(ang) * ARROW_SIZE * 0.5f;
+        if (m.tandrunk != 0.0f)
+            x += m.tandrunk * selectTanType(ang, m.cosecant != 0.0f)
+                 * ARROW_SIZE * 0.5f;
+    }
+
+    // The new periodic shapes. Each is the same yOffset input through a
+    // different function (ArrowEffects.cpp:766-811).
+    if (m.zigzag != 0.0f) {
+        const float a = 3.14159265f * (1.0f / (m.zigzagPeriod + 1.0f)) *
+                        ((yOffset + 100.0f * m.zigzagOffset) / ARROW_SIZE);
+        x += (m.zigzag * ARROW_SIZE * 0.5f) * rageTriangle(a);
+    }
+    if (m.sawtooth != 0.0f) {
+        const float t = (0.5f / (m.sawtoothPeriod + 1.0f) * yOffset) / ARROW_SIZE;
+        x += (m.sawtooth * ARROW_SIZE) * (t - floorf(t));
+    }
+    if (m.square != 0.0f) {
+        const float a = 3.14159265f * (yOffset + 1.0f * m.squareOffset) /
+                        (ARROW_SIZE + (m.squarePeriod * ARROW_SIZE));
+        x += (m.square * ARROW_SIZE * 0.5f) * rageSquare(a);
+    }
+    if (m.digital != 0.0f) {
+        // CalculateDigitalAngle :186-189, then the sine is QUANTISED to
+        // (steps+1) levels -- that rounding is what makes it read as digital.
+        const float a = 3.14159265f * (yOffset + 1.0f * m.digitalOffset) /
+                        (ARROW_SIZE + (m.digitalPeriod * ARROW_SIZE));
+        const float steps = m.digitalSteps + 1.0f;
+        x += (m.digital * ARROW_SIZE * 0.5f) * floorf(steps * sinf(a) + 0.5f) / steps;
+    }
 
     if (m.flip != 0.0f) {
         const int newCol = NUM_LANES - 1 - col;
@@ -150,31 +304,9 @@ inline float GetXPos(const Mods& m, int col, float yOffset, float songTime,
     }
 
     if (m.beat != 0.0f) {
-        float accelTime = 0.2f, totalTime = 0.5f;
-        const float div = fmaxf(1.0f, truncf(bpm / 150.0f));
-        accelTime /= div;
-        totalTime /= div;
-
-        float beat = songBeat + accelTime;
-        beat /= div;
-        if (beat >= 0.0f) {
-            const bool evenBeat = (int(beat) % 2) != 0;
-            beat -= truncf(beat);
-            beat += 1.0f;
-            beat -= truncf(beat);
-            if (beat < totalTime) {
-                float amount;
-                if (beat < accelTime) {
-                    amount = scale(beat, 0.0f, accelTime, 0.0f, 1.0f);
-                    amount *= amount;
-                } else {
-                    amount = scale(beat, accelTime, totalTime, 1.0f, 0.0f);
-                    amount = 1.0f - (1.0f - amount) * (1.0f - amount);
-                }
-                if (evenBeat) amount *= -1.0f;
-                x += m.beat * (20.0f * amount * sinf(yOffset / 15.0f + PI_F / 2.0f));
-            }
-        }
+        const float amount = BeatFactor(songBeat, bpm, m.beatOffset, m.beatMult);
+        if (amount != 0.0f)
+            x += m.beat * (amount * sinf(yOffset / 15.0f + PI_F / 2.0f));
     }
     return x;
 }
@@ -210,8 +342,9 @@ inline float ApplyYMods(const Mods& m, int col, float yOffset, float songBeat) {
         adj += d;
     }
     // :83-84
+    // :546 -- WaveModMagnitude 20 / WaveModHeight 38 (metrics.ini:204-205).
     if (m.wave != 0.0f)
-        adj += m.wave * 20.0f * sinf(y / 38.0f);
+        adj += m.wave * 20.0f * sinf(y / ((m.wavePeriod * 38.0f) + 38.0f));
     y += adj;                                    // :86, before boomerang
 
     if (m.boomerang != 0.0f) {
@@ -239,14 +372,33 @@ inline float ApplyYMods(const Mods& m, int col, float yOffset, float songBeat) {
 // ---------------------------------------------------------------------------
 static const float Y_REVERSE_OFFSET_PX = 270.0f;
 
-inline float ApplyScrollPos(const Mods& m, float yPx) {
-    if (m.reverse == 0.0f && m.centered == 0.0f) return yPx;
+// GetReversePercentForColumn (PlayerOptions.cpp:1313-1332). `reverse` applies
+// to every column; split/alternate/cross add to a subset. With all four at
+// zero this is 0 for every column, and with only `reverse` set it is
+// m.reverse for every column -- so the un-widened behaviour is preserved
+// exactly, which is what keeps the pinned baselines pinned.
+inline float ReversePercentForCol(const Mods& m, int col) {
+    float f = m.reverse;
+    if (col >= NUM_LANES / 2)                     f += m.split;
+    if ((col % 2) == 1)                           f += m.alternate;
+    const int firstCross = NUM_LANES / 4;
+    const int lastCross  = NUM_LANES - 1 - firstCross;
+    if (col >= firstCross && col <= lastCross)    f += m.cross;
+    return f;
+}
+
+// `col` selects the per-column reverse percent. -1 means "the whole field",
+// used by anything that is not a single column (the board, the camera-space
+// widening). Defaulted so every existing call site keeps its meaning.
+inline float ApplyScrollPos(const Mods& m, float yPx, int col = -1) {
+    const float rev = (col < 0) ? m.reverse : ReversePercentForCol(m, col);
+    if (rev == 0.0f && m.centered == 0.0f) return yPx;
     float zoom = 1.0f - m.mini * 0.5f;                       // :145
     if (fabsf(zoom) < 0.01f) zoom = 0.01f;                   // :148-149
     const float base = -Y_REVERSE_OFFSET_PX / zoom / 2.0f;
-    float shift = scale(m.reverse, 0.0f, 1.0f, base, -base); // :152
+    float shift = scale(rev, 0.0f, 1.0f, base, -base);       // :152
     shift = scale(m.centered, 0.0f, 1.0f, shift, 0.0f);      // :154, SM5 form
-    const float sc = scale(m.reverse, 0.0f, 1.0f, 1.0f, -1.0f); // :156
+    const float sc = scale(rev, 0.0f, 1.0f, 1.0f, -1.0f);    // :156
     return yPx * sc + (shift - base);
 }
 
@@ -254,19 +406,61 @@ inline float ApplyScrollPos(const Mods& m, float yPx) {
 // BEHIND the camera and fly away toward the relocated strike line -- that is
 // the faithful reading of "arrows from the other side" on a highway, and the
 // caller must spatially clamp what lands behind the eye.
-inline float ApplyScrollZ(const Mods& m, float z) {
-    if (m.reverse == 0.0f && m.centered == 0.0f) return z;
+inline float ApplyScrollZ(const Mods& m, float z, int col = -1) {
+    const float rev = (col < 0) ? m.reverse : ReversePercentForCol(m, col);
+    if (rev == 0.0f && m.centered == 0.0f) return z;
     const float K = ARROW_SIZE * 1.6f;
-    return ApplyScrollPos(m, z * K) / K;
+    return ApplyScrollPos(m, z * K, col) / K;
 }
 
 // Vertical bob. ITG's bumpy rides on top of the arrow's own position.
-inline float GetYPosBump(const Mods& m, int col, float yOffset) {
+// `songBeat`/`bpm` are only for the beat family; every other term ignores
+// them, which is why they are defaulted rather than threaded everywhere.
+inline float GetYPosBump(const Mods& m, int col, float yOffset,
+                         float songBeat = 0.0f, float bpm = 120.0f) {
     float y = 0.0f;
+    // beaty / beatz -- the Y and Z dimensions of the beat pulse. ITG's Z is
+    // depth; NotClon already approximates depth displacement as a world-Y bump
+    // (that is what bumpy does here), so beatz rides the same path rather
+    // than inventing a second convention.
+    if (m.beaty != 0.0f) {
+        const float a = BeatFactor(songBeat, bpm, m.beatyOffset, m.beatyMult);
+        if (a != 0.0f) y += m.beaty * a * sinf(yOffset / 15.0f + 3.14159265f / 2.0f);
+    }
+    if (m.beatz != 0.0f) {
+        const float a = BeatFactor(songBeat, bpm, m.beatzOffset, m.beatzMult);
+        if (a != 0.0f) y += m.beatz * a * sinf(yOffset / 15.0f + 3.14159265f / 2.0f);
+    }
+    // CalculateBumpyAngle, :182-185: (y + 100*offset) / ((period*16)+16).
+    // NotClon's existing offset term is bumpyspeed's integrated phase in
+    // arrow-widths, which is why it is 64 here and 100 there.
     if (m.bumpy != 0.0f)
-        y += m.bumpy * 40.0f * sinf((yOffset + m.bumpyOffset * 64.0f) / 16.0f);
+        y += m.bumpy * 40.0f * sinf((yOffset + m.bumpyOffset * 64.0f) /
+                                    ((m.bumpyPeriod * 16.0f) + 16.0f));
     if (m.tipsy != 0.0f)
         y += m.tipsy * (cosf(m.tipsyOffset * 1.2f + col * 1.8f) * ARROW_SIZE * 0.4f);
+    if (col >= 0 && col < NUM_LANES && m.moveyCol[col] != 0.0f)
+        y += m.moveyCol[col] * ARROW_SIZE;
+
+    // The Z twins. ITG displaces depth; NotClon approximates depth as a
+    // world-Y bump -- the same substitution bumpy and beatz already make here,
+    // so all three stay consistent rather than each inventing a convention.
+    const float PI2_ = 3.14159265f;
+    if (m.zigzagZ != 0.0f) {
+        const float a = PI2_ * (1.0f / (m.zigzagZPeriod + 1.0f)) *
+                        (yOffset / ARROW_SIZE);
+        y += (m.zigzagZ * ARROW_SIZE * 0.5f) * rageTriangle(a);
+    }
+    if (m.sawtoothZ != 0.0f) {
+        const float t = (0.5f / (m.sawtoothZPeriod + 1.0f) * yOffset) / ARROW_SIZE;
+        y += (m.sawtoothZ * ARROW_SIZE) * (t - floorf(t));
+    }
+    if (m.digitalZ != 0.0f) {
+        const float a = PI2_ * (yOffset + 1.0f * m.digitalZOffset) /
+                        (ARROW_SIZE + (m.digitalZPeriod * ARROW_SIZE));
+        const float steps = m.digitalZSteps + 1.0f;
+        y += (m.digitalZ * ARROW_SIZE * 0.5f) * floorf(steps * sinf(a) + 0.5f) / steps;
+    }
     return y;
 }
 
@@ -296,14 +490,19 @@ inline float GetRotationY(const Mods& m, float yOffset) {
 // added to every note at :598-599; OpenITG has no EFFECT_CONFUSION at all):
 // songBeat * confusion in radians, wrapped, and the degree conversion is
 // NEGATIVE (-180/PI), so it counter-rotates dizzy for the same sign.
-inline float GetRotationZ(const Mods& m, float noteBeat, float songBeat) {
+// `isHoldHead` gates dizzy only. ArrowEffects.cpp:906 applies dizzy when
+// `m_bDizzyHolds || !bIsHoldHead` -- so by default a hold's head does NOT
+// spin, because a spinning head detaches visually from the ribbon it caps.
+// `dizzyholds` opts back in. confusion is unaffected; it turns everything.
+inline float GetRotationZ(const Mods& m, float noteBeat, float songBeat,
+                          bool isHoldHead = false) {
     float r = 0.0f;
     if (m.confusion != 0.0f) {
-        float c = songBeat * m.confusion;
+        float c = songBeat * m.confusion + m.confusionOffset;
         c = fmodf(c, 2.0f * PI_F);
         r += c * (-180.0f / PI_F);
     }
-    if (m.dizzy != 0.0f) {
+    if (m.dizzy != 0.0f && (m.dizzyHolds != 0.0f || !isHoldHead)) {
         float d = (noteBeat - songBeat) * m.dizzy;
         d = fmodf(d, 2.0f * PI_F);
         r += d * (180.0f / PI_F);

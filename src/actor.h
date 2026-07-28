@@ -33,6 +33,7 @@
 #include "chart.h"
 #include "renderer.h"
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,6 +42,7 @@ struct lua_State;
 
 namespace nc {
 class LuaHost;
+class ActorTree;
 
 // --- easings ---------------------------------------------------------------
 // The seven ITG tweens. `sleep` is one of them: it holds the old value for the
@@ -102,10 +104,46 @@ struct Actor {
     std::string file;                       // texture path, resolved
     Tex         tex;
     bool        texLoaded = false;
+    // A BitmapText: File= names a FONT and Text= is its string. NotClon has no
+    // font rendering, so such an actor draws nothing -- an untextured quad
+    // would be a white box sitting where the text belongs, which is worse than
+    // the text being absent.
+    bool        isText = false;
+
+    // --- ActorFrameTexture ---------------------------------------------------
+    // A render target that captures whatever has already been drawn. SM's AFT
+    // does this by rendering its preceding siblings into its own texture;
+    // NotClon copies the live framebuffer at the point the AFT is reached,
+    // which is the same content for a tree that draws in order.
+    //
+    // Create() allocates; SetTextureName() publishes it under a name other
+    // actors can reference by Texture= or SetTexture(). The Enable* flags are
+    // accepted and mostly recorded rather than honoured -- see aftCreate.
+    bool        isAft = false;
+    std::string aftName;
+    int         aftW = 0, aftH = 0;
+    bool        aftAlpha = true, aftDepth = false, aftFloat = false;
+    bool        aftPreserve = true;
+    GLuint      aftTex = 0, aftFbo = 0;
+
+    // --- .sprite animation ---------------------------------------------------
+    // SM's animated-sprite descriptor: an ini naming a sheet plus a Frame/Delay
+    // list. The sheet's grid comes from its FILENAME ("walk 2x1.png"),
+    // the same convention the pump noteskin uses.
+    //
+    // The frame index is a PURE FUNCTION OF TIME -- total the delays and take
+    // the remainder. Not a counter: drawFrame() is called at an arbitrary beat
+    // with no history, so a counter would make a seek show a different frame
+    // than the encode did.
+    std::vector<int>   spriteFrames;   // frame index into the sheet, in order
+    std::vector<float> spriteDelays;   // seconds each entry is held
+    float              spriteTotal = 0.0f;
+    int                sheetCols = 1, sheetRows = 1;
     bool        textureFiltering = true;
     bool        textureFilterDirty = false;
 
     ActorState  base;                       // after InitCommand
+    ActorState  onBase;                     // state OnCommand starts from
     Effect      effect;
     std::vector<Seg> segs;                  // resolved timeline
     std::vector<std::unique_ptr<Actor>> children;
@@ -144,12 +182,19 @@ public:
 
     Actor* root() { return root_.get(); }
     const std::vector<std::string>& log() const;
+    // Textures published by an ActorFrameTexture's SetTextureName, so a later
+    // Texture="<name>" or SetTexture() resolves to the live render target.
+    std::map<std::string, GLuint>& namedTextures() { return namedTex_; }
+    // See ActorLayer::drainLuaMods. One tree, one lua_State, one `mods` table.
+    int drainLuaMods(ModDoc& doc, int resolution);
 
 private:
     std::unique_ptr<Actor> root_;
     std::string dir_;
     double startSec_ = 0.0;
     std::unique_ptr<LuaHost> lua_;
+    std::map<std::string, GLuint> namedTex_;
+    int perPlayerDropped_ = 0;
     void dispatchPending(double sec);
 };
 
@@ -160,6 +205,8 @@ private:
 class LuaHost {
 public:
     bool  open(std::string& err);
+    // The tree that owns the named-texture registry an AFT publishes into.
+    void  setTree(ActorTree* t) { tree_ = t; }
     ~LuaHost() { close(); }
     void  close();
     lua_State* L() const { return L_; }
@@ -186,12 +233,18 @@ private:
     struct CallState;
     CallState* call_ = nullptr;
     void pushActor(Actor& actor);
+    // Lua stack index -> the Actor it wraps, or null if it is not one.
+    Actor* toActor(lua_State* L, int idx);
+    // Allocate an AFT's texture+FBO and publish it under its name. Idempotent:
+    // a chart calls Create() once, but a re-entered InitCommand must not leak.
+    void aftCreate(Actor& a);
     bool invokeChunk(int ref, Actor& actor, const std::string& where,
                      std::string& err);
     static int actorIndex(lua_State* L);
     static int actorCall(lua_State* L);
 
     lua_State* L_ = nullptr;
+    ActorTree* tree_ = nullptr;   // owns the named-texture registry
     double beat_ = 0, sec_ = 0;
     std::string songDir_;
     std::vector<std::string> pending_;
@@ -213,6 +266,20 @@ public:
                    double startSec, bool foreground);
 
     bool empty() const { return trees_.empty(); }
+
+    // Drain the Lua globals `mods` / `mods2` into `doc`.
+    //
+    // A NotITG-lineage modchart keeps its whole mod list in a Lua table and
+    // walks it every frame, calling PlayerOptions::FromString on whatever is
+    // live at the current beat. That is the same scoped-attack model ModDoc
+    // already implements with `len`, and the same `*<approach> <percent>
+    // <name>` grammar #MODS uses -- so the table converts rather than needing
+    // a second evaluator.
+    //
+    // Each row is {beat, len_or_end, modstring, 'len'|'end', pn?}. Returns how
+    // many entries were added. Call after loading and before ModDoc::rebuild.
+    int drainLuaMods(ModDoc& doc, int resolution);
+
     void drawBackground(Renderer& R, double sec);
     void drawForeground(Renderer& R, double sec);
     const std::vector<std::string>& log() const { return log_; }
