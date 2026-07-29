@@ -71,6 +71,7 @@ typedef struct global_State {
   void *ud;         /* auxiliary data to `frealloc' */
   lu_byte currentwhite;
   lu_byte gcstate;  /* state of garbage collector */
+  lu_byte legacyfor;  /* numeric for loop variable is also its control value */
   int sweepstrgc;  /* position of sweep in `strt' */
   GCObject *rootgc;  /* list of all collectable objects */
   GCObject **sweepgc;  /* position of sweep in `rootgc' */
@@ -166,4 +167,3 @@ LUAI_FUNC lua_State *luaE_newthread (lua_State *L);
 LUAI_FUNC void luaE_freethread (lua_State *L, lua_State *L1);
 
 #endif
-

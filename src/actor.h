@@ -202,6 +202,7 @@ struct Actor {
     struct ShaderUniform {
         std::string name;
         int components = 0;                    // 1/2/4 float, 0 = texture
+        bool integer = false;
         float value[4] = {};
         Actor* texture = nullptr;
     };

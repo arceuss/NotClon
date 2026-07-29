@@ -167,6 +167,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud) {
   luaZ_initbuffer(L, &g->buff);
   g->panic = NULL;
   g->gcstate = GCSpause;
+  g->legacyfor = 0;
   g->rootgc = obj2gco(L);
   g->sweepstrgc = 0;
   g->sweepgc = &g->rootgc;
@@ -211,4 +212,3 @@ LUA_API void lua_close (lua_State *L) {
   luai_userstateclose(L);
   close_state(L);
 }
-

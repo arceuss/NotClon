@@ -61,11 +61,11 @@ endif()
 set_target_properties(notclon_lua PROPERTIES C_STANDARD 99)
 
 enable_testing()
-add_executable(lua-cmd-test tests/lua_cmd_test.cpp)
+add_executable(lua-cmd-test devtools/tests/lua_cmd_test.cpp)
 target_link_libraries(lua-cmd-test PRIVATE notclon_lua)
 add_test(NAME lua-cmd COMMAND lua-cmd-test)
 
-add_executable(sm-timing-test tests/sm_timing_test.cpp)
+add_executable(sm-timing-test devtools/tests/sm_timing_test.cpp)
 target_include_directories(sm-timing-test PRIVATE src)
 add_test(NAME sm-timing COMMAND sm-timing-test)
 
@@ -92,11 +92,11 @@ if(WIN32)
   target_link_libraries(notclon_core PUBLIC opengl32 gdi32 user32)
 endif()
 
-add_executable(lua-message-test tests/lua_message_test.cpp)
+add_executable(lua-message-test devtools/tests/lua_message_test.cpp)
 target_link_libraries(lua-message-test PRIVATE notclon_core)
 add_test(NAME lua-message COMMAND lua-message-test)
 
-add_executable(actor-runtime-test tests/actor_runtime_test.cpp)
+add_executable(actor-runtime-test devtools/tests/actor_runtime_test.cpp)
 target_link_libraries(actor-runtime-test PRIVATE notclon_core)
 add_test(NAME actor-runtime COMMAND actor-runtime-test)
 

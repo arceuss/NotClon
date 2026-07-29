@@ -2204,6 +2204,7 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
                 ActorShaderBinding binding;
                 binding.name = uniform.name;
                 binding.components = uniform.components;
+                binding.integer = uniform.integer;
                 for (int i = 0; i < 4; ++i) binding.value[i] = uniform.value[i];
                 if (uniform.texture) {
                     ensureActorTexture(*uniform.texture, R.actorMissingTexture());
@@ -2422,7 +2423,8 @@ enum ActorMethod {
     AM_SETTARGET, AM_ADDWRAPPER, AM_GETWRAPPER, AM_VANISHPOINT,
     AM_SETTEXT, AM_GETTEXT, AM_GETSECSINTOEFFECT,
     AM_DRAWBYZ, AM_FARDIST, AM_ZTEST, AM_ZWRITE, AM_CLEARZ, AM_TEXWRAP,
-    AM_GETSHADER, AM_UNIFORM1F, AM_UNIFORM2F, AM_UNIFORM4F, AM_UNIFORMTEX,
+    AM_GETSHADER, AM_UNIFORM1F, AM_UNIFORM1I, AM_UNIFORM2F, AM_UNIFORM4F,
+    AM_UNIFORMTEX,
     AM_DRAWMODE, AM_NUMVERTS, AM_VERTEXPOS, AM_VERTEXTEX, AM_CULLMODE,
     AM_NUMTAPSINRANGE, AM_SETAWAKE
 };
@@ -2484,7 +2486,8 @@ const ActorMethodDef ACTOR_METHODS[] = {
     {"ztest", AM_ZTEST}, {"zwrite", AM_ZWRITE}, {"clearzbuffer", AM_CLEARZ},
     {"texturewrapping", AM_TEXWRAP},
     {"GetShader", AM_GETSHADER},
-    {"uniform1f", AM_UNIFORM1F}, {"uniform2f", AM_UNIFORM2F},
+    {"uniform1f", AM_UNIFORM1F}, {"uniform1i", AM_UNIFORM1I},
+    {"uniform2f", AM_UNIFORM2F},
     {"uniform4f", AM_UNIFORM4F}, {"uniformTexture", AM_UNIFORMTEX},
     {"SetDrawMode", AM_DRAWMODE}, {"SetNumVertices", AM_NUMVERTS},
     {"SetVertexPosition", AM_VERTEXPOS}, {"SetVertexTexCoord", AM_VERTEXTEX},
@@ -3016,9 +3019,20 @@ int LuaHost::actorCall(lua_State* L) {
             Actor::ShaderUniform& uniform = shaderUniform(name);
             uniform.components = method == AM_UNIFORM1F ? 1 :
                                  (method == AM_UNIFORM2F ? 2 : 4);
+            uniform.integer = false;
             uniform.texture = nullptr;
             for (int i = 0; i < uniform.components; ++i)
                 uniform.value[i] = float(luaL_optnumber(L, i + 3, 0.0));
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        case AM_UNIFORM1I: {
+            const char* name = luaL_checkstring(L, 2);
+            Actor::ShaderUniform& uniform = shaderUniform(name);
+            uniform.components = 1;
+            uniform.integer = true;
+            uniform.texture = nullptr;
+            uniform.value[0] = float(luaL_checkinteger(L, 3));
             lua_pushvalue(L, 1);
             return 1;
         }
@@ -3026,6 +3040,7 @@ int LuaHost::actorCall(lua_State* L) {
             const char* name = luaL_checkstring(L, 2);
             Actor::ShaderUniform& uniform = shaderUniform(name);
             uniform.components = 0;
+            uniform.integer = false;
             uniform.texture = host->toActor(L, 3);
             lua_pushvalue(L, 1);
             return 1;
@@ -3818,6 +3833,7 @@ bool LuaHost::open(std::string& err) {
         "local playerStats = {\n"
         "  GetActualDancePoints = function() return 0 end,\n"
         "  GetPossibleDancePoints = function() return 1 end,\n"
+        "  GetTapNoteScores = function() return 0 end,\n"
         "  SetPossibleDancePoints = function() end,\n"
         "}\n"
         "local stageStats = {\n"
@@ -3832,6 +3848,8 @@ bool LuaHost::open(std::string& err) {
         "local songPosition = { GetMusicSeconds = function() return __nc_sec() end }\n"
         "PLAYER_1 = 1\n"
         "PLAYER_2 = 2\n"
+        "TNS_NONE=0; TNS_HIT_MINE=1; TNS_AVOIDED_MINE=2; TNS_MISS=3\n"
+        "TNS_BOO=4; TNS_GOOD=5; TNS_GREAT=6; TNS_PERFECT=7; TNS_MARVELOUS=8\n"
         "STATSMAN = { GetCurStageStats = function() return stageStats end }\n"
         "GAMESTATE = {\n"
         "  GetVersionDate = function() return '20190804' end,\n"
@@ -3867,7 +3885,9 @@ bool LuaHost::open(std::string& err) {
 
 void LuaHost::setLegacyXml(bool legacy) {
     legacyColumnNames_ = legacy;
-    if (!legacy || !L_) return;
+    if (!L_) return;
+    lua_setlegacyfor(L_, legacy ? 1 : 0);
+    if (!legacy) return;
 
     // OpenITG embeds Lua 5.0. Its table.insert records a separate array size,
     // and table.getn keeps returning that size when a chart directly nils an

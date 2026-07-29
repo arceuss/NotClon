@@ -1073,7 +1073,8 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
         if (customUniforms) for (const ActorShaderBinding& uniform : *customUniforms) {
             const GLint location = glGetUniformLocation(actorProgram, uniform.name.c_str());
             if (location < 0) continue;
-            if (uniform.components == 1) glUniform1f(location, uniform.value[0]);
+            if (uniform.integer) glUniform1i(location, int(uniform.value[0]));
+            else if (uniform.components == 1) glUniform1f(location, uniform.value[0]);
             else if (uniform.components == 2)
                 glUniform2f(location, uniform.value[0], uniform.value[1]);
             else if (uniform.components == 4)

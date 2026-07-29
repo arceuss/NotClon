@@ -131,6 +131,7 @@ struct Tex { GLuint id = 0; int w = 0, h = 0; };
 struct ActorShaderBinding {
     std::string name;
     int components = 0;                        // 1/2/4 float, 0 = sampler2D
+    bool integer = false;
     float value[4] = {};
     GLuint texture = 0;
 };

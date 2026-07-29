@@ -127,6 +127,13 @@ LUA_API void lua_setlevel (lua_State *from, lua_State *to) {
 }
 
 
+LUA_API void lua_setlegacyfor (lua_State *L, int enabled) {
+  lua_lock(L);
+  G(L)->legacyfor = cast_byte(enabled != 0);
+  lua_unlock(L);
+}
+
+
 LUA_API lua_CFunction lua_atpanic (lua_State *L, lua_CFunction panicf) {
   lua_CFunction old;
   lua_lock(L);
@@ -1084,4 +1091,3 @@ LUA_API const char *lua_setupvalue (lua_State *L, int funcindex, int n) {
   lua_unlock(L);
   return name;
 }
-
