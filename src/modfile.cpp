@@ -57,6 +57,8 @@ const ModInfo MODS[] = {
     {"hide",       0.0f},
     {"hideboard",  0.0f},
     {"piu",        0.0f},
+    {"moonscraper",0.0f},
+    {"yarg",       0.0f},
     {"suddenoffset", 0.0f},
     {"hiddenoffset", 0.0f},
     {"split",      0.0f},
@@ -184,6 +186,9 @@ float modDefault(int id) {
 int modFromName(const std::string& name) {
     for (int i = 0; i < MOD_COUNT; ++i)
         if (name == MODS[i].name) return i;
+    if (name == "beatx")       return MOD_BEAT;
+    if (name == "beatxoffset") return MOD_BEATOFFSET;
+    if (name == "beatxmult")   return MOD_BEATMULT;
     // Shader knobs: bg.<name> for a background layer, fx.<name> for a
     // playfield layer. Auto-registered on first sight from either side (the
     // shader loader or a .ncmod parse) so a modchart carrying them round-trips
@@ -373,6 +378,8 @@ void modValuesToState(const float* v, float beat, Mods& m, PostFx& fx,
     m.hide      = v[MOD_HIDE];
     m.hideboard = v[MOD_HIDEBOARD];
     m.piu       = v[MOD_PIU];
+    m.moonscraper = v[MOD_MOONSCRAPER];
+    m.yarg      = v[MOD_YARG];
     m.suddenOffset = v[MOD_SUDDENOFFSET];
     m.hiddenOffset = v[MOD_HIDDENOFFSET];
     m.split     = v[MOD_SPLIT];

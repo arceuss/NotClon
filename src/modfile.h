@@ -75,6 +75,9 @@ enum ModId {
     // NOTES: pump/default charts hold heads as taps too (NoteSkin.lua:18-19),
     // and sustains keep their CH ribbons under this mode.
     MOD_PIU,
+    // Source engine visual sets. Moonscraper uses its 3D gem plus its actual
+    // sprite fret; YARG's default Rectangular theme uses 3D gems and frets.
+    MOD_MOONSCRAPER, MOD_YARG,
     // Appearance offsets. The formula already carries them (mods.h
     // GetPercentVisible, SM5 ArrowEffects.cpp:1044-1071 GetHidden/SuddenLine);
     // these are the knobs that were missing, not the maths.
@@ -119,7 +122,7 @@ enum ModId {
     // (Background.cpp:958-984) is its one consumer in the whole OITG tree. It
     // was a stub until the #BGCHANGES background layer landed, because before
     // that there was nothing for it to draw over; the derivation of the alpha
-    // is at COVER_FS in renderer.cpp. (Saitama2000's `-50% cover` is the
+    // is at COVER_FS in renderer.cpp. (`-50% cover` is the
     // brightness-1.5 theme-lighting trick AGENTS.md flags as analogue-less.)
     MOD_COVER,
     MOD_COUNT,

@@ -8,6 +8,8 @@
 #include "background.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <utility>
 
 namespace nc {
 
@@ -20,25 +22,44 @@ layout(location=1) in vec2 aUV;
 layout(location=2) in vec4 aCol;
 out vec2 vUV;
 out vec4 vCol;
+out float vEngineDistance;
 uniform mat4 uMVP;
 // Rigid-body offset for the whole playfield. With --playfield the board is
 // gone, so nothing anchors the frets to the bottom of the frame and the
 // assembly can be placed anywhere. A modchart will drive this later.
 uniform vec3 uOffset;
+uniform float uCurve;
+uniform vec4 uFadePlane;
 void main() {
+    vec3 p = aPos + uOffset;
+    if (uCurve != 0.0) {
+        float radius = sign(uCurve)*15.0 - uCurve*((15.0-2.0)/3.0);
+        float d = abs(p.x);
+        float dOverRadius = d/radius;
+        float sinc = d < 0.001
+            ? 1.0-(dOverRadius*dOverRadius)/6.0
+            : sin(dOverRadius)/d;
+        p = vec3(sinc*(radius+p.y)*p.x,
+                 cos(d/radius)*(radius+p.y)-radius, p.z);
+    }
     vUV = aUV; vCol = aCol;
-    gl_Position = uMVP * vec4(aPos + uOffset, 1.0);
+    vEngineDistance = dot(vec4(p,1.0),uFadePlane);
+    gl_Position = uMVP * vec4(p, 1.0);
 }
 )";
 
 const char* SCENE_FS = R"(#version 330
 in vec2 vUV;
 in vec4 vCol;
+in float vEngineDistance;
 out vec4 oCol;
 uniform sampler2D uTex;
 uniform float uPremul;   // 1 for Unity sprite blending (One, 1-SrcAlpha)
+uniform vec2 uFadeRange;
 void main() {
     vec4 c = texture(uTex, vUV) * vCol;
+    if (uFadeRange.y > uFadeRange.x)
+        c.a *= 1.0-smoothstep(uFadeRange.x,uFadeRange.y,vEngineDistance);
     if (c.a < 0.002) discard;
     if (uPremul > 0.5) c.rgb *= c.a;
     oCol = c;
@@ -133,7 +154,7 @@ void main() {
     // SM's fixed-function alpha test: glAlphaFunc(GL_GREATER, 0.01)
     // (RageDisplay_OGL.cpp:1881). It applies to MASK draws too -- that is what
     // lets a mostly-transparent mask image stamp depth only where it has ink.
-    // Saitama's mask.png is a frame-shaped border at alpha 1-63/255; the
+    // The fixture mask is a frame-shaped border at alpha 1-63/255; the
     // window it leaves open starts at the judgment line.
     if (c.a <= 0.01) discard;
     oCol = c;
@@ -158,23 +179,19 @@ uniform float uAlpha;
 void main() { oCol = vec4(0.0, 0.0, 0.0, uAlpha); }
 )";
 
-// The PIU playfield's program. Straight ortho over StepMania's virtual
-// 640x480 with y DOWN from the top-left -- the exact space ArrowEffects was
-// written in. Shares SCENE_VS's attribute layout so it can reuse vao_/vbo_ and
-// the same ch::Vtx batching; only the projection differs. aPos.z is unused.
+// The PIU playfield's program. Its geometry is authored in StepMania's virtual
+// 640x480 space with y DOWN from the top-left. uMVP normally supplies that
+// ortho projection, but also lets the Player actor transform the whole field.
+// Shares SCENE_VS's attribute layout so it can reuse vao_/vbo_.
 const char* PIU_VS = R"(#version 330
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;
 layout(location=2) in vec4 aCol;
 out vec2 vUV; out vec4 vCol;
-// The virtual screen. Height is always 480; WIDTH follows the output aspect,
-// which is how StepMania does widescreen -- a fixed 640x480 would stretch a
-// square panel into a rectangle on any 16:9 render.
-uniform vec2 uVirt;
+uniform mat4 uMVP;
 void main() {
     vUV = aUV; vCol = aCol;
-    gl_Position = vec4(aPos.x / (uVirt.x * 0.5) - 1.0,
-                       1.0 - aPos.y / (uVirt.y * 0.5), 0.0, 1.0);
+    gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )";
 
@@ -186,6 +203,800 @@ void main() {
     vec4 c = texture(uTex, vUV) * vCol;
     if (c.a < 0.002) discard;
     c.rgb *= c.a;                      // premultiplied, as every sprite here is
+    oCol = c;
+}
+)";
+
+// The source-engine modes use their original meshes and material textures.
+// Material indices are exported as a vertex attribute because both source
+// projects assign several Unity materials to one mesh.
+const char* ENGINE_VS = R"(#version 330
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec2 aUV;
+layout(location=3) in float aMaterial;
+out vec3 vNormal;
+out vec3 vWorld;
+out vec2 vUV;
+out float vEngineDistance;
+flat out int vMaterial;
+uniform mat4 uMVP;
+uniform mat4 uModel;
+uniform float uCurve;
+uniform vec4 uFadePlane;
+void main() {
+    vec4 world = uModel * vec4(aPos, 1.0);
+    if (uCurve != 0.0) {
+        float radius = sign(uCurve)*15.0-uCurve*((15.0-2.0)/3.0);
+        float d = abs(world.x);
+        float dOverRadius = d/radius;
+        float sinc = d < 0.001
+            ? 1.0-(dOverRadius*dOverRadius)/6.0
+            : sin(dOverRadius)/d;
+        world.xy = vec2(sinc*(radius+world.y)*world.x,
+                        cos(d/radius)*(radius+world.y)-radius);
+    }
+    vNormal = normalize(transpose(inverse(mat3(uModel))) * aNormal);
+    vWorld = world.xyz;
+    vUV = aUV;
+    vEngineDistance = dot(world,uFadePlane);
+    vMaterial = int(aMaterial + 0.5);
+    gl_Position = uMVP * world;
+}
+)";
+
+const char* ENGINE_FS = R"(#version 330
+in vec3 vNormal;
+in vec3 vWorld;
+in vec2 vUV;
+in float vEngineDistance;
+flat in int vMaterial;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform sampler2D uTex2;
+uniform sampler2D uTex3;
+uniform sampler2D uAo;
+uniform vec2 uAoSize;
+uniform float uUseAo;
+uniform vec3 uColor;
+uniform vec3 uCameraPos;
+uniform float uAlpha;
+uniform float uScroll;
+uniform int uKind;
+uniform int uMaterialFilter;
+uniform vec2 uFadeRange;
+uniform float uMaterialState;
+uniform vec3 uRandom;
+uniform float uTime;
+
+float hlslMod(float x, float y) {
+    return x-y*trunc(x/y);
+}
+
+vec2 hlslMod(vec2 x, float y) {
+    return x-vec2(y)*trunc(x/vec2(y));
+}
+
+vec2 gradientNoiseDirection(vec2 p) {
+    p = hlslMod(p,289.0);
+    float x = hlslMod((34.0*p.x+1.0)*p.x,289.0)+p.y;
+    x = hlslMod((34.0*x+1.0)*x,289.0);
+    x = fract(x/41.0)*2.0-1.0;
+    return normalize(vec2(x-floor(x+0.5),abs(x)-0.5));
+}
+
+float gradientNoise(vec2 uv, float scale) {
+    vec2 p = uv*scale;
+    vec2 ip = floor(p);
+    vec2 fp = fract(p);
+    float d00 = dot(gradientNoiseDirection(ip),fp);
+    float d01 = dot(gradientNoiseDirection(ip+vec2(0,1)),fp-vec2(0,1));
+    float d10 = dot(gradientNoiseDirection(ip+vec2(1,0)),fp-vec2(1,0));
+    float d11 = dot(gradientNoiseDirection(ip+vec2(1,1)),fp-vec2(1,1));
+    fp = fp*fp*fp*(fp*(fp*6.0-15.0)+10.0);
+    return mix(mix(d00,d01,fp.y),mix(d10,d11,fp.y),fp.x)+0.5;
+}
+
+vec4 overlayBlend(vec4 base, vec4 blend) {
+    vec4 low = 2.0*base*blend;
+    vec4 high = 1.0-2.0*(1.0-base)*(1.0-blend);
+    return mix(low,high,step(vec4(0.5),base));
+}
+
+vec3 hueDegrees(vec3 inputColor, float offset) {
+    vec4 K = vec4(0.0,-1.0/3.0,2.0/3.0,-1.0);
+    vec4 P = mix(vec4(inputColor.bg,K.wz),vec4(inputColor.gb,K.xy),
+                 step(inputColor.b,inputColor.g));
+    vec4 Q = mix(vec4(P.xyw,inputColor.r),vec4(inputColor.r,P.yzx),
+                 step(P.x,inputColor.r));
+    float D = Q.x-min(Q.w,Q.y);
+    float E = 1e-4;
+    float V = D == 0.0 ? Q.x : Q.x+E;
+    vec3 hsv = vec3(abs(Q.z+(Q.w-Q.y)/(6.0*D+E)),D/(Q.x+E),V);
+    float hue = hsv.x+offset/360.0;
+    hsv.x = hue < 0.0 ? hue+1.0 : (hue > 1.0 ? hue-1.0 : hue);
+    vec4 K2 = vec4(1.0,2.0/3.0,1.0/3.0,3.0);
+    vec3 P2 = abs(fract(hsv.xxx+K2.xyz)*6.0-K2.www);
+    return hsv.z*mix(K2.xxx,clamp(P2-K2.xxx,0.0,1.0),hsv.y);
+}
+
+vec3 yargSH(vec3 n) {
+    vec4 n4 = vec4(n,1.0);
+    vec3 gi = vec3(
+        dot(vec4(8.85245754e-5,-0.00562569872,-0.0147181451,0.168671688),n4),
+        dot(vec4(0.000139226191,0.0412316322,-0.0231422633,0.209188499),n4),
+        dot(vec4(0.000238774664,0.126589864,-0.0398332104,0.284822226),n4));
+    vec4 vB = n.xyzz*n.yzzx;
+    gi += vec3(
+        dot(vec4(6.95378185e-5,-0.0115551241,0.0378950816,-0.00017671744),vB),
+        dot(vec4(0.000111176807,-0.0184599347,0.0531771407,-0.000256823143),vB),
+        dot(vec4(0.000199187634,-0.0330873542,0.0676154494,-0.000369618792),vB));
+    gi += vec3(0.0240153596,0.0329115465,0.0381791368)*
+          (n.x*n.x-n.y*n.y);
+    return gi;
+}
+
+vec3 yargBrdf(vec3 diffuseColor, vec3 specularColor, float smoothness,
+              vec3 emission, float occlusion) {
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(vec3(-0.187260912,0.719388326,-0.668889967));
+    vec3 V = normalize(uCameraPos-vWorld);
+    vec3 H = normalize(L+V);
+    float pr = 1.0-smoothness;
+    float roughness = max(pr*pr,0.0078125);
+    float roughness2 = max(roughness*roughness,0.00006103515625);
+    float normalizationTerm = roughness*4.0+2.0;
+    float NoH = clamp(dot(N,H),0.0,1.0);
+    float LoH = clamp(dot(L,H),0.0,1.0);
+    float d = NoH*NoH*(roughness2-1.0)+1.00001;
+    float specularTerm = roughness2/
+        (d*d*max(0.1,LoH*LoH)*normalizationTerm);
+    vec3 lightColor = vec3(1.8204746,1.8001208,2.0);
+    vec3 radiance = lightColor*max(dot(N,L),0.0);
+    vec3 direct = (diffuseColor+specularColor*specularTerm)*radiance;
+    float NoV = clamp(dot(N,V),0.0,1.0);
+    float fresnel = pow(1.0-NoV,4.0);
+    float reflectivity = max(specularColor.r,
+                             max(specularColor.g,specularColor.b));
+    float grazingTerm = clamp(smoothness+reflectivity,0.0,1.0);
+    vec3 envFactor = (1.0/(roughness2+1.0))*
+                     mix(specularColor,vec3(grazingTerm),fresnel);
+    const vec3 environment = vec3(0.181303382,0.226914212,0.307360709);
+    vec3 indirect = yargSH(N)*diffuseColor+environment*envFactor;
+    float screenOcclusion = mix(1.0,texture(uAo,gl_FragCoord.xy/uAoSize).r,
+                                uUseAo);
+    float indirectOcclusion = min(occlusion,screenOcclusion);
+    float directOcclusion = 0.75+0.25*screenOcclusion;
+    return indirect*indirectOcclusion+direct*directOcclusion+emission;
+}
+
+vec3 yargMetallic(vec3 albedo, float metallic, float smoothness,
+                  vec3 emission, float occlusion) {
+    vec3 diffuseColor = albedo*(0.96*(1.0-metallic));
+    vec3 specularColor = mix(vec3(0.04),albedo,metallic);
+    return yargBrdf(diffuseColor,specularColor,smoothness,emission,occlusion);
+}
+
+vec3 yargSpecular(vec3 albedo, vec3 specularColor, float smoothness,
+                  vec3 emission, float occlusion) {
+    float reflectivity = max(specularColor.r,
+                             max(specularColor.g,specularColor.b));
+    return yargBrdf(albedo*(1.0-reflectivity),specularColor,smoothness,
+                    emission,occlusion);
+}
+
+vec3 yargRectangularNote() {
+    vec2 center = vec2(0.25,-0.06)+0.1*uRandom.yz;
+    vec2 uv = vUV*vec2(1.1,1.3);
+    vec2 delta = uv-center;
+    vec2 q = uv+vec2(delta.y,-delta.x)*dot(delta,delta)*center+
+             vec2(0.0,0.52);
+    float warp = (0.43+(gradientNoise(q,-2.8)-6.47)*
+                         (-2.82-0.43)/(10.94-6.47))*(-1.06);
+    float jitter = 1.01+(uRandom.x+3.18)*(-1.11-1.01)/(13.24+3.18);
+    vec2 p = q+vec2(warp)+vec2(uTime*(1.0+jitter)*0.4);
+    float noise = gradientNoise(p,-1.11);
+    vec4 dark = max(texture(uTex3,vec2(noise)),vec4(0.15));
+    vec4 base = texture(uTex,vUV);
+    vec4 patterned = overlayBlend(base,dark);
+    vec4 colored = patterned*vec4(uColor,1.0);
+    vec4 shine = texture(uTex2,vUV);
+    vec3 baseColor = mix(colored,shine,0.1*shine.a).rgb;
+    const float gradientStart = 18311.0/65535.0;
+    float emissionMask = clamp((dark.r-gradientStart)/(1.0-gradientStart),
+                               0.0,1.0);
+    return yargSpecular(baseColor,vec3(0.0),0.5,
+                        uColor*emissionMask*0.1,1.0);
+}
+
+float pow5(float x) {
+    float x2 = x*x;
+    return x2*x2*x;
+}
+
+float disneyDiffuse(float nv, float nl, float lh, float perceptualRoughness) {
+    float fd90 = 0.5 + 2.0*lh*lh*perceptualRoughness;
+    float lightScatter = 1.0 + (fd90-1.0)*pow5(1.0-nl);
+    float viewScatter = 1.0 + (fd90-1.0)*pow5(1.0-nv);
+    return lightScatter*viewScatter;
+}
+
+float smithJointGGX(float nl, float nv, float roughness) {
+    float lambdaV = nl*(nv*(1.0-roughness)+roughness);
+    float lambdaL = nv*(nl*(1.0-roughness)+roughness);
+    return 0.5/(lambdaV+lambdaL+1e-5);
+}
+
+float ggxTerm(float nh, float roughness) {
+    float a2 = roughness*roughness;
+    float d = (nh*a2-nh)*nh+1.0;
+    return (1.0/3.14159265359)*a2/(d*d+1e-7);
+}
+
+vec3 fresnelTerm(vec3 f0, float cosA) {
+    return f0+(vec3(1.0)-f0)*pow5(1.0-cosA);
+}
+
+vec3 moonStandard(vec3 albedo, float metallic, float smoothness,
+                  vec3 emission) {
+    const vec3 ambient = vec3(0.212,0.227,0.259);
+    const vec3 dielectric = vec3(0.220916301);
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCameraPos-vWorld);
+    float nv = abs(dot(N,V));
+    float pr = 1.0-smoothness;
+    float roughness = max(pr*pr,0.002);
+    vec3 specColor = mix(dielectric,albedo,metallic);
+    vec3 diffColor = albedo*(1.0-0.220916301)*(1.0-metallic);
+    vec3 direct = vec3(0.0);
+    for (int i = 0; i < 2; ++i) {
+        vec3 L = vec3(0.0,i == 0 ? -0.6427876097 : 0.6427876097,
+                      -0.7660444431);
+        vec3 H = normalize(L+V);
+        float nl = clamp(dot(N,L),0.0,1.0);
+        float nh = clamp(dot(N,H),0.0,1.0);
+        float lh = clamp(dot(L,H),0.0,1.0);
+        float diffuse = disneyDiffuse(nv,nl,lh,pr)*nl;
+        float specular = smithJointGGX(nl,nv,roughness)*
+                         ggxTerm(nh,roughness)*3.14159265359;
+        specular = max(0.0,sqrt(max(1e-4,specular))*nl);
+        direct += diffColor*diffuse+
+                  specular*fresnelTerm(specColor,lh);
+    }
+    return diffColor*ambient+direct+emission;
+}
+
+vec3 moonLambert(vec3 albedo, vec3 emission) {
+    vec3 N = normalize(vNormal);
+    vec3 L0 = vec3(0.0,-0.6427876097,-0.7660444431);
+    vec3 L1 = vec3(0.0, 0.6427876097,-0.7660444431);
+    float nl = max(dot(N,L0),0.0)+max(dot(N,L1),0.0);
+    return albedo*(vec3(0.212,0.227,0.259)+vec3(nl))+emission;
+}
+
+void main() {
+    if (uMaterialFilter >= 0 && vMaterial != uMaterialFilter) discard;
+    vec4 c = vec4(1.0);
+    if (uKind == 0 || (uKind >= 8 && uKind <= 10)) {
+        if (vMaterial == 0) {
+            c = vec4(moonStandard(vec3(0.8),0.0,0.5,vec3(1.0)),1.0);
+        } else if (vMaterial == 1) {
+            float tap = uKind == 10 ? 1.0 : 0.0;
+            c = vec4(moonStandard(uColor,1.0,mix(0.214,0.646,tap),vec3(0.0)),
+                     mix(1.0,0.459,tap));
+        } else if (uKind == 9) {
+            c = vec4(moonLambert(vec3(1.0),vec3(0.0)),1.0);
+        } else {
+            c = vec4(moonStandard(vec3(0.0),0.0,0.5,vec3(0.0)),1.0);
+        }
+    } else if (uKind >= 14 && uKind <= 17) { // Moonscraper SP note/marker
+        bool hopo = uKind == 15;
+        bool tap = uKind == 16;
+        bool marker = uKind == 17;
+        if (vMaterial == 0) {
+            c = hopo
+              ? vec4(moonLambert(vec3(1.0),vec3(0.0)),1.0)
+              : vec4(moonStandard(vec3(0.0),0.0,0.5,vec3(0.0)),1.0);
+        } else if (vMaterial == 1) {
+            c = vec4(moonStandard(vec3(0.0),0.0,0.5,vec3(0.0)),1.0);
+        } else if (vMaterial == 2) {
+            c = vec4(moonStandard(vec3(0.22,0.92,1.0),0.0,0.5,
+                                  vec3(0.0)),1.0);
+        } else if (vMaterial == 3) {
+            vec3 base = marker ? vec3(0.1544118,0.96501005,1.0) : uColor;
+            c = vec4(moonStandard(base,1.0,tap ? 0.646 : 0.214,
+                                  vec3(0.0)),tap ? 0.459 : 1.0);
+        } else {
+            c = vec4(moonStandard(vec3(0.8),0.0,0.5,vec3(1.0)),1.0);
+        }
+    } else if (uKind == 11 || uKind == 13 ||
+               uKind == 18 || uKind == 19) { // Moonscraper open note
+        vec3 base = vMaterial == 0 ? vec3(0.08,0.8,0.1)
+                  : vMaterial == 1 ? vec3(0.0)
+                  : vMaterial == 2 ? vec3(0.533777,0.088109,0.540437)
+                  : vec3(1.0);
+        if ((uKind == 18 || uKind == 19) && vMaterial == 2) {
+            base = uKind == 18 ? vec3(1.0,0.0,0.972414)
+                               : vec3(1.0,0.1544118,0.9766736);
+            vec3 glowTex = vec3(0.0,0.2965517,1.0);
+            vec3 albedo = base + glowTex*0.138;
+            c = vec4(moonLambert(albedo,glowTex*albedo),1.0);
+        } else if (uKind == 13 && vMaterial == 2) {
+            base += vec3(0.174);
+            c = vec4(moonLambert(base,base),1.0);
+        } else {
+            c = vec4(moonStandard(base,0.0,0.5,vec3(0.0)),1.0);
+        }
+    } else if ((uKind >= 1 && uKind <= 4) || uKind == 12) { // YARG note variants
+        bool spMetal = uMaterialState > 0.5 &&
+            (((uKind >= 1 && uKind <= 3) &&
+              (vMaterial == 0 || vMaterial == 2)) ||
+             ((uKind == 4 || uKind == 12) && vMaterial == 0));
+        if (spMetal) {
+            vec3 art = uKind == 12 ? texture(uTex2,vUV).rgb
+                                   : texture(uTex,vUV).rgb;
+            vec3 gold = vec3(1.0,215.0/255.0,0.0);
+            float metallic = (uKind == 4 || uKind == 12) ? 1.0 : 0.0;
+            float smoothness = (uKind == 4 || uKind == 12) ? 0.245 : 0.5;
+            c = vec4(yargMetallic(art*gold,metallic,smoothness,
+                                  vec3(0.0),1.0),1.0);
+        } else if ((uKind == 1 && vMaterial == 1) ||
+            (uKind == 2 && vMaterial == 3) ||
+            (uKind == 3 && vMaterial == 1)) {
+            c = vec4(yargRectangularNote(),1.0);
+        } else if (uKind == 2 && vMaterial == 1) {
+            c = vec4(yargMetallic(vec3(1.0),0.0,0.5,
+                                  vec3(1.4142135),1.0),1.0);
+        } else if (uKind == 3 && vMaterial == 3) {
+            vec4 base = texture(uTex,vUV)*vec4(uColor,1.0);
+            vec4 shine = texture(uTex2,vUV);
+            vec3 albedo = mix(base,shine,0.2*shine.a).rgb;
+            c = vec4(yargMetallic(albedo,0.0,0.0,vec3(0.0),1.0),1.0);
+        } else if (uKind == 4) {
+            vec3 art = texture(uTex,vUV).rgb;
+            if (vMaterial == 0)
+                c = vec4(yargMetallic(art,1.0,0.245,vec3(0.0),1.0),1.0);
+            else
+                c = vec4(yargMetallic(art*uColor,0.0,0.0,
+                                      art*uColor*8.0,1.0),1.0);
+        } else if (uKind == 12) {
+            vec3 realColor = uColor+vec3(1.0);
+            if (vMaterial == 0) {
+                vec3 art = texture(uTex2,vUV).rgb;
+                c = vec4(yargMetallic(art,1.0,0.245,vec3(0.0),1.0),1.0);
+            } else {
+                vec3 art = texture(uTex,vUV).rgb;
+                vec3 emissionMap = texture(uTex2,vUV).rgb;
+                c = vec4(yargMetallic(art*realColor,0.0,0.723,
+                                      emissionMap*realColor*8.0,1.0),1.0);
+            }
+        } else {
+            vec3 art = texture(uTex,vUV).rgb;
+            c = vec4(yargMetallic(art,0.0,0.5,vec3(0.0),1.0),1.0);
+        }
+    } else if (uKind == 5) {          // YARG fret
+        vec4 art = texture(uTex, vUV);
+        if (vMaterial == 0) {
+            vec3 base = art.rgb*uColor;
+            vec4 shine = texture(uTex2,vUV);
+            vec3 shineColor = mix(hueDegrees(uColor,20.0),vec3(1.0),0.1);
+            vec3 albedo = mix(base,shineColor*shine.rgb,shine.a);
+            c = vec4(yargMetallic(albedo,0.0,0.0,vec3(0.0),1.0),1.0);
+        } else if (vMaterial == 1) {
+            vec3 albedo = mix(art.rgb,uColor,uMaterialState);
+            c = vec4(yargMetallic(albedo,0.0,0.0,
+                                  5.0*uMaterialState*uColor,0.0),1.0);
+        } else {
+            c = vec4(yargMetallic(art.rgb,0.0,0.0,vec3(0.0),1.0),1.0);
+        }
+    } else if (uKind == 6) {          // YARG default highway material
+        vec2 baseUV = vUV*vec2(1.0,3.0);
+        vec2 uv2 = baseUV+vec2(0.0,uScroll*0.9);
+        vec4 pattern = texture(uTex2,uv2);
+        vec3 base = mix(vec3(15.0/255.0),pattern.rgb*(75.0/255.0),
+                        pattern.a*(38.0/255.0));
+        vec2 uv4 = baseUV+vec2(0.0,uScroll);
+        vec4 side = texture(uTex3,uv4);
+        base = mix(base,side.rgb*(87.0/255.0),side.a);
+        float fade = texture(uTex,baseUV+vec2(0.0,-0.5)).r;
+        float edge = smoothstep(0.0,0.5,vUV.x)*
+                     (1.0-smoothstep(0.5,1.0,vUV.x));
+        vec3 albedo = base*fade*edge;
+        c = vec4(yargMetallic(albedo,0.0,0.5,vec3(0.0),1.0),1.0);
+    } else if (uKind == 7) {          // YARG track trim
+        vec3 albedo = texture(uTex,vUV).rgb*uColor;
+        c = vec4(yargMetallic(albedo,0.0,0.0,vec3(0.0),1.0),1.0);
+    } else {                          // plain lit material
+        c = vec4(yargMetallic(uColor,0.0,0.0,vec3(0.0),1.0),1.0);
+    }
+    c.a *= uAlpha;
+    if (uFadeRange.y > uFadeRange.x)
+        c.a *= 1.0-smoothstep(uFadeRange.x,uFadeRange.y,vEngineDistance);
+    if (c.a < 0.002) discard;
+    if (uKind != 6) c.rgb *= c.a;
+    oCol = c;
+}
+)";
+
+const char* ENGINE_GLOW_FS = R"(#version 330
+flat in int vMaterial;
+out vec4 oCol;
+uniform int uMaterialFilter;
+uniform float uGlowPower;
+uniform float uGlowAlpha;
+uniform vec3 uGlowColor;
+void main() {
+    if (vMaterial != uMaterialFilter) discard;
+    oCol = vec4(uGlowColor*uGlowPower,uGlowAlpha);
+}
+)";
+
+const char* YARG_EFFECT_FS = R"(#version 330
+in vec2 vUV;
+in vec4 vCol;
+in float vEngineDistance;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform vec3 uEmission;
+uniform float uVisibility;
+uniform float uSweepTime;
+uniform vec2 uFadeRange;
+
+float sweepMask(float t, float v) {
+    float f = 0.0;
+    if (t < 1.0/3.0)
+        f = (1.0-cos(3.0*3.14159265*t))*0.5;
+    else if (t < 2.0/3.0)
+        f = 1.0;
+    else if (t < 1.0)
+        f = (1.0+cos(3.0*3.14159265*t+2.0/3.0))*0.5;
+
+    float p = (t < 1.0/3.0 || t > 2.0/3.0) ? 0.0 : 3.0*t-1.0;
+    float g = 0.0;
+    if (v <= 3.0*p && (1.0-v) <= 3.0*(1.0-p))
+        g = (1.0+cos(3.1415*(v+1.0-3.0*p)))*0.5;
+    return 0.25*f+0.75*g;
+}
+
+void main() {
+    vec4 texel = texture(uTex,vUV);
+    float a = texel.a*vCol.a*vCol.a*uVisibility;
+    if (uSweepTime >= 0.0) a *= sweepMask(uSweepTime,vUV.y);
+    if (uFadeRange.y > uFadeRange.x)
+        a *= 1.0-smoothstep(uFadeRange.x,uFadeRange.y,vEngineDistance);
+    if (a < 0.002) discard;
+    oCol = vec4(texel.rgb*vCol.rgb+uEmission,a);
+}
+)";
+
+const char* YARG_NORMAL_FS = R"(#version 330
+in vec3 vNormal;
+out vec4 oCol;
+void main() { oCol = vec4(normalize(vNormal),1.0); }
+)";
+
+const char* YARG_AO_ESTIMATE_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uNormal;
+uniform sampler2D uDepth;
+uniform vec2 uSize;
+
+vec3 positionAt(vec2 uv, float depth) {
+    float aspect = uSize.x/uSize.y;
+    return vec3((2.0*uv.x-1.0)*25.0*aspect,
+                -depth,(2.0*uv.y-1.0)*25.0);
+}
+
+void main() {
+    vec2 uv = gl_FragCoord.xy/uSize;
+    float rawDepth = texture(uDepth,uv).r;
+    if (rawDepth >= 1.0) {
+        oCol = vec4(0.0,0.5,0.5,0.5);
+        return;
+    }
+    float depth = 0.01+39.99*rawDepth;
+    vec3 normal = texture(uNormal,uv).xyz;
+    vec3 center = positionAt(uv,depth);
+    vec2 pixel = uv*uSize;
+    const float A[4] = float[4](0.0,0.33984375,0.75390625,0.56640625);
+    const float B[4] = float[4](0.9296875,0.76171875,
+                                0.13333330,0.015625);
+    float accumulated = 0.0;
+    for (int sampleIndex = 0; sampleIndex < 4; ++sampleIndex) {
+        float noise = fract(52.9829189*fract(dot(
+            pixel+float(sampleIndex)*vec2(2.083,4.867),
+            vec2(0.06711056,0.00583715))));
+        float z = fract(A[sampleIndex]+noise)*2.0-1.0;
+        float theta = (B[sampleIndex]+noise)*6.28318530718;
+        float radial = sqrt(max(0.0,1.0-z*z));
+        vec3 q = vec3(radial*cos(theta),radial*sin(theta),z);
+        q *= sqrt(float(sampleIndex+1)/4.0);
+        q = dot(q,-normal) < 0.0 ? q : -q;
+        q *= 0.25;
+        float aspect = uSize.x/uSize.y;
+        vec2 sampleUv = clamp(uv+vec2(q.x/(50.0*aspect),q.z/50.0),
+                              vec2(0.0),vec2(1.0));
+        float sampleDepth = 0.01+39.99*texture(uDepth,sampleUv).r;
+        float inside = abs(depth-sampleDepth) < 0.25 ? 1.0 : 0.0;
+        vec3 delta = positionAt(sampleUv,sampleDepth)-center;
+        accumulated += max(dot(delta,normal)-0.004*depth,0.0)/
+                       (dot(delta,delta)+0.0001)*inside;
+    }
+    accumulated *= 0.25;
+    float falloff = 1.0-depth/100.0;
+    float occlusion = pow(clamp(accumulated*0.5*falloff*falloff/4.0,
+                                0.0,1.0),0.6);
+    oCol = vec4(occlusion,normal*0.5+0.5);
+}
+)";
+
+const char* YARG_AO_BLUR_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+uniform vec2 uDirection;
+
+void addTap(vec2 uv, float offset, float gaussian, vec3 centerNormal,
+            inout float value, inout float weight) {
+    vec4 sampleValue = texture(uTex,uv+uDirection*uTexel*offset);
+    vec3 sampleNormal = sampleValue.gba*2.0-1.0;
+    float bilateral = smoothstep(0.8,1.0,dot(centerNormal,sampleNormal));
+    float tapWeight = gaussian*bilateral;
+    value += sampleValue.r*tapWeight;
+    weight += tapWeight;
+}
+
+void main() {
+    vec4 center = texture(uTex,vUV);
+    vec3 centerNormal = center.gba*2.0-1.0;
+    float value = 0.0;
+    float weight = 0.0;
+    addTap(vUV,0.0,0.2270270270,centerNormal,value,weight);
+    addTap(vUV, 1.3846153846,0.3162162162,centerNormal,value,weight);
+    addTap(vUV,-1.3846153846,0.3162162162,centerNormal,value,weight);
+    addTap(vUV, 3.2307692308,0.0702702703,centerNormal,value,weight);
+    addTap(vUV,-3.2307692308,0.0702702703,centerNormal,value,weight);
+    oCol = vec4(value/max(weight,0.000001),center.gba);
+}
+)";
+
+const char* YARG_AO_FINAL_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+
+void addTap(vec2 offset, vec3 centerNormal,
+            inout float value, inout float weight) {
+    vec4 sampleValue = texture(uTex,vUV+offset*uTexel);
+    vec3 sampleNormal = sampleValue.gba*2.0-1.0;
+    float tapWeight = smoothstep(0.8,1.0,dot(centerNormal,sampleNormal));
+    value += sampleValue.r*tapWeight;
+    weight += tapWeight;
+}
+
+void main() {
+    vec4 center = texture(uTex,vUV);
+    vec3 centerNormal = center.gba*2.0-1.0;
+    float value = center.r;
+    float weight = 1.0;
+    addTap(vec2(-1.0,-1.0),centerNormal,value,weight);
+    addTap(vec2( 1.0,-1.0),centerNormal,value,weight);
+    addTap(vec2(-1.0, 1.0),centerNormal,value,weight);
+    addTap(vec2( 1.0, 1.0),centerNormal,value,weight);
+    oCol = vec4(1.0-value/max(weight,0.000001));
+}
+)";
+
+const char* MOON_OCCLUDER_FS = R"(#version 330
+out vec4 oCol;
+uniform float uAlpha;
+void main() { oCol = vec4(0.0,0.0,0.0,uAlpha); }
+)";
+
+const char* MOON_BLUR_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+uniform vec2 uDirection;
+uniform float uShift;
+uniform float uAlpha;
+void main() {
+    if (uShift < 0.0) {
+        oCol = texture(uTex,vUV)*uAlpha;
+        return;
+    }
+    vec4 blurred = vec4(0.0);
+    for (int r = 0; r < 4; ++r) {
+        vec2 offset = uDirection*uTexel*uShift*float(r);
+        blurred += texture(uTex,vUV+offset);
+        blurred += texture(uTex,vUV-offset);
+    }
+    oCol = blurred*(0.6/8.0);
+}
+)";
+
+const char* YARG_BLOOM_PREFILTER_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uTex;
+void main() {
+    vec4 source = texture(uTex,vUV);
+    vec3 color = min(source.rgb*source.a,vec3(65472.0));
+    float brightness = max(color.r,max(color.g,color.b));
+    float soft = clamp(brightness-0.5,0.0,1.0);
+    soft = soft*soft/(2.0+1e-4);
+    float contribution = max(brightness-1.0,soft)/max(brightness,1e-4);
+    oCol = vec4(max(color*contribution,vec3(0.0)),1.0);
+}
+)";
+
+const char* YARG_BLOOM_DOWN_H_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+void main() {
+    float x = uTexel.x*2.0;
+    vec3 color = texture(uTex,vUV+vec2(-4.0*x,0.0)).rgb*0.01621622;
+    color += texture(uTex,vUV+vec2(-3.0*x,0.0)).rgb*0.05405405;
+    color += texture(uTex,vUV+vec2(-2.0*x,0.0)).rgb*0.12162162;
+    color += texture(uTex,vUV+vec2(-1.0*x,0.0)).rgb*0.19459459;
+    color += texture(uTex,vUV).rgb*0.22702703;
+    color += texture(uTex,vUV+vec2( 1.0*x,0.0)).rgb*0.19459459;
+    color += texture(uTex,vUV+vec2( 2.0*x,0.0)).rgb*0.12162162;
+    color += texture(uTex,vUV+vec2( 3.0*x,0.0)).rgb*0.05405405;
+    color += texture(uTex,vUV+vec2( 4.0*x,0.0)).rgb*0.01621622;
+    oCol = vec4(color,1.0);
+}
+)";
+
+const char* YARG_BLOOM_DOWN_V_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform vec2 uTexel;
+void main() {
+    float y = uTexel.y;
+    vec3 color = texture(uTex,vUV+vec2(0.0,-3.23076923*y)).rgb*0.07027027;
+    color += texture(uTex,vUV+vec2(0.0,-1.38461538*y)).rgb*0.31621622;
+    color += texture(uTex,vUV).rgb*0.22702703;
+    color += texture(uTex,vUV+vec2(0.0, 1.38461538*y)).rgb*0.31621622;
+    color += texture(uTex,vUV+vec2(0.0, 3.23076923*y)).rgb*0.07027027;
+    oCol = vec4(color,1.0);
+}
+)";
+
+const char* YARG_BLOOM_UP_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uHigh;
+uniform sampler2D uLow;
+void main() {
+    vec3 highMip = texture(uHigh,vUV).rgb;
+    vec3 lowMip = texture(uLow,vUV).rgb;
+    oCol = vec4(mix(highMip,lowMip,0.41),1.0);
+}
+)";
+
+const char* LINEAR_COMPOSE_FS = R"(#version 330
+in vec2 vUV;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform sampler2D uBloom;
+uniform float uAlpha;
+uniform float uPost;
+vec3 linearToSrgb(vec3 c) {
+    vec3 low = c*12.92;
+    vec3 high = 1.055*pow(max(c,vec3(0.0)),vec3(1.0/2.4))-0.055;
+    return mix(high,low,lessThanEqual(c,vec3(0.0031308)));
+}
+
+vec3 mulRows(vec3 r0, vec3 r1, vec3 r2, vec3 v) {
+    return vec3(dot(r0,v),dot(r1,v),dot(r2,v));
+}
+
+float acesSaturation(vec3 rgb) {
+    float lo = min(rgb.r,min(rgb.g,rgb.b));
+    float hi = max(rgb.r,max(rgb.g,rgb.b));
+    return (max(hi,1e-4)-max(lo,1e-4))/max(hi,1e-2);
+}
+
+float acesYc(vec3 rgb) {
+    float k = rgb.b*(rgb.b-rgb.g)+rgb.g*(rgb.g-rgb.r)+
+              rgb.r*(rgb.r-rgb.b);
+    float chroma = sqrt(max(k,0.0));
+    return (rgb.r+rgb.g+rgb.b+1.75*chroma)/3.0;
+}
+
+float acesHue(vec3 rgb) {
+    if (rgb.r == rgb.g && rgb.g == rgb.b) return 0.0;
+    float hue = degrees(atan(sqrt(3.0)*(rgb.g-rgb.b),
+                             2.0*rgb.r-rgb.g-rgb.b));
+    return hue < 0.0 ? hue+360.0 : hue;
+}
+
+float acesSigmoid(float x) {
+    float t = max(1.0-abs(x/2.0),0.0);
+    float y = 1.0+(x >= 0.0 ? 1.0 : -1.0)*(1.0-t*t);
+    return y/2.0;
+}
+
+float acesGlow(float yc, float gain, float mid) {
+    if (yc <= (2.0/3.0)*mid) return gain;
+    if (yc >= 2.0*mid) return 0.0;
+    return gain*(mid/yc-0.5);
+}
+
+vec3 acesTonemap(vec3 color) {
+    vec3 aces = mulRows(
+        vec3(0.4397010,0.3829780,0.1773350),
+        vec3(0.0897923,0.8134230,0.0967616),
+        vec3(0.0175440,0.1115440,0.8707040),color);
+    float saturation = acesSaturation(aces);
+    float glowShape = acesSigmoid((saturation-0.4)/0.2);
+    aces *= 1.0+acesGlow(acesYc(aces),0.05*glowShape,0.08);
+
+    float hue = acesHue(aces);
+    float centeredHue = hue > 180.0 ? hue-360.0 : hue;
+    float hueWeight = smoothstep(0.0,1.0,
+                                  1.0-abs(2.0*centeredHue/135.0));
+    hueWeight *= hueWeight;
+    aces.r += hueWeight*saturation*(0.03-aces.r)*(1.0-0.82);
+
+    vec3 acescg = max(vec3(0.0),mulRows(
+        vec3(1.4514393161,-0.2365107469,-0.2149285693),
+        vec3(-0.0765537734,1.1762296998,-0.0996759264),
+        vec3(0.0083161484,-0.0060324498,0.9977163014),aces));
+    float luma = dot(acescg,vec3(0.272229,0.674082,0.0536895));
+    acescg = mix(vec3(luma),acescg,0.96);
+    const float a = 0.0245786;
+    const float b = 0.000090537;
+    const float cc = 0.983729;
+    const float d = 0.4329510;
+    const float e = 0.238081;
+    vec3 linearCv = (acescg*(acescg+a)-b)/
+                    (acescg*(cc*acescg+d)+e);
+
+    vec3 xyz = mulRows(
+        vec3(0.6624541811,0.1340042065,0.1561876870),
+        vec3(0.2722287168,0.6740817658,0.0536895174),
+        vec3(-0.0055746495,0.0040607335,1.0103391003),linearCv);
+    float oldY = max(xyz.y,0.0);
+    if (oldY > 0.0) xyz *= pow(oldY,0.9811)/oldY;
+    linearCv = mulRows(
+        vec3(1.6410233797,-0.3248032942,-0.2364246952),
+        vec3(-0.6636628587,1.6153315917,0.0167563477),
+        vec3(0.0117218943,-0.0082844420,0.9883948585),xyz);
+    luma = dot(linearCv,vec3(0.272229,0.674082,0.0536895));
+    linearCv = mix(vec3(luma),linearCv,0.93);
+
+    xyz = mulRows(
+        vec3(0.6624541811,0.1340042065,0.1561876870),
+        vec3(0.2722287168,0.6740817658,0.0536895174),
+        vec3(-0.0055746495,0.0040607335,1.0103391003),linearCv);
+    xyz = mulRows(
+        vec3(0.98722400,-0.00611327,0.0159533),
+        vec3(-0.00759836,1.00186000,0.0053302),
+        vec3(0.00307257,-0.00509595,1.0816800),xyz);
+    return mulRows(
+        vec3(3.2409699419,-1.5373831776,-0.4986107603),
+        vec3(-0.9692436363,1.8759675015,0.0415550574),
+        vec3(0.0556300797,-0.2039769589,1.0569715142),xyz);
+}
+
+void main() {
+    vec4 c = texture(uTex,vUV);
+    if (c.a > 0.0) {
+        vec3 color = max(c.rgb/c.a,vec3(0.0));
+        if (uPost > 0.5)
+            color = acesTonemap(color+0.3*texture(uBloom,vUV).rgb);
+        c.rgb = linearToSrgb(color)*c.a*uAlpha;
+    }
+    c.a *= uAlpha;
     oCol = c;
 }
 )";
@@ -227,7 +1038,8 @@ void main() {
 )";
 
 // ---------------------------------------------------------------------------
-Tex gl_loadTex(const std::string& path, bool repeat, bool flipY) {
+Tex gl_loadTex(const std::string& path, bool repeat, bool flipY,
+               bool srgb, bool mipmaps) {
     Tex t;
     int n = 0;
     stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
@@ -235,14 +1047,202 @@ Tex gl_loadTex(const std::string& path, bool repeat, bool flipY) {
     if (!d) { fprintf(stderr, "cannot load texture %s\n", path.c_str()); exit(1); }
     glGenTextures(1, &t.id);
     glBindTexture(GL_TEXTURE_2D, t.id);
-    // Project colour space is Gamma: plain RGBA8, blend in gamma space, no sRGB.
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, t.w, t.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, d);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, srgb ? GL_SRGB8_ALPHA8 : GL_RGBA,
+                 t.w, t.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, d);
+    if (mipmaps) glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    mipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
     stbi_image_free(d);
     return t;
+}
+
+static Mat4 engineIdentity() {
+    Mat4 m{};
+    m.m[0] = m.m[5] = m.m[10] = m.m[15] = 1.0f;
+    return m;
+}
+
+static Mat4 engineTranslate(float x, float y, float z) {
+    Mat4 m = engineIdentity();
+    m.m[12] = x; m.m[13] = y; m.m[14] = z;
+    return m;
+}
+
+static Mat4 engineScale(float x, float y, float z) {
+    Mat4 m{};
+    m.m[0] = x; m.m[5] = y; m.m[10] = z; m.m[15] = 1.0f;
+    return m;
+}
+
+static Mat4 engineRotateX(float degrees) {
+    Mat4 m = engineIdentity();
+    const float a = degrees * 3.14159265f / 180.0f;
+    const float c = cosf(a), s = sinf(a);
+    m.m[5] = c; m.m[6] = s; m.m[9] = -s; m.m[10] = c;
+    return m;
+}
+
+static Mat4 engineRotateY(float degrees) {
+    Mat4 m = engineIdentity();
+    const float a = degrees * 3.14159265f / 180.0f;
+    const float c = cosf(a), s = sinf(a);
+    m.m[0] = c; m.m[2] = -s; m.m[8] = s; m.m[10] = c;
+    return m;
+}
+
+static Mat4 engineRotateZ(float degrees) {
+    Mat4 m = engineIdentity();
+    const float a = degrees * 3.14159265f / 180.0f;
+    const float c = cosf(a), s = sinf(a);
+    m.m[0] = c; m.m[1] = s; m.m[4] = -s; m.m[5] = c;
+    return m;
+}
+
+static Mat4 engineNoteRotation(float rx, float ry, float rz) {
+    if (rx == 0.0f && ry == 0.0f && rz == 0.0f) return engineIdentity();
+    const float d = 3.14159265f / 180.0f;
+    const float cX = cosf(rx*d), sX = sinf(rx*d);
+    const float cY = cosf(ry*d), sY = sinf(ry*d);
+    const float cZ = cosf(rz*d), sZ = sinf(rz*d);
+    Mat4 m = engineIdentity();
+    m.m[0] = cZ*cY;
+    m.m[1] = cZ*sY*sX+sZ*cX;
+    m.m[2] = cZ*sY*cX-sZ*sX;
+    m.m[4] = -sZ*cY;
+    m.m[5] = -sZ*sY*sX+cZ*cX;
+    m.m[6] = -sZ*sY*cX-cZ*sX;
+    m.m[8] = -sY;
+    m.m[9] = cY*sX;
+    m.m[10] = cY*cX;
+    return m;
+}
+
+static Mat4 engineQuaternion(float x, float y, float z, float w) {
+    Mat4 m = engineIdentity();
+    const float xx=x*x, yy=y*y, zz=z*z;
+    const float xy=x*y, xz=x*z, yz=y*z;
+    const float wx=w*x, wy=w*y, wz=w*z;
+    m.m[0] = 1.0f - 2.0f*(yy+zz);
+    m.m[1] = 2.0f*(xy+wz);
+    m.m[2] = 2.0f*(xz-wy);
+    m.m[4] = 2.0f*(xy-wz);
+    m.m[5] = 1.0f - 2.0f*(xx+zz);
+    m.m[6] = 2.0f*(yz+wx);
+    m.m[8] = 2.0f*(xz+wy);
+    m.m[9] = 2.0f*(yz-wx);
+    m.m[10]= 1.0f - 2.0f*(xx+yy);
+    return m;
+}
+
+static Mat4 engineModel(float x, float y, float z,
+                        float qx, float qy, float qz, float qw,
+                        float sx, float sy, float sz) {
+    return mat_mul(engineTranslate(x, y, z),
+                   mat_mul(engineQuaternion(qx, qy, qz, qw),
+                           engineScale(sx, sy, sz)));
+}
+
+static float yargRandomSigned(unsigned& state) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return float(state & 0x00ffffffu)*(2.0f/16777215.0f)-1.0f;
+}
+
+static Mat4 engineView(int style) {
+    float eye[3], at[3];
+    if (style == 1) {
+        // The camera is under Highway at y=4, while the strike child is at
+        // local y=-4. In strike-relative space the camera is therefore -5.3,
+        // not its serialized local -9.3.
+        eye[0] = 0.0f; eye[1] = -5.3f; eye[2] = -4.52f;
+        const float pitch = 71.28001f * 3.14159265f / 180.0f;
+        at[0] = 0.0f;
+        at[1] = eye[1] + sinf(pitch) * 10.0f;
+        at[2] = eye[2] + cosf(pitch) * 10.0f;
+    } else {
+        eye[0] = 0.0f; eye[1] = 2.66f; eye[2] = -4.86f;
+        const float pitch = 24.12f * 3.14159265f / 180.0f;
+        at[0] = 0.0f;
+        at[1] = eye[1] - sinf(pitch) * 10.0f;
+        at[2] = eye[2] + cosf(pitch) * 10.0f;
+    }
+    return mat_lookAt(eye, at);
+}
+
+static float yargLaneScale(const Mat4& camera, float aspect) {
+    // HighwayCameraRendering first fits the 16:9 reference width, measures the
+    // visible x=+/-1, z=[screen bottom, zero-fade] track bounds, then applies
+    // the tighter of the screen-width and single-player 72%-height limits.
+    const float firstScale = aspect / (16.0f / 9.0f);
+    Mat4 firstPass = engineIdentity();
+    firstPass.m[0] = firstScale;
+    firstPass.m[5] = firstScale;
+    firstPass.m[13] = -1.0f + firstScale;
+    const Mat4 measured = mat_mul(firstPass, camera);
+
+    const float pitch = 24.12f * 3.14159265f / 180.0f;
+    const float tanHalfFov = tanf(55.0f * 3.14159265f / 360.0f);
+    const float rayY = -sinf(pitch) - tanHalfFov * cosf(pitch);
+    const float rayZ =  cosf(pitch) - tanHalfFov * sinf(pitch);
+    const float bottomZ = -4.86f + (-2.66f / rayY) * rayZ;
+
+    float minX = 1.0e9f, maxX = -1.0e9f;
+    float minY = 1.0e9f, maxY = -1.0e9f;
+    for (float x : {-1.0f, 1.0f}) {
+        for (float z : {bottomZ, 3.0f}) {
+            const float clipX = measured.m[0]*x + measured.m[8]*z +
+                                measured.m[12];
+            const float clipY = measured.m[1]*x + measured.m[9]*z +
+                                measured.m[13];
+            const float clipW = measured.m[3]*x + measured.m[11]*z +
+                                measured.m[15];
+            if (clipW == 0.0f) continue;
+            const float viewportX = clipX / clipW * 0.5f + 0.5f;
+            const float viewportY = clipY / clipW * 0.5f + 0.5f;
+            minX = std::min(minX, viewportX);
+            maxX = std::max(maxX, viewportX);
+            minY = std::min(minY, viewportY);
+            maxY = std::max(maxY, viewportY);
+        }
+    }
+    const float trackWidth = maxX - minX;
+    const float trackHeight = maxY - minY;
+    if (trackWidth <= 0.0f || trackHeight <= 0.0f) return firstScale;
+    const float widthFactor = std::min(1.0f, 1.0f / trackWidth);
+    const float heightFactor = 0.72f / trackHeight;
+    return firstScale * std::min(widthFactor, heightFactor);
+}
+
+static Mat4 engineCamera(int style, float aspect, bool applyViewport = true) {
+    const float projectionAspect = style == 1
+                                 ? aspect * (0.78f / 0.98f)
+                                 : aspect;
+    Mat4 camera = mat_mul(mat_perspective(55.0f, projectionAspect,
+                                         style == 1 ? 0.3f : 0.01f,
+                                         style == 1 ? 60.0f : 40.0f),
+                          engineView(style));
+    for (int row = 0; row < 4; ++row) camera.m[row * 4] = -camera.m[row * 4];
+    if (style == 1 && applyViewport) {
+        // Active 3D camera rect: x=.122, width=.78, y=0, height=.98.
+        Mat4 viewport = engineIdentity();
+        viewport.m[0] = 0.78f;
+        viewport.m[5] = 0.98f;
+        viewport.m[12] = 2.0f * 0.122f + 0.78f - 1.0f;
+        viewport.m[13] = -0.02f;
+        camera = mat_mul(viewport, camera);
+    } else if (style == 2) {
+        const float laneScale = yargLaneScale(camera, aspect);
+        Mat4 viewport = engineIdentity();
+        viewport.m[0] = laneScale;
+        viewport.m[5] = laneScale;
+        viewport.m[13] = -1.0f + laneScale;
+        camera = mat_mul(viewport, camera);
+    }
+    return camera;
 }
 
 // ---------------------------------------------------------------------------
@@ -268,10 +1268,12 @@ void Renderer::buildCamera() {
 }
 
 void Renderer::makeFbos() {
-    auto mk = [&](GLuint& f, GLuint& t) {
+    auto mk = [&](GLuint& f, GLuint& t, int w, int h,
+                  GLint internal = GL_RGBA) {
         glGenTextures(1, &t);
         glBindTexture(GL_TEXTURE_2D, t);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -283,7 +1285,7 @@ void Renderer::makeFbos() {
             fprintf(stderr, "framebuffer incomplete\n"); exit(1);
         }
     };
-    mk(fbo_, colorTex_);
+    mk(fbo_, colorTex_, W, H);
     // Depth for the actor z-mask. Attached to the scene FBO only.
     glGenRenderbuffers(1, &depthRb_);
     glBindRenderbuffer(GL_RENDERBUFFER, depthRb_);
@@ -294,18 +1296,169 @@ void Renderer::makeFbos() {
     // The post pass needs its own target: an offline run has no usable default
     // framebuffer (the window is 64x64 and hidden), so resolving into it would
     // clip every frame to a corner and read back black.
-    mk(postFbo_, postTex_);
-    mk(fxFbo_, fxTex_);            // --fxshader's intermediate; see renderer.h
+    mk(postFbo_, postTex_, W, H);
+    mk(fxFbo_, fxTex_, W, H);      // --fxshader's intermediate; see renderer.h
+
+    mk(moonSceneFbo_,moonSceneTex_,W,H,GL_RGBA8);
+    glGenFramebuffers(1,&moonSceneMsaaFbo_);
+    glGenRenderbuffers(1,&moonSceneMsaaColor_);
+    glBindRenderbuffer(GL_RENDERBUFFER,moonSceneMsaaColor_);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER,8,GL_RGBA8,W,H);
+    glGenRenderbuffers(1,&moonSceneDepth_);
+    glBindRenderbuffer(GL_RENDERBUFFER,moonSceneDepth_);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER,8,GL_DEPTH_COMPONENT24,W,H);
+    glBindFramebuffer(GL_FRAMEBUFFER,moonSceneMsaaFbo_);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER,moonSceneMsaaColor_);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER,moonSceneDepth_);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr,"moon scene framebuffer incomplete\n"); exit(1);
+    }
+    moonSceneW_ = W;
+    moonSceneH_ = H;
+
+    const int blurW = std::max(1, W / 2);
+    const int blurH = std::max(1, H / 2);
+    mk(moonGlowFbo_, moonGlowTex_, blurW, blurH, GL_RGBA8);
+    glGenRenderbuffers(1, &moonGlowDepth_);
+    glBindRenderbuffer(GL_RENDERBUFFER, moonGlowDepth_);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, blurW, blurH);
+    glBindFramebuffer(GL_FRAMEBUFFER, moonGlowFbo_);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, moonGlowDepth_);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "moon glow framebuffer incomplete\n"); exit(1);
+    }
+    for (int i = 0; i < 2; ++i)
+        mk(moonBlurFbo_[i], moonBlurTex_[i], blurW, blurH, GL_RGBA8);
+    moonGlowW_ = blurW;
+    moonGlowH_ = blurH;
+
+    mk(yargFbo_,yargTex_,W,H,GL_RGBA16F);
+    glGenRenderbuffers(1,&yargDepth_);
+    glBindRenderbuffer(GL_RENDERBUFFER,yargDepth_);
+    glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,W,H);
+    glBindFramebuffer(GL_FRAMEBUFFER,yargFbo_);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER,yargDepth_);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr,"linear engine framebuffer incomplete\n"); exit(1);
+    }
+    yargW_ = W;
+    yargH_ = H;
+    const int bloomBaseMax = std::max(std::max(1,W >> 1),
+                                      std::max(1,H >> 1));
+    yargBloomMips_ = std::clamp(
+        int(floorf(log2f(float(bloomBaseMax))))-1,1,6);
+    for (int i = 0; i < 6; ++i) {
+        const int bloomW = std::max(1,W >> (i+1));
+        const int bloomH = std::max(1,H >> (i+1));
+        mk(yargBloomDownFbo_[i],yargBloomDownTex_[i],bloomW,bloomH,
+           GL_RGBA16F);
+        mk(yargBloomUpFbo_[i],yargBloomUpTex_[i],bloomW,bloomH,
+           GL_RGBA16F);
+    }
+
+    glGenTextures(1,&yargNormalTex_);
+    glBindTexture(GL_TEXTURE_2D,yargNormalTex_);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8_SNORM,W,H,0,GL_RGBA,GL_BYTE,nullptr);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    glGenTextures(1,&yargAoDepth_);
+    glBindTexture(GL_TEXTURE_2D,yargAoDepth_);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT32F,W,H,0,
+                 GL_DEPTH_COMPONENT,GL_FLOAT,nullptr);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1,&yargNormalFbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER,yargNormalFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,
+                           yargNormalTex_,0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,
+                           yargAoDepth_,0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr,"YARG normals framebuffer incomplete\n"); exit(1);
+    }
+    for (int i = 0; i < 3; ++i)
+        mk(yargAoFbo_[i],yargAoTex_[i],W,H,GL_RGBA8);
+    glGenTextures(1,&yargAoTex_[3]);
+    glBindTexture(GL_TEXTURE_2D,yargAoTex_[3]);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_R8,W,H,0,GL_RED,GL_UNSIGNED_BYTE,nullptr);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1,&yargAoFbo_[3]);
+    glBindFramebuffer(GL_FRAMEBUFFER,yargAoFbo_[3]);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,
+                           yargAoTex_[3],0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr,"YARG AO framebuffer incomplete\n"); exit(1);
+    }
 }
 
 void Renderer::destroyFbos() {
     if (depthRb_) { glDeleteRenderbuffers(1, &depthRb_); depthRb_ = 0; }
+    if (moonGlowDepth_) {
+        glDeleteRenderbuffers(1, &moonGlowDepth_); moonGlowDepth_ = 0;
+    }
+    if (moonSceneDepth_) {
+        glDeleteRenderbuffers(1,&moonSceneDepth_); moonSceneDepth_ = 0;
+    }
+    if (moonSceneMsaaColor_) {
+        glDeleteRenderbuffers(1,&moonSceneMsaaColor_); moonSceneMsaaColor_ = 0;
+    }
+    if (yargDepth_) { glDeleteRenderbuffers(1,&yargDepth_); yargDepth_ = 0; }
     if (fbo_)     { glDeleteFramebuffers(1, &fbo_);     fbo_ = 0; }
     if (postFbo_) { glDeleteFramebuffers(1, &postFbo_); postFbo_ = 0; }
     if (fxFbo_)   { glDeleteFramebuffers(1, &fxFbo_);   fxFbo_ = 0; }
+    if (moonGlowFbo_) {
+        glDeleteFramebuffers(1, &moonGlowFbo_); moonGlowFbo_ = 0;
+    }
+    if (moonSceneFbo_) {
+        glDeleteFramebuffers(1,&moonSceneFbo_); moonSceneFbo_ = 0;
+    }
+    if (moonSceneMsaaFbo_) {
+        glDeleteFramebuffers(1,&moonSceneMsaaFbo_); moonSceneMsaaFbo_ = 0;
+    }
+    if (yargFbo_) { glDeleteFramebuffers(1,&yargFbo_); yargFbo_ = 0; }
+    if (yargNormalFbo_) {
+        glDeleteFramebuffers(1,&yargNormalFbo_); yargNormalFbo_ = 0;
+    }
+    glDeleteFramebuffers(4,yargAoFbo_);
+    for (GLuint& fbo : yargAoFbo_) fbo = 0;
+    glDeleteFramebuffers(6,yargBloomDownFbo_);
+    glDeleteFramebuffers(6,yargBloomUpFbo_);
+    for (int i = 0; i < 6; ++i) {
+        yargBloomDownFbo_[i] = yargBloomUpFbo_[i] = 0;
+    }
+    glDeleteFramebuffers(2, moonBlurFbo_);
+    moonBlurFbo_[0] = moonBlurFbo_[1] = 0;
     if (fxTex_)   { glDeleteTextures(1, &fxTex_);       fxTex_ = 0; }
     if (colorTex_) { glDeleteTextures(1, &colorTex_); colorTex_ = 0; }
     if (postTex_)  { glDeleteTextures(1, &postTex_);  postTex_ = 0; }
+    if (moonGlowTex_) { glDeleteTextures(1, &moonGlowTex_); moonGlowTex_ = 0; }
+    if (moonSceneTex_) { glDeleteTextures(1,&moonSceneTex_); moonSceneTex_ = 0; }
+    if (yargTex_) { glDeleteTextures(1,&yargTex_); yargTex_ = 0; }
+    if (yargNormalTex_) {
+        glDeleteTextures(1,&yargNormalTex_); yargNormalTex_ = 0;
+    }
+    if (yargAoDepth_) { glDeleteTextures(1,&yargAoDepth_); yargAoDepth_ = 0; }
+    glDeleteTextures(4,yargAoTex_);
+    for (GLuint& texture : yargAoTex_) texture = 0;
+    glDeleteTextures(6,yargBloomDownTex_);
+    glDeleteTextures(6,yargBloomUpTex_);
+    for (int i = 0; i < 6; ++i) {
+        yargBloomDownTex_[i] = yargBloomUpTex_[i] = 0;
+    }
+    glDeleteTextures(2, moonBlurTex_);
+    moonBlurTex_[0] = moonBlurTex_[1] = 0;
+    moonSceneW_ = moonSceneH_ = 0;
 }
 
 bool Renderer::init(int w, int h, const std::string& A) {
@@ -334,10 +1487,64 @@ bool Renderer::init(int w, int h, const std::string& A) {
     }
     texAnim_    = gl_loadTex(A + "notes/spr_note_anim_strip16.png", false);
     texOpen_    = gl_loadTex(A + "notes/spr_open_notes_strip5.png", false);
+    // Starpower sheets share the note strip's geometry exactly: every one is
+    // cut at 128px per frame with pivot (0.5, 0.16), so the star quads reuse
+    // the plain note extents unchanged.
+    texStarCap_     = gl_loadTex(A + "notes/spr_star_notes_cap_strip4.png", false);
+    texStarBody_    = gl_loadTex(A + "notes/spr_star_notes_strip1.png", false);
+    texStarBodyTap_ = gl_loadTex(A + "notes/spr_star_notes_strip2.png", false);
+    texStarBottom_  = gl_loadTex(A + "notes/spr_star_notes_strip4.png", false);
+    texSpOpen_      = gl_loadTex(A + "notes/spr_sp_highlight_strip16.png", false);
     texFretB_   = gl_loadTex(A + "frets/spr_newtargets_bottom_strip12.png", false);
     texFretH_   = gl_loadTex(A + "frets/spr_newtargets_head_strip6.png", false);
     texLift_    = gl_loadTex(A + "frets/spr_targets_lift.png", false);
     texHLight_  = gl_loadTex(A + "frets/Head_Lights.png", false);
+    auto engineTex = [&](const char* name, bool repeat, bool flipY,
+                         bool mipmaps) {
+        std::string path = A+"engine/"+name;
+        if (FILE* f = fopen(path.c_str(),"rb")) {
+            fclose(f);
+        } else {
+            fprintf(stderr,"missing engine texture %s (using _missing.png)\n",
+                    path.c_str());
+            path = A+"_missing.png";
+        }
+        return gl_loadTex(path,repeat,flipY,false,mipmaps);
+    };
+    texMoonHighway_  = engineTex("moon_highway.png",true,false,false);
+    texMoonRail_     = engineTex("moon_rail.png",true,false,false);
+    texMoonBeat_     = engineTex("moon_beat.png",false,false,true);
+    texMoonBeatWeak_ = engineTex("moon_beat_weak.png",false,false,true);
+    texMoonMeasure_  = engineTex("moon_measure.png",false,false,true);
+    texMoonIndicator_= engineTex("moon_indicator.png",false,false,false);
+    texMoonStrike_   = engineTex("moon_strike.png",false,false,false);
+    texMoonSustainFretted_ = engineTex("moon_sustain_fretted.png",false,false,false);
+    texMoonSustainOpen_ = engineTex("moon_sustain_open.png",false,false,false);
+    texMoonSpTail_ = engineTex("moon_sp_tail.png",false,false,false);
+    texYargNote_       = engineTex("yarg_note.png",false,true,true);
+    texYargNoteShine_  = engineTex("yarg_note_shine.png",false,true,true);
+    texYargNoteShader_ = engineTex("yarg_note_shader.png",false,true,true);
+    texYargOpenNote_   = engineTex("yarg_open_note.png",false,true,true);
+    texYargOpenHopo_   = engineTex("yarg_open_hopo.png",false,true,true);
+    texYargFret_       = engineTex("yarg_fret.png",false,true,true);
+    texYargFretShine_  = engineTex("yarg_fret_shine.png",false,true,true);
+    texYargTrackFade_  = engineTex("yarg_track_fade.png",false,true,true);
+    texYargTrackSmall_ = engineTex("yarg_track_small.png",true,true,true);
+    texYargTrackSide_  = engineTex("yarg_track_side.png",true,true,true);
+    texYargTrackTrim_  = engineTex("yarg_track_trim.png",true,true,true);
+    texYargSoloTrack_ = engineTex("yarg_solo_track.png",true,true,true);
+    texYargSoloRail_ = engineTex("yarg_solo_rail.png",true,true,true);
+    texYargSoloTransitionTrack_ =
+        engineTex("yarg_solo_transition_track.png",false,true,true);
+    texYargSoloTransitionRailLeft_ =
+        engineTex("yarg_solo_transition_rail_left.png",false,true,true);
+    texYargSoloTransitionRailRight_ =
+        engineTex("yarg_solo_transition_rail_right.png",false,true,true);
+    texYargSpTrim_ = engineTex("yarg_sp_trim.png",true,true,true);
+    texYargBeatline_   = engineTex("yarg_beatline.png",false,true,true);
+    texYargSustain_    = engineTex("yarg_sustain.png",true,true,true);
+    texYargSustainSecondary_ = engineTex("yarg_sustain_secondary.png",true,true,true);
+    texYargOpenSustain_ = engineTex("yarg_open_sustain.png",true,true,true);
     actorFont_  = gl_loadTex(A + "fonts/_eurostile normal (mipmaps) 16x16.png", false);
     actorMissing_ = gl_loadTex(A + "_missing.png", false, false);
     int rawFontWidth[256];
@@ -365,6 +1572,24 @@ bool Renderer::init(int w, int h, const std::string& A) {
     susGlow_ = gl_program(SCENE_VS, SUSTAIN_GLOW_FS, "sustainGlow");
     actor_   = gl_program(ACTOR_VS, ACTOR_FS, "actor");
     piu_     = gl_program(PIU_VS, PIU_FS, "piu");
+    engine_  = gl_program(ENGINE_VS, ENGINE_FS, "engine");
+    engineGlow_ = gl_program(ENGINE_VS, ENGINE_GLOW_FS, "engineGlow");
+    yargEffect_ = gl_program(SCENE_VS,YARG_EFFECT_FS,"yargEffect");
+    moonOccluder_ = gl_program(SCENE_VS, MOON_OCCLUDER_FS, "moonOccluder");
+    moonBlur_ = gl_program(POST_VS, MOON_BLUR_FS, "moonBlur");
+    yargBloomPrefilter_ = gl_program(POST_VS,YARG_BLOOM_PREFILTER_FS,
+                                     "yargBloomPrefilter");
+    yargBloomDownH_ = gl_program(POST_VS,YARG_BLOOM_DOWN_H_FS,
+                                 "yargBloomDownH");
+    yargBloomDownV_ = gl_program(POST_VS,YARG_BLOOM_DOWN_V_FS,
+                                 "yargBloomDownV");
+    yargBloomUp_ = gl_program(POST_VS,YARG_BLOOM_UP_FS,"yargBloomUp");
+    yargNormalProg_ = gl_program(ENGINE_VS,YARG_NORMAL_FS,"yargNormal");
+    yargAoEstimate_ = gl_program(POST_VS,YARG_AO_ESTIMATE_FS,
+                                 "yargAoEstimate");
+    yargAoBlur_ = gl_program(POST_VS,YARG_AO_BLUR_FS,"yargAoBlur");
+    yargAoFinal_ = gl_program(POST_VS,YARG_AO_FINAL_FS,"yargAoFinal");
+    linearCompose_ = gl_program(POST_VS, LINEAR_COMPOSE_FS, "linearCompose");
     cover_   = gl_program(POST_VS, COVER_FS, "cover");
     locPremul_ = glGetUniformLocation(prog_, "uPremul");
 
@@ -384,6 +1609,17 @@ bool Renderer::init(int w, int h, const std::string& A) {
     glEnableVertexAttribArray(0); glEnableVertexAttribArray(1);
     glEnableVertexAttribArray(2); glEnableVertexAttribArray(3);
 
+    loadEngineMesh(moonNote_, A + "engine/moonscraper_note.obj");
+    loadEngineMesh(moonOpen_, A + "engine/moonscraper_open.obj");
+    loadEngineMesh(moonSp_, A + "engine/moon_sp.obj");
+    loadEngineMesh(yargNormal_, A + "engine/yarg_normal.fbx");
+    loadEngineMesh(yargHopo_, A + "engine/yarg_hopo.fbx");
+    loadEngineMesh(yargTap_, A + "engine/yarg_tap.fbx");
+    loadEngineMesh(yargOpen_, A + "engine/yarg_open_default.fbx");
+    loadEngineMesh(yargFret_, A + "engine/yarg_fret.fbx");
+    loadEngineMesh(yargTrack_, A + "engine/yarg_track.fbx");
+    loadEngineMesh(yargTrackTrim_, A + "engine/yarg_track_trim.fbx");
+
     const float quad[6] = {-1,-1, 3,-1, -1,3};
     glGenVertexArrays(1, &qvao_); glBindVertexArray(qvao_);
     glGenBuffers(1, &qvbo_); glBindBuffer(GL_ARRAY_BUFFER, qvbo_);
@@ -400,6 +1636,1733 @@ bool Renderer::init(int w, int h, const std::string& A) {
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
     return true;
+}
+
+void Renderer::loadEngineMesh(EngineGpu& gpu, const std::string& path) {
+    EngineMesh mesh;
+    if (!mesh.load(path)) {
+        fprintf(stderr, "engine mesh: could not load %s\n", path.c_str());
+        return;
+    }
+    gpu.count = GLsizei(mesh.vertices.size());
+    glGenVertexArrays(1, &gpu.vao);
+    glBindVertexArray(gpu.vao);
+    glGenBuffers(1, &gpu.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 GLsizeiptr(mesh.vertices.size() * sizeof(EngineMeshVertex)),
+                 mesh.vertices.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(EngineMeshVertex),
+                          (void*)offsetof(EngineMeshVertex, x));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(EngineMeshVertex),
+                          (void*)offsetof(EngineMeshVertex, nx));
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(EngineMeshVertex),
+                          (void*)offsetof(EngineMeshVertex, u));
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(EngineMeshVertex),
+                          (void*)offsetof(EngineMeshVertex, material));
+    for (int i = 0; i < 4; ++i) glEnableVertexAttribArray(i);
+}
+
+void Renderer::drawEngineMesh(const EngineGpu& gpu, const Mat4& camera,
+                              const Mat4& model, int kind, const float* color,
+                              float alpha, GLuint texture, GLuint texture2,
+                              GLuint texture3, float scroll,
+                              int materialFilter, float materialState,
+                              const float* random, float shaderTime) {
+    if (gpu.count == 0 || alpha <= 0.0f) return;
+    glUseProgram(engine_);
+    glUniformMatrix4fv(glGetUniformLocation(engine_, "uMVP"), 1, GL_FALSE,
+                       camera.m);
+    glUniformMatrix4fv(glGetUniformLocation(engine_, "uModel"), 1, GL_FALSE,
+                       model.m);
+    glUniform3f(glGetUniformLocation(engine_, "uColor"),
+                color[0] * fieldTint_[0], color[1] * fieldTint_[1],
+                color[2] * fieldTint_[2]);
+    glUniform1f(glGetUniformLocation(engine_, "uAlpha"),
+                alpha * fieldTint_[3]);
+    glUniform1f(glGetUniformLocation(engine_, "uScroll"), scroll);
+    glUniform1i(glGetUniformLocation(engine_, "uKind"), kind);
+    glUniform1i(glGetUniformLocation(engine_, "uMaterialFilter"), materialFilter);
+    glUniform1f(glGetUniformLocation(engine_, "uMaterialState"),materialState);
+    glUniform3f(glGetUniformLocation(engine_, "uRandom"),
+                random ? random[0] : 0.0f,
+                random ? random[1] : 0.0f,
+                random ? random[2] : 0.0f);
+    glUniform1f(glGetUniformLocation(engine_, "uTime"),shaderTime);
+    glUniform1f(glGetUniformLocation(engine_, "uUseAo"),engineUseAo_ ? 1.0f : 0.0f);
+    const bool yarg = (kind >= 1 && kind <= 7) || kind == 12;
+    glUniform3f(glGetUniformLocation(engine_, "uCameraPos"),
+                0.0f, yarg ? 2.66f : -5.3f, yarg ? -4.86f : -4.52f);
+    glUniform1f(glGetUniformLocation(engine_, "uCurve"), yarg ? 0.5f : 0.0f);
+    if (yarg) {
+        const float pitch = 24.12f * 3.14159265f / 180.0f;
+        const float fy = -sinf(pitch), fz = cosf(pitch);
+        const float fadeStart = fabsf(2.66f*fy + (-4.86f-1.75f)*fz);
+        const float fadeEnd = fabsf(2.66f*fy + (-4.86f-3.0f)*fz);
+        glUniform4f(glGetUniformLocation(engine_, "uFadePlane"),
+                    0.0f,0.0f,1.0f,4.86f);
+        glUniform2f(glGetUniformLocation(engine_, "uFadeRange"),
+                    fadeStart,fadeEnd);
+    } else {
+        // Moonscraper's highway does not run to the horizon: a background
+        // quad fades everything out at a fixed world height. In its scene the
+        // fade anchor ("Max", y 15.75) hangs offset 2.28 below -> centre
+        // 13.47, and the shader's spread is 2% of the 11.75-unit camera span
+        // -> +-0.1175. The plane (0,1,0,0) measures plain world y, which is
+        // what moon content scrolls along.
+        glUniform4f(glGetUniformLocation(engine_, "uFadePlane"),0,1,0,0);
+        glUniform2f(glGetUniformLocation(engine_, "uFadeRange"),
+                    13.35f,13.59f);
+    }
+    const GLuint textures[3] = {texture, texture2, texture3};
+    const char* names[3] = {"uTex", "uTex2", "uTex3"};
+    for (int i = 0; i < 3; ++i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, textures[i]);
+        glUniform1i(glGetUniformLocation(engine_, names[i]), i);
+    }
+    glActiveTexture(GL_TEXTURE0+3);
+    glBindTexture(GL_TEXTURE_2D,yargAoTex_[3]);
+    glUniform1i(glGetUniformLocation(engine_,"uAo"),3);
+    glUniform2f(glGetUniformLocation(engine_,"uAoSize"),
+                float(std::max(1,yargW_)),float(std::max(1,yargH_)));
+    if (yarg) {
+        const float det =
+            model.m[0]*(model.m[5]*model.m[10]-model.m[6]*model.m[9])-
+            model.m[4]*(model.m[1]*model.m[10]-model.m[2]*model.m[9])+
+            model.m[8]*(model.m[1]*model.m[6]-model.m[2]*model.m[5]);
+        glEnable(GL_CULL_FACE);
+        glCullFace(det < 0.0f ? GL_BACK : GL_FRONT);
+    }
+    glBindVertexArray(gpu.vao);
+    glDrawArrays(GL_TRIANGLES, 0, gpu.count);
+    if (yarg) glDisable(GL_CULL_FACE);
+    glActiveTexture(GL_TEXTURE0);
+}
+
+void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
+                          const Mods& mods, float songTime, float scrollNow,
+                          float noteSpeed, float bpm, int style, float alpha,
+                          float mx, float my, float mz, int vpX, int vpW,
+                          const Mat4* mvpOverride) {
+    if (alpha <= 0.0f || mods.hide != 0.0f) return;
+    engineUseAo_ = !o.noPost;
+
+    GLint engineTargetFbo = 0;
+    GLint engineTargetViewport[4] = {};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING,&engineTargetFbo);
+    glGetIntegerv(GL_VIEWPORT,engineTargetViewport);
+
+    const bool moonIsolated = style == 1;
+    const bool yargLinear = style == 2;
+    const float fieldAlpha = fieldTint_[3];
+    const float compositeAlpha = alpha * fieldAlpha;
+    if (moonIsolated || yargLinear) fieldTint_[3] = 1.0f;
+    if (moonIsolated) {
+        const int targetW = std::max(1,engineTargetViewport[2]);
+        const int targetH = std::max(1,engineTargetViewport[3]);
+        if (targetW != moonSceneW_ || targetH != moonSceneH_) {
+            glBindTexture(GL_TEXTURE_2D,moonSceneTex_);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,targetW,targetH,0,
+                         GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+            glBindRenderbuffer(GL_RENDERBUFFER,moonSceneMsaaColor_);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER,8,GL_RGBA8,
+                                             targetW,targetH);
+            glBindRenderbuffer(GL_RENDERBUFFER,moonSceneDepth_);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER,8,
+                                             GL_DEPTH_COMPONENT24,
+                                             targetW,targetH);
+            moonSceneW_ = targetW;
+            moonSceneH_ = targetH;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER,moonSceneMsaaFbo_);
+        glViewport(0,0,targetW,targetH);
+        glClearColor(0,0,0,1);
+        glDepthMask(GL_TRUE);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
+    if (yargLinear) {
+        const int targetW = std::max(1,engineTargetViewport[2]);
+        const int targetH = std::max(1,engineTargetViewport[3]);
+        if (targetW != yargW_ || targetH != yargH_) {
+            glBindTexture(GL_TEXTURE_2D,yargTex_);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,targetW,targetH,0,
+                         GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+            glBindRenderbuffer(GL_RENDERBUFFER,yargDepth_);
+            glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,
+                                  targetW,targetH);
+            for (int i = 0; i < 6; ++i) {
+                const int bloomW = std::max(1,targetW >> (i+1));
+                const int bloomH = std::max(1,targetH >> (i+1));
+                for (GLuint texture : {yargBloomDownTex_[i],
+                                       yargBloomUpTex_[i]}) {
+                    glBindTexture(GL_TEXTURE_2D,texture);
+                    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA16F,bloomW,bloomH,0,
+                                  GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+                }
+            }
+            glBindTexture(GL_TEXTURE_2D,yargNormalTex_);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8_SNORM,targetW,targetH,0,
+                         GL_RGBA,GL_BYTE,nullptr);
+            glBindTexture(GL_TEXTURE_2D,yargAoDepth_);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT32F,targetW,targetH,0,
+                         GL_DEPTH_COMPONENT,GL_FLOAT,nullptr);
+            for (int i = 0; i < 3; ++i) {
+                glBindTexture(GL_TEXTURE_2D,yargAoTex_[i]);
+                glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,targetW,targetH,0,
+                             GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+            }
+            glBindTexture(GL_TEXTURE_2D,yargAoTex_[3]);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_R8,targetW,targetH,0,
+                         GL_RED,GL_UNSIGNED_BYTE,nullptr);
+            const int bloomBaseMax = std::max(std::max(1,targetW >> 1),
+                                              std::max(1,targetH >> 1));
+            yargBloomMips_ = std::clamp(
+                int(floorf(log2f(float(bloomBaseMax))))-1,1,6);
+            yargW_ = targetW;
+            yargH_ = targetH;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER,yargFbo_);
+        glViewport(0,0,targetW,targetH);
+        glClearColor(0,0,0,0);
+        glDepthMask(GL_TRUE);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    }
+    if (moonIsolated || yargLinear) alpha = 1.0f;
+
+    Mat4 camera = mvpOverride ? *mvpOverride
+                              : engineCamera(style, float(vpW) / float(H));
+    if (!mvpOverride && (vpX != 0 || vpW != W)) {
+        Mat4 place = engineIdentity();
+        place.m[0] = float(vpW) / float(W);
+        place.m[12] = float(2 * vpX + vpW) / float(W) - 1.0f;
+        camera = mat_mul(place, camera);
+    }
+
+    float zoom = 1.0f - 0.5f * mods.mini;
+    if (mods.tilt > 0.0f) zoom *= 1.0f - 0.1f * mods.tilt;
+    else if (mods.tilt < 0.0f) zoom *= 1.0f + 0.1f * mods.tilt;
+    const float wag = mods.wag * 21.0f * sinf(float(beat) * 3.14159265f);
+    Mat4 root = engineScale(zoom, zoom, zoom);
+    if (style == 1) {
+        root = mat_mul(engineRotateY(-wag),
+                       mat_mul(engineRotateX(-30.0f * mods.tilt), root));
+        root = mat_mul(engineTranslate(o.px + mx, o.pz + mz, o.py + my), root);
+    } else {
+        root = mat_mul(engineRotateZ(wag),
+                       mat_mul(engineRotateX(30.0f * mods.tilt), root));
+        root = mat_mul(engineTranslate(o.px + mx, o.py + my, o.pz + mz), root);
+    }
+    camera = mat_mul(camera, root);
+    Mat4 glowCamera = camera;
+    if (style == 1 && !mvpOverride)
+        glowCamera = mat_mul(engineCamera(1,float(vpW)/float(H),false),root);
+
+    static const float moonColors[6][3] = {
+        {0.07450981f,1.0f,0.0f}, {1.0f,0.0f,0.0f},
+        {1.0f,0.972549f,0.0f}, {0.0f,0.5019608f,1.0f},
+        {1.0f,0.7254902f,0.0f}, {0.75f,0.75f,0.75f}
+    };
+    static const float moonNoteColors[5][3] = {
+        {0.1397059f,1.0f,0.16360286f}, {1.0f,0.125f,0.125f},
+        {0.9884381f,1.0f,0.16176468f},
+        {0.14705884f,0.43529424f,1.0f},
+        {1.0f,0.6267748f,0.1544118f}
+    };
+    static const float moonTapColors[5][3] = {
+        {0.0f,1.0f,0.027777672f}, {1.0f,0.0f,0.0f},
+        {1.0f,0.9724138f,0.0f}, {0.0f,0.33793116f,1.0f},
+        {1.0f,0.64137936f,0.0f}
+    };
+    static const float moonSustainColors[5][3] = {
+        {0.11724126f,1.0f,0.0f}, {1.0f,0.0f,0.0f},
+        {0.986207f,1.0f,0.0f}, {0.0f,0.46206903f,1.0f},
+        {1.0f,0.7241379f,0.0f}
+    };
+    static const float moonOpenSustain[3] = {0.9915822f,0.3897059f,1.0f};
+    static const float yargColors[6][3] = {
+        {121.0f/255.0f,211.0f/255.0f,4.0f/255.0f},
+        {1.0f,29.0f/255.0f,35.0f/255.0f},
+        {1.0f,233.0f/255.0f,0.0f},
+        {0.0f,191.0f/255.0f,1.0f},
+        {1.0f,132.0f/255.0f,0.0f},
+        {200.0f/255.0f,0.0f,1.0f}
+    };
+    const float (*colors)[3] = style == 1 ? moonColors : yargColors;
+    const float receptorAlpha = alpha*fminf(1.0f,fmaxf(0.0f,1.0f-mods.dark));
+    const float laneStep = style == 1 ? 1.0f : 0.4f;
+    // Highway is parented at y=4; the default scene's camYMax is local 11.75.
+    const float moonVisibleEnd = 4.0f + 11.75f;
+    const float moonBoardEnd = 62.6f;
+    auto laneX = [&](int lane) { return (float(lane) - 2.0f) * laneStep; };
+    auto modX = [&](int lane, float yOffset) {
+        float x = laneX(lane)+GetXPos(mods,lane,yOffset,songTime,
+                                      float(beat),bpm)*laneStep/64.0f;
+        if (mods.tiny != 0.0f) x *= GetTinyColScale(mods);
+        return x;
+    };
+    auto moonPitch = [&](float x, float y, float z) {
+        const float clipY = camera.m[1]*x + camera.m[5]*y +
+                            camera.m[9]*z + camera.m[13];
+        const float clipW = camera.m[3]*x + camera.m[7]*y +
+                            camera.m[11]*z + camera.m[15];
+        const float screenY = clipW != 0.0f
+                            ? clipY / clipW * 0.5f + 0.5f
+                            : 0.0f;
+        return -75.0f - screenY * 30.0f;
+    };
+    const bool hasStops = !chart.stops.empty();
+    auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
+    const float yPerUnit = ARROW_SIZE * 1.6f;
+    auto modYOffset = [&](double sec, int lane) {
+        const float raw = float(ssec(sec) - scrollNow) * noteSpeed;
+        const float in = raw * yPerUnit;
+        return ApplyYMods(mods,lane,in,float(beat));
+    };
+    auto scrollOffset = [&](double sec, int lane = -1) {
+        const float raw = float(ssec(sec) - scrollNow) * noteSpeed;
+        const float in = raw * yPerUnit;
+        const float adjusted = ApplyYMods(mods,lane < 0 ? 0 : lane,in,float(beat));
+        const float z = adjusted == in ? raw : adjusted / yPerUnit;
+        // YARG's default NoteSpeed is 6 at NotClon's default speed 10.
+        //
+        // Moonscraper: 1.7, NOT the authentic hyperspeed-5 mapping (0.5).
+        // Its world is exact -- strikeline y=0, camera span 11.75, note pool
+        // Max at 15.75 -- but the editor's default hyperspeed shows 3.15 s of
+        // chart where CH shows NOTE_CULL_FAR/noteSpeed = 0.787 s, so notes
+        // crawl at a quarter of CH's perceived speed. 1.7 makes the trip from
+        // the fade line (y 13.35) to the strikeline take 13.35/17 = 0.785 s
+        // at default speed: CH's window, Moonscraper's look.
+        return ApplyScrollZ(mods,z,lane) * (style == 1 ? 1.7f : 0.6f);
+    };
+    auto noteRotation = [&](const Note& note, float yOffset) {
+        return engineNoteRotation(
+            -GetRotationX(mods,yOffset),GetRotationY(mods,yOffset),
+            -GetRotationZ(mods,float(note.beat),float(beat)));
+    };
+
+    auto quadXY = [&](float x0, float y0, float x1, float y1, float z,
+                      float u0, float v0, float u1, float v1,
+                      const float* color, float a) {
+        ch::Vtx q[4] = {
+            {x0,y0,z,u0,v0,color[0],color[1],color[2],a},
+            {x1,y0,z,u1,v0,color[0],color[1],color[2],a},
+            {x1,y1,z,u1,v1,color[0],color[1],color[2],a},
+            {x0,y1,z,u0,v1,color[0],color[1],color[2],a}
+        };
+        const int ix[6] = {0,1,2,0,2,3};
+        for (int i : ix) v_.push_back(q[i]);
+    };
+    auto quadXZ = [&](float x0, float z0, float x1, float z1, float y,
+                      float u0, float v0, float u1, float v1,
+                      const float* color, float a) {
+        ch::Vtx q[4] = {
+            {x0,y,z0,u0,v0,color[0],color[1],color[2],a},
+            {x1,y,z0,u1,v0,color[0],color[1],color[2],a},
+            {x1,y,z1,u1,v1,color[0],color[1],color[2],a},
+            {x0,y,z1,u0,v1,color[0],color[1],color[2],a}
+        };
+        const int ix[6] = {0,1,2,0,2,3};
+        for (int i : ix) v_.push_back(q[i]);
+    };
+    auto moonBillboard = [&](float cy, float width, float height,
+                             const float* color, float a) {
+        const Mat4 view = engineView(1);
+        const float upY = view.m[5], upZ = view.m[9];
+        const float hx = width * 0.5f, hy = height * 0.5f;
+        ch::Vtx q[4] = {
+            {-hx,cy-upY*hy,-upZ*hy,0,0,color[0],color[1],color[2],a},
+            { hx,cy-upY*hy,-upZ*hy,1,0,color[0],color[1],color[2],a},
+            { hx,cy+upY*hy, upZ*hy,1,1,color[0],color[1],color[2],a},
+            {-hx,cy+upY*hy, upZ*hy,0,1,color[0],color[1],color[2],a}
+        };
+        const int ix[6] = {0,1,2,0,2,3};
+        for (int i : ix) v_.push_back(q[i]);
+    };
+    auto moonFretQuad = [&](float cx, float cy, float width, float height,
+                            float z, const float* color, float a) {
+        const float c = cosf(12.0f * 3.14159265f / 180.0f);
+        const float s = sinf(12.0f * 3.14159265f / 180.0f);
+        const float x0 = cx - width * 0.5f, x1 = cx + width * 0.5f;
+        const float dy0 = -height * 0.5f, dy1 = height * 0.5f;
+        ch::Vtx q[4] = {
+            {x0,cy+dy0*c,z+dy0*s,0,0,color[0],color[1],color[2],a},
+            {x1,cy+dy0*c,z+dy0*s,1,0,color[0],color[1],color[2],a},
+            {x1,cy+dy1*c,z+dy1*s,1,1,color[0],color[1],color[2],a},
+            {x0,cy+dy1*c,z+dy1*s,0,1,color[0],color[1],color[2],a}
+        };
+        const int ix[6] = {0,1,2,0,2,3};
+        for (int i : ix) v_.push_back(q[i]);
+    };
+    struct EngineSustainRow {
+        float x, pos, bump, visible, u, rise;
+    };
+    auto lerpSustainRow = [](const EngineSustainRow& a,
+                             const EngineSustainRow& b,float t) {
+        return EngineSustainRow{
+            a.x+(b.x-a.x)*t,a.pos+(b.pos-a.pos)*t,
+            a.bump+(b.bump-a.bump)*t,
+            a.visible+(b.visible-a.visible)*t,a.u+(b.u-a.u)*t,
+            a.rise+(b.rise-a.rise)*t
+        };
+    };
+    auto appendEngineSustain = [&](double authoredStartSec, double endSec,
+                                   int lane, float halfWidth,
+                                   int widthSubdivisions, const float* color,
+                                   float a) {
+        double startSec = authoredStartSec;
+        if (!o.noBot && songTime >= authoredStartSec) startSec = songTime;
+        if (startSec >= endSec) return;
+
+        // Must match scrollOffset's per-style scale or sustain tails detach
+        // from their heads.
+        const float styleScale = style == 1 ? 1.7f : 0.6f;
+        float length = float(ssec(endSec)-ssec(startSec))*noteSpeed*styleScale;
+        if (style == 1 && !o.noBot && songTime >= authoredStartSec) {
+            if (length <= 0.2f) return;
+            startSec += (endSec-startSec)*double(0.2f/length);
+            length = float(ssec(endSec)-ssec(startSec))*noteSpeed*styleScale;
+        }
+        if (length <= 0.0f) return;
+        const float rowStep = style == 1 ? 0.1f : ch::SUS_STEP_Z;
+        const int rowCount = std::clamp(int(ceilf(length/rowStep))+1,2,192);
+        EngineSustainRow rows[192];
+        for (int i = 0; i < rowCount; ++i) {
+            const float t = float(i)/float(rowCount-1);
+            const double sec = startSec+(endSec-startSec)*double(t);
+            const float in = modYOffset(sec,lane);
+            rows[i] = {
+                modX(lane,in),scrollOffset(sec,lane),
+                GetYPosBump(mods,lane,in,float(beat),bpm)*laneStep/64.0f,
+                fmaxf(GetAlpha(mods,in,songTime),GetGlow(mods,in,songTime)),
+                style == 1 ? length*t : length*(1.0f-t),t
+            };
+        }
+
+        const float visibleStart = style == 1 ? -8.47f : -1.5f;
+        const float visibleEnd = style == 1 ? moonVisibleEnd : 32.0f;
+        float moonU = 0.0f;
+        for (int row = 0; row+1 < rowCount; ++row) {
+            EngineSustainRow r0 = rows[row], r1 = rows[row+1];
+            const float dp = r1.pos-r0.pos;
+            float t0 = 0.0f, t1 = 1.0f;
+            if (fabsf(dp) < 0.000001f) {
+                if (r0.pos < visibleStart || r0.pos > visibleEnd) continue;
+            } else {
+                const float a0 = (visibleStart-r0.pos)/dp;
+                const float a1 = (visibleEnd-r0.pos)/dp;
+                t0 = fmaxf(0.0f,fminf(a0,a1));
+                t1 = fminf(1.0f,fmaxf(a0,a1));
+                if (t1 <= t0) continue;
+            }
+            const EngineSustainRow source0 = r0, source1 = r1;
+            r0 = lerpSustainRow(source0,source1,t0);
+            r1 = lerpSustainRow(source0,source1,t1);
+            if (style == 1) {
+                r0.u = moonU;
+                const float dx = r1.x-r0.x;
+                const float dy = r1.pos-r0.pos;
+                const float dz = r1.bump-r0.bump;
+                moonU += sqrtf(dx*dx+dy*dy+dz*dz);
+                r1.u = moonU;
+                ch::Vtx q[4] = {
+                    {r0.x-halfWidth,r0.pos,r0.bump,r0.u,0,
+                     color[0],color[1],color[2],a*r0.visible},
+                    {r0.x+halfWidth,r0.pos,r0.bump,r0.u,1,
+                     color[0],color[1],color[2],a*r0.visible},
+                    {r1.x+halfWidth,r1.pos,r1.bump,r1.u,1,
+                     color[0],color[1],color[2],a*r1.visible},
+                    {r1.x-halfWidth,r1.pos,r1.bump,r1.u,0,
+                     color[0],color[1],color[2],a*r1.visible}
+                };
+                const int ix[6] = {0,1,2,0,2,3};
+                for (int index : ix) v_.push_back(q[index]);
+                continue;
+            }
+            for (int width = 0; width < widthSubdivisions; ++width) {
+                const float w0 = float(width)/float(widthSubdivisions);
+                const float w1 = float(width+1)/float(widthSubdivisions);
+                const float x00 = r0.x-halfWidth+2.0f*halfWidth*w0;
+                const float x01 = r0.x-halfWidth+2.0f*halfWidth*w1;
+                const float x10 = r1.x-halfWidth+2.0f*halfWidth*w0;
+                const float x11 = r1.x-halfWidth+2.0f*halfWidth*w1;
+                ch::Vtx q[4] = {
+                    {x00,0.01f+0.01f*r0.rise+r0.bump,-2.001f+r0.pos,
+                     r0.u,1.0f-w0,color[0],color[1],color[2],a*r0.visible},
+                    {x01,0.01f+0.01f*r0.rise+r0.bump,-2.001f+r0.pos,
+                     r0.u,1.0f-w1,color[0],color[1],color[2],a*r0.visible},
+                    {x11,0.01f+0.01f*r1.rise+r1.bump,-2.001f+r1.pos,
+                     r1.u,1.0f-w1,color[0],color[1],color[2],a*r1.visible},
+                    {x10,0.01f+0.01f*r1.rise+r1.bump,-2.001f+r1.pos,
+                     r1.u,1.0f-w0,color[0],color[1],color[2],a*r1.visible}
+                };
+                const int ix[6] = {0,1,2,0,2,3};
+                for (int index : ix) v_.push_back(q[index]);
+            }
+        }
+    };
+    auto sceneSetup = [&]() {
+        glUseProgram(prog_);
+        glUniformMatrix4fv(glGetUniformLocation(prog_, "uMVP"), 1, GL_FALSE,
+                           camera.m);
+        glUniform3f(glGetUniformLocation(prog_, "uOffset"), 0, 0, 0);
+        glUniform1i(glGetUniformLocation(prog_, "uTex"), 0);
+        glUniform1f(glGetUniformLocation(prog_, "uCurve"),
+                    style == 2 ? 0.5f : 0.0f);
+        if (style == 2) {
+            const float pitch = 24.12f * 3.14159265f / 180.0f;
+            const float fy = -sinf(pitch), fz = cosf(pitch);
+            const float fadeStart = fabsf(2.66f*fy + (-4.86f-1.75f)*fz);
+            const float fadeEnd = fabsf(2.66f*fy + (-4.86f-3.0f)*fz);
+            glUniform4f(glGetUniformLocation(prog_, "uFadePlane"),
+                        0.0f,0.0f,1.0f,4.86f);
+            glUniform2f(glGetUniformLocation(prog_, "uFadeRange"),
+                        fadeStart,fadeEnd);
+        } else {
+            // Same fade as the mesh path: Moonscraper's board quad runs to
+            // y 62.6, and without this it draws the full length -- the
+            // "highway too long" symptom. Values derived in drawEngineMesh.
+            glUniform4f(glGetUniformLocation(prog_, "uFadePlane"),0,1,0,0);
+            glUniform2f(glGetUniformLocation(prog_, "uFadeRange"),
+                        13.35f,13.59f);
+        }
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+        glActiveTexture(GL_TEXTURE0);
+    };
+    auto drawYargEffect = [&](GLuint texture, const float* emission,
+                              float visibility, float sweepTime) {
+        if (v_.empty()) return;
+        glUseProgram(yargEffect_);
+        glUniformMatrix4fv(glGetUniformLocation(yargEffect_,"uMVP"),1,
+                           GL_FALSE,camera.m);
+        glUniform3f(glGetUniformLocation(yargEffect_,"uOffset"),0,0,0);
+        glUniform1f(glGetUniformLocation(yargEffect_,"uCurve"),0.5f);
+        glUniform4f(glGetUniformLocation(yargEffect_,"uFadePlane"),
+                    0.0f,0.0f,1.0f,4.86f);
+        const float pitch = 24.12f * 3.14159265f / 180.0f;
+        const float fy = -sinf(pitch), fz = cosf(pitch);
+        const float fadeStart = fabsf(2.66f*fy + (-4.86f-1.75f)*fz);
+        const float fadeEnd = fabsf(2.66f*fy + (-4.86f-3.0f)*fz);
+        glUniform2f(glGetUniformLocation(yargEffect_,"uFadeRange"),
+                    fadeStart,fadeEnd);
+        glUniform3f(glGetUniformLocation(yargEffect_,"uEmission"),
+                    emission[0]*fieldTint_[0],emission[1]*fieldTint_[1],
+                    emission[2]*fieldTint_[2]);
+        glUniform1f(glGetUniformLocation(yargEffect_,"uVisibility"),visibility);
+        glUniform1f(glGetUniformLocation(yargEffect_,"uSweepTime"),sweepTime);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,texture);
+        glUniform1i(glGetUniformLocation(yargEffect_,"uTex"),0);
+        glBindVertexArray(vao_);
+        glBindBuffer(GL_ARRAY_BUFFER,vbo_);
+        glBufferData(GL_ARRAY_BUFFER,GLsizeiptr(v_.size()*sizeof(ch::Vtx)),
+                     v_.data(),GL_STREAM_DRAW);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glDrawArrays(GL_TRIANGLES,0,GLsizei(v_.size()));
+        glDepthMask(GL_TRUE);
+        glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+        v_.clear();
+    };
+    auto beginMoonMeshPass = [&]() {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glEnable(GL_CULL_FACE);
+        // Moon's source OBJ is CCW; the projection's X reflection flips it.
+        glCullFace(GL_FRONT);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    };
+    auto endMoonMeshPass = [&]() {
+        glDisable(GL_CULL_FACE);
+        glDepthMask(GL_FALSE);
+    };
+    auto drawMoonOpaque = [&](const EngineGpu& mesh, const Mat4& model, int kind,
+                              const float* color, float a, bool open) {
+        beginMoonMeshPass();
+        glDepthMask(GL_TRUE);
+        if (kind >= 14 && kind <= 17) {
+            for (int material = 0; material < 4; ++material) {
+                if (kind == 16 && material == 3) continue;
+                drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,material);
+            }
+        } else if (open) {
+            for (int material = 0; material < 4; ++material)
+                drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,material);
+        } else if (kind == 10) {
+            drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,2);
+        } else {
+            drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,1);
+            drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,2);
+        }
+        endMoonMeshPass();
+    };
+    auto drawMoonTransparent = [&](const EngineGpu& mesh, const Mat4& model,
+                                   int kind, const float* color, float a,
+                                   bool open) {
+        if (kind >= 14 && kind <= 17) {
+            beginMoonMeshPass();
+            glDepthMask(GL_FALSE);
+            if (kind == 16)
+                drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,3);
+            drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,4);
+            endMoonMeshPass();
+            return;
+        }
+        if (open) return;
+        beginMoonMeshPass();
+        glDepthMask(GL_FALSE);
+        if (kind == 10) {
+            drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,0);
+            drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,1);
+        } else {
+            drawEngineMesh(mesh,camera,model,kind,color,a,0,0,0,0,0);
+        }
+        endMoonMeshPass();
+    };
+
+    std::vector<BeatLine> engineBeatLines;
+    if (style == 1 || style == 2) {
+        const bool moonHasAudio = style == 1 && o.audioDuration > 0.0;
+        int lastTick = moonHasAudio
+                     ? std::max(0,int(lrint(chart.secToBeat(o.audioDuration) *
+                                           chart.resolution)))
+                     : style == 1 ? chart.resolution * 16 : -1;
+        for (const Note& note : chart.notes) {
+            int endTick = note.tick;
+            for (double sustain : note.sustain)
+                endTick = std::max(endTick,
+                                  note.tick + int(lrint(sustain * chart.resolution)));
+            endTick = std::max(endTick,
+                               note.tick + int(lrint(note.openSustain * chart.resolution)));
+            if (!moonHasAudio)
+                lastTick = std::max(lastTick,endTick +
+                                    (style == 1 ? chart.resolution * 4 : 0));
+        }
+        for (size_t tsi = 0; tsi < chart.timesigs.size(); ++tsi) {
+            const TimeSig& ts = chart.timesigs[tsi];
+            const int regionEnd = tsi + 1 < chart.timesigs.size()
+                                ? chart.timesigs[tsi + 1].tick : lastTick + 1;
+            const int beatGap = chart.resolution * 4 / ts.den;
+            const int measureGap = beatGap * ts.num;
+            if (beatGap <= 0 || measureGap <= 0) continue;
+            if (style == 1) {
+                for (int measure = ts.tick; measure < regionEnd;
+                     measure += measureGap) {
+                    engineBeatLines.push_back({chart.tickToSec(measure), 0});
+                    for (int b = 1; b < ts.num; ++b) {
+                        const int tick = measure + b * beatGap;
+                        if (tick < regionEnd)
+                            engineBeatLines.push_back({chart.tickToSec(tick), 1});
+                    }
+                    for (int b = 0; b < ts.num; ++b) {
+                        const int tick = measure + b * beatGap + beatGap / 2;
+                        if (tick < regionEnd)
+                            engineBeatLines.push_back({chart.tickToSec(tick), 2});
+                    }
+                }
+            } else {
+                const int strongRate = ts.den <= 4 ? 1 : ts.den / 4;
+                int count = 0;
+                for (int tick = ts.tick; tick < regionEnd; tick += beatGap) {
+                    const int inMeasure = count % ts.num;
+                    int lineStyle = 2;
+                    if (ts.num == 1) {
+                        lineStyle = count == 0 ? 0
+                                  : count % strongRate == 0 ? 1 : 2;
+                    } else if (inMeasure == 0) {
+                        lineStyle = 0;
+                    } else if (ts.den <= 4) {
+                        lineStyle = 1;
+                    } else if (inMeasure % strongRate == 0) {
+                        lineStyle = inMeasure == ts.num - 1 ? 2 : 1;
+                    }
+                    engineBeatLines.push_back({chart.tickToSec(tick), lineStyle});
+                    ++count;
+                }
+            }
+        }
+        std::sort(engineBeatLines.begin(), engineBeatLines.end(),
+                  [](const BeatLine& a, const BeatLine& b) {
+                      return a.sec < b.sec;
+                  });
+    }
+
+    struct MoonGemDraw {
+        const EngineGpu* mesh;
+        Mat4 model;
+        int kind;
+        const float* color;
+        float alpha;
+        bool open;
+    };
+    std::vector<MoonGemDraw> moonGems;
+    if (style == 1) {
+        for (int i = int(chart.notes.size()) - 1; i >= 0; --i) {
+            const Note& note = chart.notes[i];
+            const double hitSec = chart.beatToSec(note.beat);
+            if (!o.noBot && songTime >= hitSec) continue;
+            const bool starPower = chart.phraseAt(PhraseType::StarPower,
+                                                   note.tick) != nullptr;
+
+            if (note.open) {
+                const float in = modYOffset(hitSec,2);
+                const float pos = scrollOffset(hitSec,2);
+                if (pos >= -8.47f && pos <= moonVisibleEnd) {
+                    const float visible = fmaxf(GetAlpha(mods,in,songTime),
+                                                GetGlow(mods,in,songTime));
+                    if (visible > 0.0f) {
+                        const float x = modX(2,in);
+                        const float pz = GetYPosBump(mods,2,in,float(beat),bpm) /
+                                         64.0f;
+                        const Mat4 model = mat_mul(
+                            engineTranslate(x,pos,pz),
+                            mat_mul(engineRotateX(moonPitch(x,pos,pz)),
+                                    mat_mul(noteRotation(note,in),
+                                            engineScale(0.7f,0.7f,0.7f))));
+                        const NoteType openType = note.tap
+                                                ? NoteType::Hopo
+                                                : note.openType;
+                        const int kind = starPower
+                                       ? (openType == NoteType::Strum ? 18 : 19)
+                                       : (openType == NoteType::Hopo ? 13 : 11);
+                        moonGems.push_back({&moonOpen_,model,kind,colors[5],
+                                            alpha*visible,true});
+                    }
+                }
+            }
+
+            for (int lane = 0; lane < 5; ++lane) {
+                if (!(note.frets & (1 << lane))) continue;
+                const float in = modYOffset(hitSec,lane);
+                const float pos = scrollOffset(hitSec,lane);
+                if (pos < -8.47f || pos > moonVisibleEnd) continue;
+                const float visible = fmaxf(GetAlpha(mods,in,songTime),
+                                            GetGlow(mods,in,songTime));
+                if (visible <= 0.0f) continue;
+                const float x = modX(lane,in);
+                const float pz = GetYPosBump(mods,lane,in,float(beat),bpm) / 64.0f;
+                const float noteZoom = GetZoom(mods,lane);
+                const bool tap = note.type == NoteType::Tap;
+                const int kind = starPower
+                               ? (tap ? 16
+                                  : note.type == NoteType::Hopo ? 15 : 14)
+                               : (tap ? 10
+                                  : note.type == NoteType::Hopo ? 9 : 8);
+                const float* color = tap ? moonTapColors[lane]
+                                         : moonNoteColors[lane];
+                const float noteScale = starPower ? 0.6f : 0.45f;
+                const Mat4 model = mat_mul(
+                    engineTranslate(x,pos,pz),
+                    mat_mul(engineRotateX(moonPitch(x,pos,pz)),
+                            mat_mul(noteRotation(note,in),
+                                    engineScale(noteScale*noteZoom,
+                                                noteScale*noteZoom,
+                                                noteScale*noteZoom))));
+                moonGems.push_back({starPower ? &moonSp_ : &moonNote_,
+                                    model,kind,color,
+                                    alpha*visible,false});
+            }
+        }
+        for (const Phrase& phrase : chart.phrases) {
+            if (phrase.type != PhraseType::StarPower) continue;
+            const float pos = scrollOffset(chart.tickToSec(phrase.tick));
+            if (pos < -8.47f || pos > moonVisibleEnd) continue;
+            const Mat4 model = mat_mul(
+                engineTranslate(-3.0f,pos,0.0f),
+                mat_mul(engineRotateX(-90.0f),
+                        engineScale(0.6f,0.6f,0.6f)));
+            moonGems.push_back({&moonSp_,model,17,moonColors[5],alpha,false});
+        }
+    }
+
+    if (style == 2 && !o.noPost) {
+        struct AoDraw {
+            const EngineGpu* mesh;
+            Mat4 model;
+        };
+        std::vector<AoDraw> aoDraws;
+        aoDraws.reserve(chart.notes.size()*2+7);
+        if (!o.playfield && mods.hideboard == 0.0f) {
+            for (int side : {-1,1}) {
+                const float qx = side < 0 ? 0.00073294336f : 0.0f;
+                const float qy = side < 0 ? -0.99999976f : -1.0f;
+                const float qz = side < 0 ? -0.00000003556937f : 0.0f;
+                const float qw = side < 0 ? 0.0000029504597f : 0.0f;
+                aoDraws.push_back({&yargTrackTrim_,
+                    engineModel(side*1.015f,0.0f,7.74f,qx,qy,qz,qw,
+                                -side*0.02045422f,0.02045422f,10.86853f)});
+            }
+        }
+        for (int lane = 0; receptorAlpha > 0.0f && lane < 5; ++lane) {
+            const float in = modYOffset(songTime,lane);
+            const float pos = scrollOffset(songTime,lane);
+            const float bump = GetYPosBump(mods,lane,in,float(beat),bpm);
+            const Mat4 fretRoot = engineTranslate(
+                modX(lane,in),bump*laneStep/64.0f,-2.0f+pos);
+            const Mat4 fretParent = engineModel(
+                0.0f,-0.0057729f,-0.0025355f,
+                0.025898216f,0.0f,0.0f,0.9996646f,1.01f,1.2902225f,1.0f);
+            const Mat4 fretMesh = engineModel(
+                0.0f,0.0072f,0.0f,-0.0000021f,0.7098884f,0.7043143f,
+                0.0000020f,0.19734741f,0.10530957f,0.0801998f);
+            aoDraws.push_back({&yargFret_,
+                               mat_mul(fretRoot,mat_mul(fretParent,fretMesh))});
+        }
+        for (int i = int(chart.notes.size())-1; i >= 0; --i) {
+            const Note& note = chart.notes[i];
+            const double hitSec = chart.beatToSec(note.beat);
+            if (!o.noBot && songTime >= hitSec) continue;
+            if (note.open) {
+                const float in = modYOffset(hitSec,2);
+                const float pos = scrollOffset(hitSec,2);
+                if (pos >= -1.5f && pos <= 34.0f) {
+                    const float x = modX(2,in);
+                    const float bump = GetYPosBump(mods,2,in,float(beat),bpm);
+                    const bool hopo = note.tap ||
+                                      note.openType != NoteType::Strum;
+                    const Mat4 openModel = mat_mul(
+                        engineTranslate(x,0.032f+bump*laneStep/64.0f,
+                                        -2.0f+pos+(hopo ? 0.030f : 0.0315f)),
+                        mat_mul(noteRotation(note,in),
+                                engineScale(0.07593973f,0.087584f,0.05f)));
+                    aoDraws.push_back({&yargOpen_,openModel});
+                }
+            }
+            for (int lane = 0; lane < 5; ++lane) {
+                if (!(note.frets & (1 << lane))) continue;
+                const float in = modYOffset(hitSec,lane);
+                const float pos = scrollOffset(hitSec,lane);
+                if (pos < -1.5f || pos > 34.0f) continue;
+                const float x = modX(lane,in);
+                const float bump = GetYPosBump(mods,lane,in,float(beat),bpm);
+                const float noteZoom = GetZoom(mods,lane);
+                const bool hopo = note.type == NoteType::Hopo;
+                const bool tap = note.type == NoteType::Tap;
+                const EngineGpu* mesh = tap ? &yargTap_
+                                      : hopo ? &yargHopo_ : &yargNormal_;
+                const float sx = (tap||hopo ? 0.045f : 0.05f)*noteZoom;
+                const float sy = (tap||hopo ? 0.0325f : 0.0375f)*noteZoom;
+                const float sz = (tap||hopo ? 0.065f : 0.07f)*noteZoom;
+                const float py = (tap||hopo ? 0.073f : 0.0775f)+
+                                 bump*laneStep/64.0f;
+                const float pz = -2.0f+pos+(tap||hopo ? 0.0465f : 0.054f);
+                const Mat4 model = mat_mul(
+                    engineTranslate(x,py,pz),
+                    mat_mul(engineQuaternion(0,0.7071068f,0.7071068f,0),
+                            mat_mul(noteRotation(note,in),
+                                    engineScale(sx,sy,sz))));
+                aoDraws.push_back({mesh,model});
+            }
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER,yargNormalFbo_);
+        glViewport(0,0,yargW_,yargH_);
+        glClearColor(0,0,0,0);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        glUseProgram(yargNormalProg_);
+        glUniformMatrix4fv(glGetUniformLocation(yargNormalProg_,"uMVP"),1,
+                           GL_FALSE,camera.m);
+        glUniform1f(glGetUniformLocation(yargNormalProg_,"uCurve"),0.5f);
+        for (const AoDraw& draw : aoDraws) {
+            glUniformMatrix4fv(glGetUniformLocation(yargNormalProg_,"uModel"),1,
+                               GL_FALSE,draw.model.m);
+            const Mat4& model = draw.model;
+            const float determinant =
+                model.m[0]*(model.m[5]*model.m[10]-model.m[6]*model.m[9])-
+                model.m[4]*(model.m[1]*model.m[10]-model.m[2]*model.m[9])+
+                model.m[8]*(model.m[1]*model.m[6]-model.m[2]*model.m[5]);
+            glEnable(GL_CULL_FACE);
+            glCullFace(determinant < 0.0f ? GL_BACK : GL_FRONT);
+            glBindVertexArray(draw.mesh->vao);
+            glDrawArrays(GL_TRIANGLES,0,draw.mesh->count);
+        }
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glBindVertexArray(qvao_);
+
+        glBindFramebuffer(GL_FRAMEBUFFER,yargAoFbo_[0]);
+        glUseProgram(yargAoEstimate_);
+        glUniform1i(glGetUniformLocation(yargAoEstimate_,"uNormal"),0);
+        glUniform1i(glGetUniformLocation(yargAoEstimate_,"uDepth"),1);
+        glUniform2f(glGetUniformLocation(yargAoEstimate_,"uSize"),
+                    float(yargW_),float(yargH_));
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,yargNormalTex_);
+        glActiveTexture(GL_TEXTURE0+1);
+        glBindTexture(GL_TEXTURE_2D,yargAoDepth_);
+        glDrawArrays(GL_TRIANGLES,0,3);
+
+        for (int pass = 0; pass < 2; ++pass) {
+            glBindFramebuffer(GL_FRAMEBUFFER,yargAoFbo_[pass+1]);
+            glUseProgram(yargAoBlur_);
+            glUniform1i(glGetUniformLocation(yargAoBlur_,"uTex"),0);
+            glUniform2f(glGetUniformLocation(yargAoBlur_,"uTexel"),
+                        1.0f/float(yargW_),1.0f/float(yargH_));
+            glUniform2f(glGetUniformLocation(yargAoBlur_,"uDirection"),
+                        pass == 0 ? 1.0f : 0.0f,pass == 0 ? 0.0f : 1.0f);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D,yargAoTex_[pass]);
+            glDrawArrays(GL_TRIANGLES,0,3);
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER,yargAoFbo_[3]);
+        glUseProgram(yargAoFinal_);
+        glUniform1i(glGetUniformLocation(yargAoFinal_,"uTex"),0);
+        glUniform2f(glGetUniformLocation(yargAoFinal_,"uTexel"),
+                    1.0f/float(yargW_),1.0f/float(yargH_));
+        glBindTexture(GL_TEXTURE_2D,yargAoTex_[2]);
+        glDrawArrays(GL_TRIANGLES,0,3);
+        glActiveTexture(GL_TEXTURE0);
+        glBindFramebuffer(GL_FRAMEBUFFER,yargFbo_);
+        glViewport(0,0,yargW_,yargH_);
+    }
+
+    if (style == 1) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_FALSE);
+    } else {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_TRUE);
+    }
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+    const float white[3] = {1,1,1};
+    const float moonAmbient[3] = {0.212f,0.227f,0.259f};
+    std::vector<ch::Vtx> yargBeatLines;
+    std::vector<ch::Vtx> yargFrettedSustains;
+    std::vector<ch::Vtx> yargOpenSustains;
+    std::vector<ch::Vtx> moonGlowOccluders;
+    std::vector<ch::Vtx> moonGlowDepthBlockers;
+    float moonIndicatorDt[5] = {-1,-1,-1,-1,-1};
+    if (style == 1 && !o.noBot) {
+        for (int lane = 0; lane < 5; ++lane)
+            moonIndicatorDt[lane] = float(lastHit(lane,songTime));
+        for (const Note& note : chart.notes) {
+            const double hitSec = chart.beatToSec(note.beat);
+            if (hitSec > songTime) break;
+            if (note.open) {
+                const float dt = float(songTime-hitSec);
+                for (float& laneDt : moonIndicatorDt)
+                    if (laneDt < 0.0f || dt < laneDt) laneDt = dt;
+                if (note.openSustain > 0.0) {
+                    const double endSec = chart.beatToSec(
+                        note.beat+note.openSustain);
+                    if (songTime < endSec)
+                        for (float& laneDt : moonIndicatorDt) laneDt = 0.0f;
+                }
+            }
+            for (int lane = 0; lane < 5; ++lane) {
+                if (!(note.frets & (1 << lane)) ||
+                    note.sustain[lane] <= 0.0) continue;
+                const double endSec = chart.beatToSec(
+                    note.beat+note.sustain[lane]);
+                if (songTime < endSec) moonIndicatorDt[lane] = 0.0f;
+            }
+        }
+    }
+    if (!o.playfield && mods.hideboard == 0.0f) {
+        if (style == 1) {
+            sceneSetup();
+            quadXY(-2.5f,-1.4f,2.5f,moonBoardEnd,0.01f,0,0,1,4,
+                   moonAmbient,alpha);
+            moonGlowDepthBlockers.insert(moonGlowDepthBlockers.end(),
+                                         v_.begin(),v_.end());
+            drawLayer(texMoonHighway_.id, ch::BLEND_NECK);
+        } else {
+            for (int side : {-1, 1}) {
+                const float trimQx = side < 0 ? 0.00073294336f : 0.0f;
+                const float trimQy = side < 0 ? -0.99999976f : -1.0f;
+                const float trimQz = side < 0 ? -0.00000003556937f : 0.0f;
+                const float trimQw = side < 0 ? 0.0000029504597f : 0.0f;
+                const Mat4 trim = engineModel(side * 1.015f,0.0f,7.74f,
+                                               trimQx,trimQy,trimQz,trimQw,
+                                               -side * 0.02045422f,
+                                               0.02045422f,10.86853f);
+                drawEngineMesh(yargTrackTrim_, camera, trim, 7, white, alpha,
+                               texYargTrackTrim_.id);
+            }
+        }
+
+        sceneSetup();
+        const std::vector<BeatLine>& beatLines = engineBeatLines;
+        for (const BeatLine& line : beatLines) {
+            const float pos = scrollOffset(line.sec);
+            if (style == 1) {
+                if (pos < -8.47f || pos > moonVisibleEnd) continue;
+                const float h = line.style == 0 ? 0.08f : 0.04f;
+                moonBillboard(pos,5.0f,h,white,alpha);
+                moonGlowOccluders.insert(moonGlowOccluders.end(),
+                                         v_.begin(),v_.end());
+                GLuint tex = line.style == 0 ? texMoonMeasure_.id
+                           : line.style == 2 ? texMoonBeatWeak_.id
+                                             : texMoonBeat_.id;
+                drawLayer(tex, ch::BLEND_SPRITE);
+            } else {
+                const float z = -2.0f + pos;
+                if (z <= -3.0f || z > 32.0f) continue;
+                const float thickness = line.style == 0 ? 0.07f
+                                      : line.style == 2 ? 0.03f : 0.05f;
+                const float lineAlpha = line.style == 0 ? 0.6f
+                                      : line.style == 2 ? 0.3f : 0.4f;
+                ch::quadFlat(v_,-1.0f,z-thickness*0.5f,
+                             1.0f,z+thickness*0.5f,0.002f,
+                             0,0,1,1,white[0],white[1],white[2],
+                             alpha*lineAlpha);
+            }
+        }
+        if (style == 2) yargBeatLines = std::move(v_);
+        if (style == 1) {
+            sceneSetup();
+            quadXY(-2.5f,-1.4f,-2.45f,moonBoardEnd,0.0f,0,0,1,16,white,alpha);
+            quadXY(2.45f,-1.4f,2.5f,moonBoardEnd,0.0f,0,0,1,16,white,alpha);
+            moonGlowOccluders.insert(moonGlowOccluders.end(),
+                                     v_.begin(),v_.end());
+            drawLayer(texMoonRail_.id, ch::BLEND_SPRITE);
+        }
+    }
+
+    if (style == 1) {
+        sceneSetup();
+        const float tailColor[3] = {0.0f,0.91724133f,1.0f};
+        for (const Phrase& phrase : chart.phrases) {
+            if (phrase.type != PhraseType::StarPower || phrase.length <= 0)
+                continue;
+            const float start = scrollOffset(chart.tickToSec(phrase.tick));
+            const float end = scrollOffset(chart.tickToSec(phrase.tick + phrase.length));
+            if (end < -8.47f || start > moonVisibleEnd) continue;
+            quadXY(-3.5f,std::max(start,-8.47f),-2.5f,
+                   std::min(end,moonVisibleEnd),0.0f,0,0,1,1,
+                   tailColor,alpha);
+        }
+        moonGlowOccluders.insert(moonGlowOccluders.end(),v_.begin(),v_.end());
+        drawLayer(texMoonSpTail_.id,ch::BLEND_SPRITE);
+    }
+
+    if (style == 1) {
+        for (const MoonGemDraw& gem : moonGems)
+            drawMoonOpaque(*gem.mesh,gem.model,gem.kind,gem.color,
+                           gem.alpha,gem.open);
+
+        sceneSetup();
+        for (int lane = 0; lane < 5; ++lane) {
+            if (receptorAlpha <= 0.0f) continue;
+            const float dt = !o.noBot ? moonIndicatorDt[lane] : -1.0f;
+            if (dt >= 0.0f && dt < 0.2f / 2.2f) continue;
+            const float in = modYOffset(songTime,lane);
+            const float pos = scrollOffset(songTime,lane);
+            const float bump = GetYPosBump(mods,lane,in,float(beat),bpm)/64.0f;
+            moonFretQuad(modX(lane,in),pos,101.0f/120.0f,101.0f/120.0f,
+                         bump,colors[lane],receptorAlpha);
+        }
+        moonGlowOccluders.insert(moonGlowOccluders.end(),v_.begin(),v_.end());
+        drawLayer(texMoonStrike_.id, ch::BLEND_SPRITE);
+    }
+
+    // Sustain ribbons use each source renderer's own highway plane and art.
+    std::vector<ch::Vtx> moonFrettedSustains;
+    sceneSetup();
+    for (int i = int(chart.notes.size()) - 1; i >= 0; --i) {
+        const Note& note = chart.notes[i];
+        const double hitSec = chart.beatToSec(note.beat);
+        const bool starPower = style == 2 &&
+            chart.phraseAt(PhraseType::StarPower,note.tick) != nullptr;
+        for (int lane = 0; lane < 5; ++lane) {
+            if (!(note.frets & (1 << lane)) || note.sustain[lane] <= 0.0) continue;
+            const double endSec = chart.beatToSec(note.beat + note.sustain[lane]);
+            appendEngineSustain(hitSec,endSec,lane,
+                                style == 1 ? 0.5f : 0.4f,4,
+                                style == 1 ? moonSustainColors[lane]
+                                           : starPower ? white : colors[lane],
+                                alpha);
+        }
+    }
+    if (style == 1) {
+        moonGlowOccluders.insert(moonGlowOccluders.end(),v_.begin(),v_.end());
+        moonFrettedSustains = std::move(v_);
+    } else {
+        yargFrettedSustains = std::move(v_);
+    }
+
+    sceneSetup();
+    for (int i = int(chart.notes.size()) - 1; i >= 0; --i) {
+        const Note& note = chart.notes[i];
+        if (!note.open || note.openSustain <= 0.0) continue;
+        const bool starPower = style == 2 &&
+            chart.phraseAt(PhraseType::StarPower,note.tick) != nullptr;
+        const double hitSec = chart.beatToSec(note.beat);
+        const double endSec = chart.beatToSec(note.beat + note.openSustain);
+        appendEngineSustain(hitSec,endSec,2,
+                            style == 1 ? 2.0f : 1.0f,16,
+                            style == 1 ? moonOpenSustain
+                                       : starPower ? white : yargColors[5],
+                            alpha);
+    }
+    if (style == 1) {
+        moonGlowOccluders.insert(moonGlowOccluders.end(),v_.begin(),v_.end());
+        drawLayer(texMoonSustainOpen_.id,ch::BLEND_SPRITE);
+    } else {
+        yargOpenSustains = std::move(v_);
+    }
+    if (style == 1) {
+        v_ = std::move(moonFrettedSustains);
+        drawLayer(texMoonSustainFretted_.id,ch::BLEND_SPRITE);
+    }
+
+    // YARG's rectangular fret hierarchy is a pair of nested source transforms.
+    if (style != 1) {
+        bool fretHeld[5] = {};
+        if (!o.noBot) {
+            for (const Note& note : chart.notes) {
+                const double hitSec = chart.beatToSec(note.beat);
+                for (int lane = 0; lane < 5; ++lane) {
+                    if (!(note.frets & (1 << lane)) ||
+                        note.sustain[lane] <= 0.0) continue;
+                    const double endSec = chart.beatToSec(
+                        note.beat+note.sustain[lane]);
+                    if (songTime >= hitSec && songTime < endSec)
+                        fretHeld[lane] = true;
+                }
+            }
+            for (int lane = 0; lane < 5; ++lane) {
+                const float dt = float(lastHit(lane,songTime));
+                fretHeld[lane] = fretHeld[lane] ||
+                                 (dt >= 0.0f && dt < 1.0f/60.0f);
+            }
+        }
+        for (int lane = 0; lane < 5; ++lane) {
+            if (receptorAlpha <= 0.0f) continue;
+            const float in = modYOffset(songTime,lane);
+            const float pos = scrollOffset(songTime,lane);
+            const float bump = GetYPosBump(mods,lane,in,float(beat),bpm);
+            const Mat4 fretRoot = engineTranslate(
+                modX(lane,in),bump*laneStep/64.0f,-2.0f+pos);
+            const Mat4 fretParent = engineModel(0.0f,-0.0057729f,-0.0025355f,
+                                                 0.025898216f,0.0f,0.0f,
+                                                 0.9996646f,1.01f,1.2902225f,1.0f);
+            const Mat4 fretMesh = engineModel(0.0f,0.0072f,0.0f,
+                                               -0.0000021f,0.7098884f,0.7043143f,
+                                               0.0000020f,0.19734741f,
+                                               0.10530957f,0.0801998f);
+            const Mat4 fret = mat_mul(fretRoot,mat_mul(fretParent,fretMesh));
+            drawEngineMesh(yargFret_,camera,fret,5,colors[lane],receptorAlpha,
+                           texYargFret_.id,texYargFretShine_.id,0,0.0f,0);
+            drawEngineMesh(yargFret_,camera,fret,5,colors[lane],receptorAlpha,
+                           texYargFret_.id,texYargFretShine_.id,0,0.0f,1,
+                           fretHeld[lane] ? 1.0f : 0.0f);
+            drawEngineMesh(yargFret_,camera,fret,5,colors[lane],receptorAlpha,
+                           texYargFret_.id,texYargFretShine_.id,0,0.0f,2);
+        }
+    }
+
+    if (style != 1) {
+        for (int i = int(chart.notes.size()) - 1; i >= 0; --i) {
+            const Note& note = chart.notes[i];
+            const double hitSec = chart.beatToSec(note.beat);
+            if (!o.noBot && songTime >= hitSec) continue;
+            const bool starPower = chart.phraseAt(PhraseType::StarPower,
+                                                   note.tick) != nullptr;
+
+            if (note.open) {
+                const float in = modYOffset(hitSec,2);
+                const float pos = scrollOffset(hitSec,2);
+                if (pos >= -1.5f && pos <= 34.0f) {
+                    float fade = fminf(1.0f,fmaxf(0.0f,(34.0f-pos)/5.0f));
+                    fade *= fmaxf(GetAlpha(mods,in,songTime),
+                                  GetGlow(mods,in,songTime));
+                    if (fade > 0.0f) {
+                        const float x = modX(2,in);
+                        const float bump = GetYPosBump(mods,2,in,float(beat),bpm);
+                        const bool openHopo = note.tap ||
+                                              note.openType != NoteType::Strum;
+                        const Mat4 model = mat_mul(
+                            engineTranslate(x,0.032f+bump*laneStep/64.0f,
+                                            -2.0f+pos+
+                                            (openHopo ? 0.030f : 0.0315f)),
+                            mat_mul(noteRotation(note,in),
+                                    engineScale(0.07593973f,0.087584f,0.05f)));
+                        drawEngineMesh(yargOpen_,camera,model,
+                                       openHopo ? 12 : 4,
+                                       starPower ? white : colors[5],alpha*fade,
+                                       texYargOpenNote_.id,texYargOpenHopo_.id,
+                                       0,0.0f,-1,starPower ? 1.0f : 0.0f);
+                    }
+                }
+            }
+
+            for (int lane = 0; lane < 5; ++lane) {
+                if (!(note.frets & (1 << lane))) continue;
+                const float in = modYOffset(hitSec,lane);
+                const float pos = scrollOffset(hitSec,lane);
+                if (pos < -1.5f || pos > 34.0f) continue;
+                float fade = fminf(1.0f,fmaxf(0.0f,(34.0f-pos)/5.0f));
+                fade *= fmaxf(GetAlpha(mods,in,songTime),
+                              GetGlow(mods,in,songTime));
+                if (fade <= 0.0f) continue;
+                const float x = modX(lane,in);
+                const float bump = GetYPosBump(mods,lane,in,float(beat),bpm);
+                const float noteZoom = GetZoom(mods,lane);
+                const bool hopo = note.type == NoteType::Hopo;
+                const bool tap = note.type == NoteType::Tap;
+                const EngineGpu& mesh = tap ? yargTap_ : (hopo ? yargHopo_ : yargNormal_);
+                const int kind = tap ? 3 : (hopo ? 2 : 1);
+                const float sx = (tap || hopo ? 0.045f : 0.05f) * noteZoom;
+                const float sy = (tap || hopo ? 0.0325f : 0.0375f) * noteZoom;
+                const float sz = (tap || hopo ? 0.065f : 0.07f) * noteZoom;
+                const float py = (tap || hopo ? 0.073f : 0.0775f) +
+                                 bump*laneStep/64.0f;
+                const float pz = -2.0f+pos+(tap||hopo ? 0.0465f : 0.054f);
+                const Mat4 model = mat_mul(
+                    engineTranslate(x,py,pz),
+                    mat_mul(engineQuaternion(0,0.7071068f,0.7071068f,0),
+                            mat_mul(noteRotation(note,in),
+                                    engineScale(sx,sy,sz))));
+                unsigned randomState = unsigned(note.tick)*747796405u ^
+                                       unsigned(lane+1)*2891336453u;
+                if (randomState == 0) randomState = 1;
+                float noteRandom[3] = {
+                    yargRandomSigned(randomState),
+                    yargRandomSigned(randomState),
+                    yargRandomSigned(randomState)
+                };
+                drawEngineMesh(mesh,camera,model,kind,
+                               starPower ? white : colors[lane],alpha*fade,
+                               texYargNote_.id,texYargNoteShine_.id,
+                               texYargNoteShader_.id,0.0f,-1,
+                               starPower ? 1.0f : 0.0f,
+                               noteRandom,songTime);
+            }
+        }
+    }
+
+    if (style == 2) {
+        if (!o.playfield && mods.hideboard == 0.0f) {
+            const Mat4 track = engineModel(0.0f,-0.001f,15.0f,
+                                           -0.000002f,0.7071068f,0.7071068f,
+                                           0.000002f,1.01f,6.0f,1.0f);
+            glDepthMask(GL_FALSE);
+            glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE,GL_ONE,GL_ONE);
+            drawEngineMesh(yargTrack_,camera,track,6,white,alpha,
+                           texYargTrackFade_.id,texYargTrackSmall_.id,
+                           texYargTrackSide_.id,
+                           scrollNow*noteSpeed*0.15f);
+            glDepthMask(GL_TRUE);
+            glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+
+            struct SoloDraw {
+                double start = 0.0, end = 0.0;
+                bool startCap = true, endCap = true;
+            };
+            std::vector<SoloDraw> solos;
+            for (const Phrase& phrase : chart.phrases) {
+                if (phrase.type != PhraseType::Solo) continue;
+                solos.push_back({chart.tickToSec(phrase.tick),
+                                 chart.tickToSec(phrase.tick+phrase.length),
+                                 true,true});
+            }
+            for (size_t i = 0; i+1 < solos.size(); ++i) {
+                SoloDraw& current = solos[i];
+                SoloDraw& next = solos[i+1];
+                if (current.end == next.start) {
+                    current.endCap = false;
+                    next.startCap = false;
+                } else {
+                    const float visualSpeed = noteSpeed*0.6f;
+                    const int caps = int(current.endCap)+int(next.startCap);
+                    const double minGap = visualSpeed > 0.0f
+                                        ? 0.5*double(caps)/visualSpeed : 0.0;
+                    if (next.start-current.end < minGap) {
+                        const double middle = (current.end+next.start)*0.5;
+                        current.end = middle;
+                        next.start = middle;
+                        current.endCap = false;
+                        next.startCap = false;
+                    }
+                }
+            }
+
+            const float soloTrackColor[3] = {
+                0.0f,0.29803917f*fieldTint_[1],0.47450978f*fieldTint_[2]
+            };
+            const float soloRailColor[3] = {
+                0.0f,0.29803923f*fieldTint_[1],0.47450978f*fieldTint_[2]
+            };
+            const float soloEmission[3] = {0.0f,0.11372549f,0.4392157f};
+            auto soloBounds = [&](const SoloDraw& solo) {
+                return std::pair<float,float>{
+                    -2.0f+scrollOffset(solo.start),
+                    -2.0f+scrollOffset(solo.end)
+                };
+            };
+
+            sceneSetup();
+            for (const SoloDraw& solo : solos) {
+                const auto [z0,z1] = soloBounds(solo);
+                quadXZ(-0.9915f,z0,0.9915f,z1,0.019f,
+                       0,0,1,1,soloTrackColor,0.5019608f);
+            }
+            drawYargEffect(texYargSoloTrack_.id,soloEmission,1.0f,-1.0f);
+
+            sceneSetup();
+            for (const SoloDraw& solo : solos) {
+                const auto [z0,z1] = soloBounds(solo);
+                quadXZ(-1.07082f,z0,-1.019262f,z1,0.0184f,
+                       0,0,1,1,soloRailColor,1.0f);
+                quadXZ(1.019262f,z0,1.07082f,z1,0.0184f,
+                       0,0,1,1,soloRailColor,1.0f);
+            }
+            drawYargEffect(texYargSoloRail_.id,soloEmission,1.0f,-1.0f);
+
+            sceneSetup();
+            for (const SoloDraw& solo : solos) {
+                const auto [z0,z1] = soloBounds(solo);
+                if (solo.startCap)
+                    quadXZ(-0.9915f,z0-0.5f,0.9915f,z0,0.019f,
+                           0,1,1,0,soloTrackColor,0.5019608f);
+                if (solo.endCap)
+                    quadXZ(-0.9915f,z1,0.9915f,z1+0.5f,0.019f,
+                           1,0,0,1,soloTrackColor,0.5019608f);
+            }
+            drawYargEffect(texYargSoloTransitionTrack_.id,soloEmission,
+                           1.0f,-1.0f);
+
+            sceneSetup();
+            for (const SoloDraw& solo : solos) {
+                const auto [z0,z1] = soloBounds(solo);
+                if (solo.startCap)
+                    quadXZ(-1.07082f,z0-0.5f,-1.019262f,z0,0.0184f,
+                           0,1,1,0,soloRailColor,1.0f);
+                if (solo.endCap)
+                    quadXZ(-1.07082f,z1,-1.019262f,z1+0.5f,0.0184f,
+                           1,0,0,1,soloRailColor,1.0f);
+            }
+            drawYargEffect(texYargSoloTransitionRailLeft_.id,soloEmission,
+                           1.0f,-1.0f);
+
+            sceneSetup();
+            for (const SoloDraw& solo : solos) {
+                const auto [z0,z1] = soloBounds(solo);
+                if (solo.startCap)
+                    quadXZ(1.019262f,z0-0.5f,1.07082f,z0,0.0184f,
+                           0,1,1,0,soloRailColor,1.0f);
+                if (solo.endCap)
+                    quadXZ(1.019262f,z1,1.07082f,z1+0.5f,0.0184f,
+                           1,0,0,1,soloRailColor,1.0f);
+            }
+            drawYargEffect(texYargSoloTransitionRailRight_.id,soloEmission,
+                           1.0f,-1.0f);
+
+            if (!o.noBot) {
+                const float sweepTrackColor[3] = {
+                    fieldTint_[0],0.70932275f*fieldTint_[1],0.0f
+                };
+                const float sweepTrackEmission[3] = {0.5f,0.3529412f,0.0f};
+                const float sweepTrimColor[3] = {
+                    fieldTint_[0],0.70980394f*fieldTint_[1],0.0f
+                };
+                const float sweepTrimEmission[3] = {1.0f,0.70980394f,0.0f};
+                for (const Phrase& phrase : chart.phrases) {
+                    if (phrase.type != PhraseType::StarPower) continue;
+                    const Note* last = nullptr;
+                    const int phraseEnd = phrase.tick+phrase.length;
+                    for (const Note& note : chart.notes) {
+                        const bool inside = phrase.length == 0
+                                          ? note.tick == phrase.tick
+                                          : note.tick >= phrase.tick &&
+                                            note.tick < phraseEnd;
+                        if (inside) last = &note;
+                        if (note.tick >= phraseEnd && phrase.length > 0) break;
+                    }
+                    if (!last) continue;
+                    const float elapsed = songTime-float(chart.tickToSec(last->tick));
+                    if (elapsed < 0.0f || elapsed >= 1.0f) continue;
+
+                    sceneSetup();
+                    quadXZ(-0.9915f,-3.0f,0.9915f,3.0f,0.019f,
+                           0,0,1,1,sweepTrackColor,0.40784314f);
+                    drawYargEffect(texYargSoloTrack_.id,sweepTrackEmission,
+                                   1.0f,elapsed);
+
+                    sceneSetup();
+                    quadXZ(-1.0321515f,-3.0f,-0.9726615f,3.0f,0.019f,
+                           0,0,1,1,sweepTrimColor,1.0f);
+                    quadXZ(0.9726615f,-3.0f,1.0321515f,3.0f,0.019f,
+                           0,0,1,1,sweepTrimColor,1.0f);
+                    drawYargEffect(texYargSpTrim_.id,sweepTrimEmission,
+                                   1.0f,elapsed);
+                }
+            }
+        }
+        sceneSetup();
+        glDepthMask(GL_FALSE);
+        v_ = std::move(yargBeatLines);
+        drawLayer(texYargBeatline_.id,ch::BLEND_SPRITE);
+
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        v_ = std::move(yargOpenSustains);
+        drawLayer(texYargOpenSustain_.id,ch::BLEND_NECK);
+
+        std::vector<ch::Vtx> secondary = yargFrettedSustains;
+        v_ = std::move(yargFrettedSustains);
+        drawLayer(texYargSustain_.id,ch::BLEND_SPRITE);
+        v_ = std::move(secondary);
+        drawLayer(texYargSustainSecondary_.id,ch::BLEND_ADD);
+    }
+
+    if (style == 1) {
+        for (const MoonGemDraw& gem : moonGems)
+            drawMoonTransparent(*gem.mesh,gem.model,gem.kind,gem.color,
+                                gem.alpha,gem.open);
+    }
+
+    if (style == 1 && !o.noBot) {
+        sceneSetup();
+        for (int lane = 0; lane < 5; ++lane) {
+            if (receptorAlpha <= 0.0f) continue;
+            const float dt = moonIndicatorDt[lane];
+            if (dt < 0.0f || dt >= 0.2f / 2.2f) continue;
+            const float in = modYOffset(songTime,lane);
+            const float pos = scrollOffset(songTime,lane);
+            const float bump = GetYPosBump(mods,lane,in,float(beat),bpm)/64.0f;
+            moonFretQuad(modX(lane,in),pos,101.0f/120.0f,101.0f/120.0f,
+                         bump,colors[lane],receptorAlpha);
+        }
+        moonGlowOccluders.insert(moonGlowOccluders.end(),v_.begin(),v_.end());
+        drawLayer(texMoonStrike_.id, ch::BLEND_SPRITE);
+
+        sceneSetup();
+        for (int lane = 0; lane < 5; ++lane) {
+            if (receptorAlpha <= 0.0f) continue;
+            const float dt = moonIndicatorDt[lane];
+            if (dt < 0.0f || dt >= 0.2f / 2.2f) continue;
+            const float in = modYOffset(songTime,lane);
+            const float pos = scrollOffset(songTime,lane);
+            const float bump = GetYPosBump(mods,lane,in,float(beat),bpm)/64.0f;
+            moonFretQuad(modX(lane,in),pos,100.0f/120.0f,100.0f/120.0f,
+                         bump-0.2f+dt*2.2f,colors[lane],receptorAlpha);
+        }
+        moonGlowOccluders.insert(moonGlowOccluders.end(),v_.begin(),v_.end());
+        drawLayer(texMoonIndicator_.id, ch::BLEND_SPRITE);
+    }
+
+    // The source camera's selective glow renders directly at half its pixel
+    // rect. Opaque/MKGlow replacement passes write depth; Transparent passes
+    // are black maskers with ZWrite Off.
+    if (style == 1) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,moonSceneMsaaFbo_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER,moonSceneFbo_);
+        glBlitFramebuffer(0,0,moonSceneW_,moonSceneH_,
+                          0,0,moonSceneW_,moonSceneH_,
+                          GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        if (!o.noPost) {
+        const bool embedded = mvpOverride != nullptr;
+        const int glowDstX = embedded ? 0 : vpX+int(0.122f*float(vpW));
+        const int glowDstY = 0;
+        const int glowDstW = std::max(1,embedded ? engineTargetViewport[2]
+                                                : int(0.78f*float(vpW)));
+        const int glowDstH = std::max(1,embedded ? engineTargetViewport[3]
+                                                : int(0.98f*float(
+                                                      engineTargetViewport[3])));
+        const int blurW = std::max(1,glowDstW/2);
+        const int blurH = std::max(1,glowDstH/2);
+        if (blurW != moonGlowW_ || blurH != moonGlowH_) {
+            for (GLuint texture : {moonGlowTex_,moonBlurTex_[0],
+                                   moonBlurTex_[1]}) {
+                glBindTexture(GL_TEXTURE_2D,texture);
+                glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,blurW,blurH,0,
+                             GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+            }
+            glBindRenderbuffer(GL_RENDERBUFFER,moonGlowDepth_);
+            glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,
+                                  blurW,blurH);
+            moonGlowW_ = blurW;
+            moonGlowH_ = blurH;
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER,moonGlowFbo_);
+        glViewport(0,0,blurW,blurH);
+        glClearColor(0,0,0,0);
+        glDepthMask(GL_TRUE);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        if (!moonGlowDepthBlockers.empty()) {
+            glDisable(GL_BLEND);
+            glDisable(GL_CULL_FACE);
+            glUseProgram(moonOccluder_);
+            glUniformMatrix4fv(glGetUniformLocation(moonOccluder_,"uMVP"),1,
+                               GL_FALSE,glowCamera.m);
+            glUniform3f(glGetUniformLocation(moonOccluder_,"uOffset"),0,0,0);
+            glUniform1f(glGetUniformLocation(moonOccluder_,"uCurve"),0.0f);
+            glUniform4f(glGetUniformLocation(moonOccluder_,"uFadePlane"),0,0,0,0);
+            glUniform1f(glGetUniformLocation(moonOccluder_,"uAlpha"),0.0f);
+            glBindVertexArray(vao_);
+            glBindBuffer(GL_ARRAY_BUFFER,vbo_);
+            glBufferData(GL_ARRAY_BUFFER,
+                         GLsizeiptr(moonGlowDepthBlockers.size()*sizeof(ch::Vtx)),
+                         moonGlowDepthBlockers.data(),GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES,0,
+                         GLsizei(moonGlowDepthBlockers.size()));
+        }
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(engineGlow_);
+        glUniformMatrix4fv(glGetUniformLocation(engineGlow_,"uMVP"),1,GL_FALSE,
+                           glowCamera.m);
+        glUniform1f(glGetUniformLocation(engineGlow_,"uCurve"),0.0f);
+        glUniform4f(glGetUniformLocation(engineGlow_,"uFadePlane"),0,0,0,0);
+        auto materialPass = [](const MoonGemDraw& gem,int material) {
+            if (gem.kind >= 14 && gem.kind <= 17) {
+                if (gem.kind == 15 && material == 0) return 1;
+                if ((gem.kind == 16 && material >= 3) ||
+                    (gem.kind != 16 && material == 4))
+                    return 2;
+                return 0;
+            }
+            if ((gem.kind == 18 || gem.kind == 19) && material == 2)
+                return 1;
+            if (!gem.open &&
+                (material == 0 || (material == 1 && gem.kind == 10)))
+                return 2; // Transparent: black alpha one, no depth writes.
+            if (material == 2 && (gem.kind == 9 || gem.kind == 13))
+                return 1; // MKGlow: straight alpha and depth writes.
+            return 0;     // Opaque: transparent black and depth writes.
+        };
+        auto drawMaskMaterials = [&](int pass) {
+            glDepthMask(pass == 2 ? GL_FALSE : GL_TRUE);
+            if (pass == 0) {
+                glDisable(GL_BLEND);
+            } else {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+            }
+            for (const MoonGemDraw& gem : moonGems) {
+                const int materials = gem.kind >= 14 && gem.kind <= 17
+                                    ? 5 : gem.open ? 4 : 3;
+                glUniformMatrix4fv(glGetUniformLocation(engineGlow_,"uModel"),1,
+                                   GL_FALSE,gem.model.m);
+                for (int material = 0; material < materials; ++material) {
+                    if (materialPass(gem,material) != pass) continue;
+                    float power = 0.0f;
+                    float maskAlpha = pass == 0 ? 0.0f : 1.0f;
+                    float glowR = 1.0f, glowG = 1.0f, glowB = 1.0f;
+                    if (pass == 1) {
+                        if (gem.kind == 18 || gem.kind == 19) {
+                            power = gem.kind == 18 ? 1.3f : 3.04f;
+                            maskAlpha = 0.5f * gem.alpha * fieldTint_[3];
+                            glowR = 0.066176474f;
+                            glowG = 0.5749494f;
+                        } else {
+                            power = gem.open ? 0.91f : 0.8f;
+                            maskAlpha = (gem.open ? 0.5f : 1.0f) * gem.alpha *
+                                        fieldTint_[3];
+                        }
+                    }
+                    glUniform1i(glGetUniformLocation(engineGlow_,
+                                                     "uMaterialFilter"),material);
+                    glUniform1f(glGetUniformLocation(engineGlow_,"uGlowPower"),
+                                power);
+                    glUniform1f(glGetUniformLocation(engineGlow_,"uGlowAlpha"),
+                                maskAlpha);
+                    glUniform3f(glGetUniformLocation(engineGlow_,"uGlowColor"),
+                                glowR,glowG,glowB);
+                    glBindVertexArray(gem.mesh->vao);
+                    glDrawArrays(GL_TRIANGLES,0,gem.mesh->count);
+                }
+            }
+        };
+        drawMaskMaterials(0);
+        drawMaskMaterials(1);
+        drawMaskMaterials(2);
+
+        if (!moonGlowOccluders.empty()) {
+            glDepthMask(GL_FALSE);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_CULL_FACE);
+            glUseProgram(moonOccluder_);
+            glUniformMatrix4fv(glGetUniformLocation(moonOccluder_,"uMVP"),1,
+                               GL_FALSE,glowCamera.m);
+            glUniform3f(glGetUniformLocation(moonOccluder_,"uOffset"),0,0,0);
+            glUniform1f(glGetUniformLocation(moonOccluder_,"uAlpha"),1.0f);
+            glBindVertexArray(vao_);
+            glBindBuffer(GL_ARRAY_BUFFER,vbo_);
+            glBufferData(GL_ARRAY_BUFFER,
+                         GLsizeiptr(moonGlowOccluders.size()*sizeof(ch::Vtx)),
+                         moonGlowOccluders.data(),GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES,0,GLsizei(moonGlowOccluders.size()));
+        }
+
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glUseProgram(moonBlur_);
+        glUniform1i(glGetUniformLocation(moonBlur_,"uTex"),0);
+        glUniform1f(glGetUniformLocation(moonBlur_,"uAlpha"),1.0f);
+        glBindVertexArray(qvao_);
+        glUniform2f(glGetUniformLocation(moonBlur_,"uTexel"),
+                    1.0f/float(blurW),1.0f/float(blurH));
+        auto blurPass = [&](int dst, GLuint src, float shift) {
+            glBindFramebuffer(GL_FRAMEBUFFER,moonBlurFbo_[dst]);
+            glViewport(0,0,blurW,blurH);
+            glBindTexture(GL_TEXTURE_2D,src);
+            glUniform1f(glGetUniformLocation(moonBlur_,"uShift"),shift);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE,GL_ZERO);
+            glUniform2f(glGetUniformLocation(moonBlur_,"uDirection"),1,0);
+            glDrawArrays(GL_TRIANGLES,0,3);
+            glBlendFunc(GL_ONE,GL_ONE);
+            glUniform2f(glGetUniformLocation(moonBlur_,"uDirection"),0,1);
+            glDrawArrays(GL_TRIANGLES,0,3);
+        };
+        static const float shifts[] = {
+            0.35f,0.0f,0.21805f,0.6139f,1.176f,1.8158f
+        };
+        GLuint blurSource = moonGlowTex_;
+        int src = -1;
+        for (int i = 0; i < int(sizeof(shifts)/sizeof(shifts[0])); ++i) {
+            const int dst = i&1;
+            blurPass(dst,blurSource,shifts[i]);
+            blurSource = moonBlurTex_[dst];
+            src = dst;
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER,moonSceneFbo_);
+        glViewport(glowDstX,glowDstY,glowDstW,glowDstH);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE,GL_ONE);
+        glBindTexture(GL_TEXTURE_2D,moonBlurTex_[src]);
+        glUniform1f(glGetUniformLocation(moonBlur_,"uShift"),-1.0f);
+        glDrawArrays(GL_TRIANGLES,0,3);
+        glViewport(0,0,moonSceneW_,moonSceneH_);
+        }
+    }
+
+    if (moonIsolated) {
+        glBindFramebuffer(GL_FRAMEBUFFER,GLuint(engineTargetFbo));
+        glViewport(engineTargetViewport[0],engineTargetViewport[1],
+                   engineTargetViewport[2],engineTargetViewport[3]);
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(moonBlur_);
+        glUniform1i(glGetUniformLocation(moonBlur_,"uTex"),0);
+        glUniform1f(glGetUniformLocation(moonBlur_,"uShift"),-1.0f);
+        glUniform1f(glGetUniformLocation(moonBlur_,"uAlpha"),compositeAlpha);
+        glBindVertexArray(qvao_);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,moonSceneTex_);
+        glDrawArrays(GL_TRIANGLES,0,3);
+    }
+
+    if (yargLinear) {
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glBindVertexArray(qvao_);
+        glActiveTexture(GL_TEXTURE0);
+
+        if (!o.noPost) {
+        const int bloomW0 = std::max(1,yargW_ >> 1);
+        const int bloomH0 = std::max(1,yargH_ >> 1);
+        glBindFramebuffer(GL_FRAMEBUFFER,yargBloomDownFbo_[0]);
+        glViewport(0,0,bloomW0,bloomH0);
+        glUseProgram(yargBloomPrefilter_);
+        glUniform1i(glGetUniformLocation(yargBloomPrefilter_,"uTex"),0);
+        glBindTexture(GL_TEXTURE_2D,yargTex_);
+        glDrawArrays(GL_TRIANGLES,0,3);
+
+        for (int i = 1; i < yargBloomMips_; ++i) {
+            const int sourceW = std::max(1,yargW_ >> i);
+            const int sourceH = std::max(1,yargH_ >> i);
+            const int bloomW = std::max(1,yargW_ >> (i+1));
+            const int bloomH = std::max(1,yargH_ >> (i+1));
+
+            glBindFramebuffer(GL_FRAMEBUFFER,yargBloomUpFbo_[i]);
+            glViewport(0,0,bloomW,bloomH);
+            glUseProgram(yargBloomDownH_);
+            glUniform1i(glGetUniformLocation(yargBloomDownH_,"uTex"),0);
+            glUniform2f(glGetUniformLocation(yargBloomDownH_,"uTexel"),
+                        1.0f/float(sourceW),1.0f/float(sourceH));
+            glBindTexture(GL_TEXTURE_2D,yargBloomDownTex_[i-1]);
+            glDrawArrays(GL_TRIANGLES,0,3);
+
+            glBindFramebuffer(GL_FRAMEBUFFER,yargBloomDownFbo_[i]);
+            glUseProgram(yargBloomDownV_);
+            glUniform1i(glGetUniformLocation(yargBloomDownV_,"uTex"),0);
+            glUniform2f(glGetUniformLocation(yargBloomDownV_,"uTexel"),
+                        1.0f/float(bloomW),1.0f/float(bloomH));
+            glBindTexture(GL_TEXTURE_2D,yargBloomUpTex_[i]);
+            glDrawArrays(GL_TRIANGLES,0,3);
+        }
+
+        for (int i = yargBloomMips_-2; i >= 0; --i) {
+            const int bloomW = std::max(1,yargW_ >> (i+1));
+            const int bloomH = std::max(1,yargH_ >> (i+1));
+            glBindFramebuffer(GL_FRAMEBUFFER,yargBloomUpFbo_[i]);
+            glViewport(0,0,bloomW,bloomH);
+            glUseProgram(yargBloomUp_);
+            glUniform1i(glGetUniformLocation(yargBloomUp_,"uHigh"),0);
+            glUniform1i(glGetUniformLocation(yargBloomUp_,"uLow"),1);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D,yargBloomDownTex_[i]);
+            glActiveTexture(GL_TEXTURE0+1);
+            const GLuint low = i == yargBloomMips_-2
+                             ? yargBloomDownTex_[i+1]
+                             : yargBloomUpTex_[i+1];
+            glBindTexture(GL_TEXTURE_2D,low);
+            glDrawArrays(GL_TRIANGLES,0,3);
+        }
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER,GLuint(engineTargetFbo));
+        glViewport(engineTargetViewport[0],engineTargetViewport[1],
+                   engineTargetViewport[2],engineTargetViewport[3]);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+        glUseProgram(linearCompose_);
+        glUniform1i(glGetUniformLocation(linearCompose_,"uTex"),0);
+        glUniform1i(glGetUniformLocation(linearCompose_,"uBloom"),1);
+        glUniform1f(glGetUniformLocation(linearCompose_,"uAlpha"),compositeAlpha);
+        glUniform1f(glGetUniformLocation(linearCompose_,"uPost"),
+                    o.noPost ? 0.0f : 1.0f);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D,yargTex_);
+        glActiveTexture(GL_TEXTURE0+1);
+        glBindTexture(GL_TEXTURE_2D,yargBloomMips_ == 1
+                                   ? yargBloomDownTex_[0]
+                                   : yargBloomUpTex_[0]);
+        glDrawArrays(GL_TRIANGLES,0,3);
+    }
+
+    fieldTint_[3] = fieldAlpha;
+
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(prog_);
+    glUniform1f(glGetUniformLocation(prog_, "uCurve"),0.0f);
+    glUniform2f(glGetUniformLocation(prog_, "uFadeRange"),0.0f,0.0f);
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER,vbo_);
+    glActiveTexture(GL_TEXTURE0);
 }
 
 void Renderer::resize(int w, int h) {
@@ -468,13 +3431,45 @@ void Renderer::drawPiuLayer(GLuint tex, int blend) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(glGetUniformLocation(piu_, "uTex"), 0);
-    glUniform2f(glGetUniformLocation(piu_, "uVirt"),
-                logicalScreenWidth(W, H), 480.0f);
+    glUniformMatrix4fv(glGetUniformLocation(piu_, "uMVP"), 1, GL_FALSE,
+                       piuMvp_.m);
     glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(v_.size() * sizeof(ch::Vtx)),
                  v_.data(), GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, GLsizei(v_.size()));
     v_.clear();
     glUseProgram(prog_);
+}
+
+// Convert the absolute 480-high coordinates produced below into a Player's
+// local coordinates, then apply the PlayerOptions whole-field transform. The
+// outer caller supplies the Player's screen placement and actor transform, so
+// wag rotates around that actor's origin instead of the receptor row.
+static Mat4 piuFieldLocal(const Mods& mods, double beat, float centerX) {
+    const float tilt = -30.0f * mods.tilt * 3.14159265f / 180.0f;
+    const float wag = mods.wag * 21.0f * sinf(float(beat) * 3.14159265f) *
+                      3.14159265f / 180.0f;
+    float zoom = 1.0f - 0.5f * mods.mini;
+    if (mods.tilt > 0.0f)      zoom *= 1.0f - 0.1f * mods.tilt;
+    else if (mods.tilt < 0.0f) zoom *= 1.0f + 0.1f * mods.tilt;
+
+    const float cx = cosf(tilt), sx = sinf(tilt);
+    const float cz = cosf(wag),  sz = sinf(wag);
+    Mat4 effect{};                                  // Rz * Rx, y-down space
+    effect.m[0]  = zoom *  cz;
+    effect.m[1]  = zoom *  sz * cx;
+    effect.m[2]  = zoom * -sz * sx;
+    effect.m[4]  = zoom * -sz;
+    effect.m[5]  = zoom *  cz * cx;
+    effect.m[6]  = zoom * -cz * sx;
+    effect.m[9]  = zoom *  sx;
+    effect.m[10] = zoom *  cx;
+    effect.m[15] = 1.0f;
+
+    Mat4 local{};
+    local.m[0] = local.m[5] = local.m[10] = local.m[15] = 1.0f;
+    local.m[12] = -centerX;
+    local.m[13] = -240.0f;
+    return mat_mul(effect, local);
 }
 
 // The PIU playfield.
@@ -491,7 +3486,8 @@ void Renderer::drawPiuLayer(GLuint tex, int blend) {
 // back, so the mods land the way ITG intends rather than being translated twice.
 void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
                        const Mods& mods, float songTime, float scrollNow,
-                       float noteSpeed, float bpm) {
+                       float noteSpeed, float bpm, const Mat4& mvp) {
+    piuMvp_ = mvp;
     // The receptor row: SCREEN_CENTER_Y + GRAY_ARROWS_Y_STANDARD, which
     // OpenITG's theme puts at -125 (metrics.ini:2942) -- above centre, with
     // notes rising into it. UPSCROLL, because StepMania spends the `reverse`
@@ -542,19 +3538,32 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
     float zoomRev = 1.0f - mods.mini * 0.5f;                  // ArrowEffects:609
     if (fabsf(zoomRev) < 0.01f) zoomRev = 0.01f;              // :613-614
     const float revBase = -SM_REV / zoomRev / 2.0f;
-    float revShift = nc::scale(mods.reverse, 0.0f, 1.0f, revBase, -revBase);
-    revShift = nc::scale(mods.centered, 0.0f, 1.0f, revShift, 0.0f);
+    auto reverseFor = [&](int lane) {
+        return ReversePercentForCol(mods,lane);
+    };
+    auto revScaleFor = [&](int lane) {
+        return nc::scale(reverseFor(lane),0.0f,1.0f,1.0f,-1.0f);
+    };
+    auto receptorYFor = [&](int lane) {
+        float shift = nc::scale(reverseFor(lane),0.0f,1.0f,
+                                revBase,-revBase);
+        shift = nc::scale(mods.centered,0.0f,1.0f,shift,0.0f);
+        const float target = PAD_Y+(shift-revBase);
+        return target-(1.0f-piuT)*(target+PANEL);
+    };
     // scale=+1 upscroll, -1 reversed (:621). Re-origined by -revBase so that
     // reverse 0 leaves the pad exactly at PAD_Y; `centered` then lands it on
     // SCREEN_CENTER_Y, 96 + 144, on its own.
-    const float revScale = nc::scale(mods.reverse, 0.0f, 1.0f, 1.0f, -1.0f);
-    const float padTarget = PAD_Y + (revShift - revBase);
-    const float RECEPTOR_Y = padTarget - (1.0f - piuT) * (padTarget + PANEL);
     // Screen y for a note at arrow-space offset `yPx`.
-    auto padY = [&](float yPx) { return RECEPTOR_Y + yPx * revScale * PSCALE; };
-    // Under reverse the pump skin flips the ribbon art top-to-bottom
-    // (pump/defaultsm5 metrics.ini:20, FlipHoldBodyWhenReverse=1).
-    const bool flipHold = mods.reverse > 0.5f;
+    auto padY = [&](int lane,float yPx) {
+        return receptorYFor(lane)+yPx*revScaleFor(lane)*PSCALE;
+    };
+    // GetYPos adds these after reverse, so reverse changes scroll direction
+    // without reflecting tipsy, beaty or per-column movey themselves.
+    auto noteY = [&](int lane, float yPx) {
+        return padY(lane,yPx) +
+               GetYPosOffset(mods, lane, yPx, float(beat), bpm) * PSCALE;
+    };
 
     const bool hasStops = !chart.stops.empty();
     auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
@@ -609,7 +3618,7 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
         const bool mir = ch::PIU_MIRROR[lane];
         const float rx = CENTER_X + (nc::laneXPixels(lane) +
                          GetXPos(mods, lane, 0.0f, songTime, float(beat), bpm)) * PSCALE;
-        const float ry = padY(0.0f);
+        const float ry = noteY(lane, 0.0f);
         // PressCommand from UpLeft Receptor.lua: linear .05 zoom .9, then
         // linear .1 back to 1.
         float zoom = GetZoom(mods);
@@ -671,33 +3680,25 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
             }
         const bool hasSus = tLast > tHit;
         if (consumed && songTime >= tLast) continue;
-        const float yOff = ApplyYMods(mods, 0, yRaw, float(beat));
-
-        // ArrowEffects rotations. NO sign flip here: the CH path negates rotX
-        // and rotZ because its world is Y-UP, and this path is already in ITG's
-        // Y-DOWN screen space, which is what those formulas were written for.
-        const float rotZ = GetRotationZ(mods, float(n.beat), float(beat));
-        const float rotX = GetRotationX(mods, yOff);
-        const float rotY = GetRotationY(mods, yOff);
-        // roll/twirl tip the quad out of the screen plane; with no perspective
-        // to project through, they read as foreshortening. Same approximation
-        // the actor layer makes for rotationx/y.
-        const float fx = fabsf(cosf(rotY * 3.14159265f / 180.0f));
-        const float fy = fabsf(cosf(rotX * 3.14159265f / 180.0f));
-
-        const float baseAlpha = GetAlpha(mods, yOff, songTime);
-        const float baseGlow  = GetGlow(mods, yOff, songTime);
-        // This early-out is keyed on the HEAD's offset, so it can only speak
-        // for a tap. A hold's body runs GetAlpha per segment and is visible at
-        // offsets the head is not -- under sudden, most of the ribbon.
-        if (!hasSus && baseAlpha <= 0.0f && baseGlow <= 0.0f) continue;
 
         for (int lane = 0; lane < 5; ++lane) {
             if (!(n.frets & (1 << lane))) continue;
             const int  art = ch::PIU_ART[lane];
             const bool mir = ch::PIU_MIRROR[lane];
+            const float yOff = ApplyYMods(mods,lane,yRaw,float(beat));
 
-            const float sy = padY(yOff);
+            // This path is already in ITG's Y-down screen space, so the
+            // ArrowEffects rotation signs are used directly.
+            const float rotZ = GetRotationZ(mods,float(n.beat),float(beat));
+            const float rotX = GetRotationX(mods,yOff);
+            const float rotY = GetRotationY(mods,yOff);
+            const float fx = fabsf(cosf(rotY*3.14159265f/180.0f));
+            const float fy = fabsf(cosf(rotX*3.14159265f/180.0f));
+            const float baseAlpha = GetAlpha(mods,yOff,songTime);
+            const float baseGlow = GetGlow(mods,yOff,songTime);
+            if (!hasSus && baseAlpha <= 0.0f && baseGlow <= 0.0f) continue;
+
+            const float sy = noteY(lane, yOff);
             // Off-screen head. Only fatal for a tap: a hold's head walks well
             // past the top of the frame while its ribbon is still crossing it,
             // and the body loop culls itself per segment anyway.
@@ -710,12 +3711,15 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
             // until tilt turns the field), so it is mapped to a small zoom:
             // nearer reads as bigger. A deviation, and a visible one is better
             // than a knob that silently does nothing.
-            const float zoomB = 1.0f + GetYPosBump(mods, lane, yOff, float(beat), bpm) / 512.0f;
+            const float zoomB = 1.0f +
+                GetZPos(mods, lane, yOff, float(beat), bpm) / 512.0f;
             const float hw = HALF * noteZoom * zoomB * fx;
             const float hh = HALF * noteZoom * zoomB * fy;
 
             // ---- the hold body, drawn BEFORE the head so the head caps it ---
             if (n.sustain[lane] > 0.0) {
+                const float laneRevScale = revScaleFor(lane);
+                const bool flipHold = reverseFor(lane) > 0.5f;
                 const double tEnd = chart.beatToSec(n.beat + n.sustain[lane]);
                 if (songTime < tEnd) {
                     const float zEnd = float(ssec(tEnd) - scrollNow) * noteSpeed;
@@ -734,9 +3738,11 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
                             const float y0 = yStart + span * float(k) / float(use);
                             const float y1 = yStart + span * float(k + 1) / float(use);
                             const float ym = 0.5f * (y0 + y1);
-                            const float my = ApplyYMods(mods, 0, ym, float(beat));
-                            const float sy0 = padY(ApplyYMods(mods, 0, y0, float(beat)));
-                            const float sy1 = padY(ApplyYMods(mods, 0, y1, float(beat)));
+                            const float my = ApplyYMods(mods, lane, ym, float(beat));
+                            const float sy0 = noteY(
+                                lane, ApplyYMods(mods, lane, y0, float(beat)));
+                            const float sy1 = noteY(
+                                lane, ApplyYMods(mods, lane, y1, float(beat)));
                             const float top = sy0 < sy1 ? sy0 : sy1;
                             const float bot = sy0 < sy1 ? sy1 : sy0;
                             if (bot < -PANEL || top > VIRT_H + PANEL) continue;
@@ -755,8 +3761,11 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
                             // are art with a direction, and downscroll runs
                             // them the other way. Without this the cap tapers
                             // toward the receptor instead of away from it.
+                            const float bodyZoom = 1.0f +
+                                GetZPos(mods, lane, my, float(beat), bpm) / 512.0f;
                             quad2(vBody[art], mx, 0.5f * (top + bot),
-                                  hw, 0.5f * (bot - top) + 0.5f, 0.0f,
+                                  HALF * noteZoom * bodyZoom * fx,
+                                  0.5f * (bot - top) + 0.5f, 0.0f,
                                   u0, flipHold ? vb : vt, u1, flipHold ? vt : vb,
                                   1,1,1, ha);
                         }
@@ -768,10 +3777,11 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
                     // the point: a cap that shrinks with the remaining hold is
                     // the squashed stub this replaces.
                     {
-                        const float myEnd = ApplyYMods(mods, 0, yEndRaw, float(beat));
-                        const float syT = padY(myEnd);
+                        const float myEnd = ApplyYMods(mods, lane, yEndRaw, float(beat));
+                        const float syT = noteY(lane, myEnd);
                         // Away from the receptor, which flips with the scroll.
-                        const float syF = syT + nc::ARROW_SIZE * PSCALE * noteZoom * revScale;
+                        const float syF = syT + nc::ARROW_SIZE * PSCALE *
+                                                   noteZoom * laneRevScale;
                         const float top = syT < syF ? syT : syF;
                         const float bot = syT < syF ? syF : syT;
                         if (bot >= -PANEL && top <= VIRT_H + PANEL) {
@@ -780,8 +3790,11 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
                                                      float(beat), bpm)) * PSCALE;
                             const float ha = GetAlpha(mods, myEnd, songTime);
                             ch::piuSheetUV(6, 1, holdFrame, mir, u0, vb, u1, vt);
+                            const float capZoom = 1.0f +
+                                GetZPos(mods, lane, myEnd, float(beat), bpm) / 512.0f;
                             quad2(vCap[art], mx, 0.5f * (top + bot),
-                                  hw, 0.5f * (bot - top), 0.0f,
+                                  HALF * noteZoom * capZoom * fx,
+                                  0.5f * (bot - top), 0.0f,
                                   u0, flipHold ? vb : vt, u1, flipHold ? vt : vb,
                                   1,1,1, ha);
                         }
@@ -1000,7 +4013,7 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
     glBindVertexArray(avao_);
     glBindBuffer(GL_ARRAY_BUFFER, avbo_);
     // blend: 0 normal, 1 add, 2 noeffect (colour write off -- used with zwrite
-    // to lay a depth mask, which is exactly what Saitama's taiko mask does).
+    // to lay a depth mask, which is exactly what the fixture mask does).
     if (blend == 1) glBlendFunc(GL_ONE, GL_ONE);
     else            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     if (blend == 2) glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
@@ -1044,8 +4057,11 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
     glUniform1f(glGetUniformLocation(actorProgram, "uDepth"), blend == 2 ? -0.1f : 0.1f);
     glUniform1f(glGetUniformLocation(actorProgram, "uInvertY"),
                 actorTargetYInverted_ ? -1.0f : 1.0f);
+    const float actorVirtW = actorTargetW_ > 0 ? float(actorTargetW_)
+                                               : logicalScreenWidth(W, H);
+    const float actorVirtH = actorTargetH_ > 0 ? float(actorTargetH_) : 480.0f;
     glUniform2f(glGetUniformLocation(actorProgram, "uVirtHalf"),
-                logicalScreenWidth(W, H) * 0.5f, 240.0f);
+                actorVirtW * 0.5f, actorVirtH * 0.5f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     if (customProgram) {
@@ -1194,9 +4210,14 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
     // without dividing by clip W. At the normal 45-degree actor camera this
     // reproduces the ordinary field projection exactly, but the vertices keep
     // their depth so proxy rotation and perspective act on the highway itself.
-    const float halfW = logicalScreenWidth(W, H) * 0.5f;
-    const float halfH = 240.0f;
-    const float baseDistance = halfW / tanf(45.0f * 3.14159265f / 360.0f);
+    const float sourceHalfW = logicalScreenWidth(W, H) * 0.5f;
+    const float sourceHalfH = 240.0f;
+    const float targetHalfW = actorTargetW_ > 0 ? actorTargetW_ * 0.5f
+                                                : sourceHalfW;
+    const float targetHalfH = actorTargetH_ > 0 ? actorTargetH_ * 0.5f
+                                                : sourceHalfH;
+    const float baseDistance = targetHalfW /
+        tanf(45.0f * 3.14159265f / 360.0f);
     const float viewZ0 = view_.m[14];
     if (fabsf(viewZ0) < 1e-5f) return;
     const float sceneCot = 1.0f / tanf(ch::CAM_FOV * 3.14159265f / 360.0f);
@@ -1205,8 +4226,8 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
                             : float(W) / float(H);
 
     Mat4 cameraToActor{};
-    cameraToActor.m[0] = -halfW * sceneCot / (sceneAspect * -viewZ0);
-    cameraToActor.m[5] = -halfH * sceneCot / -viewZ0;
+    cameraToActor.m[0] = -sourceHalfW * sceneCot / (sceneAspect * -viewZ0);
+    cameraToActor.m[5] = -sourceHalfH * sceneCot / -viewZ0;
     cameraToActor.m[10] = -baseDistance / viewZ0;
     cameraToActor.m[14] = baseDistance;
     cameraToActor.m[15] = 1.0f;
@@ -1243,21 +4264,21 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
     const float invertY = actorTargetYInverted_ ? -1.0f : 1.0f;
     if (fovDeg != 0.0f) {
         const float actorFov = fovDeg > 0.0f ? fovDeg : 45.0f;
-        const float cameraDistance = halfW /
-            tanf(actorFov * 3.14159265f / 360.0f);
-        const float vx = fovDeg > 0.0f ? vanishX : halfW;
-        const float vy = fovDeg > 0.0f ? vanishY : halfH;
-        projection.m[0] = cameraDistance / halfW;
-        projection.m[5] = -cameraDistance / halfH * invertY;
-        projection.m[8] = 1.0f - vx / halfW;
-        projection.m[9] = (-1.0f + vy / halfH) * invertY;
+            const float cameraDistance = targetHalfW /
+                tanf(actorFov * 3.14159265f / 360.0f);
+        const float vx = fovDeg > 0.0f ? vanishX : targetHalfW;
+        const float vy = fovDeg > 0.0f ? vanishY : targetHalfH;
+        projection.m[0] = cameraDistance / targetHalfW;
+        projection.m[5] = -cameraDistance / targetHalfH * invertY;
+        projection.m[8] = 1.0f - vx / targetHalfW;
+        projection.m[9] = (-1.0f + vy / targetHalfH) * invertY;
         projection.m[11] = -1.0f;
         projection.m[12] = -cameraDistance;
         projection.m[13] = cameraDistance * invertY;
         projection.m[15] = cameraDistance;
     } else {
-        projection.m[0] = 1.0f / halfW;
-        projection.m[5] = -invertY / halfH;
+        projection.m[0] = 1.0f / targetHalfW;
+        projection.m[5] = -invertY / targetHalfH;
         projection.m[12] = -1.0f;
         projection.m[13] = invertY;
         projection.m[15] = 1.0f;
@@ -1267,6 +4288,41 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
     const Mat4 actorView = mat_mul(cameraToActor,
                                    actorFields_[pn - 1]->viewEff);
     const Mat4 actorMvp = mat_mul(projection, mat_mul(actorModel, actorView));
+    const Mat4 piuMvp = mat_mul(
+        projection,
+        mat_mul(actorModel,
+                piuFieldLocal(actorFields_[pn - 1]->mods, actorBeat_, sourceHalfW)));
+    const Mods& playerMods = actorFields_[pn - 1]->mods;
+    const int engineStyle = playerMods.moonscraper >= playerMods.yarg ? 1 : 2;
+    const Mat4 sourceEngineView = engineView(engineStyle);
+    const float engineViewZ0 = sourceEngineView.m[14];
+    Mat4 engineCameraToActor{};
+    const float engineCot = 1.0f / tanf(55.0f * 3.14159265f / 360.0f);
+    engineCameraToActor.m[0] = -targetHalfH * engineCot / -engineViewZ0;
+    engineCameraToActor.m[5] = -targetHalfH * engineCot / -engineViewZ0;
+    engineCameraToActor.m[10] = -baseDistance / engineViewZ0;
+    engineCameraToActor.m[14] = baseDistance;
+    engineCameraToActor.m[15] = 1.0f;
+    Mat4 engineLaneFit = engineIdentity();
+    if (engineStyle == 2) {
+        const float targetAspect = targetHalfW / targetHalfH;
+        Mat4 sourceCamera = mat_mul(
+            mat_perspective(55.0f,targetAspect,0.01f,40.0f),
+            sourceEngineView);
+        for (int row = 0; row < 4; ++row)
+            sourceCamera.m[row*4] = -sourceCamera.m[row*4];
+        const float laneScale = yargLaneScale(sourceCamera,targetAspect);
+        const float oneMinusScale = 1.0f-laneScale;
+        engineLaneFit.m[0] = laneScale;
+        engineLaneFit.m[5] = laneScale;
+        engineLaneFit.m[9] = -oneMinusScale*targetHalfH/baseDistance;
+        engineLaneFit.m[13] = oneMinusScale*targetHalfH;
+    }
+    const Mat4 engineMvp = mat_mul(
+        projection,
+        mat_mul(actorModel,
+                mat_mul(engineLaneFit,
+                        mat_mul(engineCameraToActor,sourceEngineView))));
 
     const float oldTint[4] = {
         fieldTint_[0], fieldTint_[1], fieldTint_[2], fieldTint_[3]
@@ -1275,7 +4331,7 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
     fieldTint_[2] = b; fieldTint_[3] = a;
     drawField(*actorChart_, actorBeat_, *actorOpts_, *actorFields_[pn - 1],
               0, W, actorScrollNow_, actorSongTime_, actorNowSec_, actorBpm_,
-              &actorMvp);
+              &actorMvp, &piuMvp, &engineMvp);
     for (int i = 0; i < 4; ++i) fieldTint_[i] = oldTint[i];
 }
 
@@ -1396,7 +4452,7 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
     // distant (+) lays the neck down away, hallway (-) rears it up. OITG's
     // SetY nudge (:730-735) is skipped -- it re-centres a rotation made about
     // the receptor row, and rotating about the strike line already is that.
-    // wag is the Actor effect from Saitama's lua layer: rotZ of the field,
+    // wag is a legacy Actor effect: rotZ of the field,
     // wag% * 21 degrees on a 2-beat bgm-clock sine.
     const Mat4& baseMvp = o.doc2 ? mvp2_ : mvp_;
     mvpEff = baseMvp;
@@ -1438,11 +4494,21 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
 void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                          FieldEval& E, int vpX, int vpW, float scrollNow,
                          float songTime, double nowSec, float bpm,
-                         const Mat4* mvpOverride) {
+                         const Mat4* mvpOverride,
+                         const Mat4* piuMvpOverride,
+                         const Mat4* engineMvpOverride) {
     Mods& mods = E.mods;
     float& mx = E.mx; float& my = E.my; float& mz = E.mz;
     const float noteSpeed = E.noteSpeed;
     const float piuT = E.piuT;
+    const float moonT = fminf(1.0f, fmaxf(0.0f, mods.moonscraper));
+    const float yargT = fminf(1.0f, fmaxf(0.0f, mods.yarg));
+    const int engineStyle = moonT >= yargT ? 1 : 2;
+    const float engineT = mods.hide == 0.0f ? fmaxf(moonT, yargT) : 0.0f;
+    const float originalTint[4] = {
+        fieldTint_[0], fieldTint_[1], fieldTint_[2], fieldTint_[3]
+    };
+    if (engineT > 0.0f) fieldTint_[3] *= 1.0f - engineT;
     Mat4& mvpEff = E.mvpEff;
     Mat4 drawMvp = mvpOverride ? *mvpOverride : mvpEff;
     if (!mvpOverride && (vpX != 0 || vpW != W)) {
@@ -1459,6 +4525,8 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     glUseProgram(prog_);
     glUniformMatrix4fv(glGetUniformLocation(prog_, "uMVP"), 1, GL_FALSE, drawMvp.m);
     glUniform1i(glGetUniformLocation(prog_, "uTex"), 0);
+    glUniform1f(glGetUniformLocation(prog_, "uCurve"),0.0f);
+    glUniform2f(glGetUniformLocation(prog_, "uFadeRange"),0.0f,0.0f);
     glUniform3f(glGetUniformLocation(prog_, "uOffset"),
                 o.px + mx, o.py + my, o.pz + mz);
     // The glow program shares SCENE_VS, so it needs the same camera and the
@@ -1489,8 +4557,9 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // still drawn, pushed down out of frame by the incoming pad (the my offset
     // for that is applied further up, before the matrices). Only a full 100%
     // drops the highway entirely.
-    const bool piuMode = piuT > 0.0f && mods.hide == 0.0f;
-    const bool hidePlayfield = mods.hide != 0.0f || piuT >= 1.0f;
+    const bool piuMode = piuT > 0.0f && mods.hide == 0.0f && engineT < 1.0f;
+    const bool hidePlayfield = mods.hide != 0.0f || piuT >= 1.0f ||
+                               engineT >= 1.0f;
 
     // Board layers. --playfield drops all four, leaving only frets and notes.
     // `hideboard` is the --playfield flag as a knob: the board goes, the notes
@@ -1622,7 +4691,7 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
             wdxPx -= (laneXPixels(4 - lane) - laneXPixels(lane)) * mods.flip;
         const float wdx = pxToUnits(wdxPx);
         const float wdy = pxToUnits(GetYPosBump(mods, lane, 0.0f, float(beat), bpm)) * 0.5f;
-        const float wdz = ApplyScrollZ(mods, 0.0f);
+        const float wdz = ApplyScrollZ(mods,0.0f,lane);
         if (wdx != 0.0f || wdy != 0.0f || wdz != 0.0f)
             for (int i = 0; i < 7; ++i)
                 for (size_t j = n0[i]; j < bk[i]->size(); ++j) {
@@ -1696,67 +4765,47 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     for (int i = hidePlayfield ? -1 : int(chart.notes.size()) - 1; i >= 0; --i) {
         const Note& n = chart.notes[i];
         const float z0 = float(ssec(chart.beatToSec(n.beat)) - scrollNow) * noteSpeed;
+        // Inside a starpower phrase the gem is drawn with CH's star sheets.
+        const bool isSP =
+            chart.phraseAt(PhraseType::StarPower, n.tick) != nullptr;
 
-        // In OpenITG GetYOffset *is* the note's position, so boomerang and
-        // expand move it. This used to compute yOff and never feed it back,
-        // which left both mods able only to perturb the phase of drunk/tornado
-        // -- they did not shift a single note. The equality guard keeps the
-        // no-y-mod path bit-identical: z0*K/K is not exactly z0 in float.
-        const float y0   = z0 * Y_PER_UNIT;
-        const float yOff = ApplyYMods(mods, 0, y0, float(beat));
-        const float z    = (yOff == y0) ? z0 : yOff / Y_PER_UNIT;
-
-        // With the bot playing, a note is consumed at the strike line; without
-        // it, CH lets the note travel to its own cull plane. Culled on the
-        // modified z, as ITG does, so boomerang can pull a note back into view.
-        float nearCull = o.noBot
-                       ? ch::NOTE_CULL_NEAR * (1.0f + mods.drawSizeBack)
-                       : 0.0f;
-        // Consumption stays in the raw scroll domain (time-anchored); the far
-        // cull and the behind-the-eye clamp act on the DRAWN z, which only
-        // differs under reverse/centered.
-        // No column here: the cull is a per-NOTE decision taken before the
-        // lane loop, so it uses the whole-field reverse. The per-column
-        // percent applies where each lane's gem is placed.
-        const float zDraw = ApplyScrollZ(mods, z);
-        if (zDraw > ch::NOTE_CULL_FAR || zDraw < -3.0f || z <= nearCull) continue;
-        float alpha = fminf(1.0f, fmaxf(0.0f,
-                            (ch::NOTE_CULL_FAR - zDraw) / ch::NOTE_FADE_LEN));
-        // sudden / hidden / stealth. GetAlpha is a hard binary cut and GetGlow
-        // is the white silhouette that fills in around it -- they are one
-        // effect and drawing only the first renders stealth >= 50% as nothing.
-        // See the comment above GetAlpha in mods.h.
-        const float noteAlpha = alpha * GetAlpha(mods, yOff, songTime);
-        const float noteGlow  = alpha * GetGlow(mods, yOff, songTime);
-        alpha = noteAlpha;
-        if (noteAlpha <= 0.0f && noteGlow <= 0.0f) continue;
-
-        // Per-note rotation (dizzy/confusion/roll/twirl). NoteDisplay.cpp:
-        // 1020-1043: GetRotationX/Y take fYOffset -- the post-accel-mods value,
-        // i.e. yOff -- and GetRotationZ takes the note's beat. All three come
-        // back in ITG's screen-Y-down degrees; NotClon's world is Y-up, so
-        // conjugation by diag(1,-1,1) negates rotX and rotZ and keeps rotY.
-        // Notes only, not sustain ribbons (ITG's hold body takes none of them;
-        // SM5 even gates hold heads behind DIZZY_HOLD_HEADS). The glow pass
-        // rotates for free: drawLayer redraws the same v_.
-        //
-        // Documented deviation: SM5 rotates the RECEPTORS by confusion too
-        // (ReceptorGetRotationZ is named for it). NotClon's fret stack is six
-        // axis-aligned quads with no rotated emitter, so frets do not spin.
-        const float rotX = -GetRotationX(mods, yOff);
-        const float rotY =  GetRotationY(mods, yOff);
-        const float rotZ = -GetRotationZ(mods, float(n.beat), float(beat));
+        const float y0 = z0*Y_PER_UNIT;
+        const float nearCull = o.noBot
+                             ? ch::NOTE_CULL_NEAR*(1.0f+mods.drawSizeBack)
+                             : 0.0f;
+        auto laneState = [&](int lane,float& yOff,float& zDraw,
+                             float& alpha,float& glow) {
+            yOff = ApplyYMods(mods,lane,y0,float(beat));
+            const float z = yOff == y0 ? z0 : yOff/Y_PER_UNIT;
+            zDraw = ApplyScrollZ(mods,z,lane);
+            if (zDraw > ch::NOTE_CULL_FAR || zDraw < -3.0f || z <= nearCull)
+                return false;
+            const float fade = fminf(1.0f,fmaxf(0.0f,
+                (ch::NOTE_CULL_FAR-zDraw)/ch::NOTE_FADE_LEN));
+            alpha = fade*GetAlpha(mods,yOff,songTime);
+            glow = fade*GetGlow(mods,yOff,songTime);
+            return alpha > 0.0f || glow > 0.0f;
+        };
 
         if (n.open) {
+            float yOff, zDraw, alpha, noteGlow;
+            if (laneState(2,yOff,zDraw,alpha,noteGlow)) {
+            const float rotX = -GetRotationX(mods,yOff);
+            const float rotY = GetRotationY(mods,yOff);
+            const float rotZ = -GetRotationZ(mods,float(n.beat),float(beat));
             const float noteZoom = GetZoom(mods, 2);
             float dx = pxToUnits(GetXPos(mods, 2, yOff, songTime, float(beat), bpm));
             if (mods.tiny != 0.0f) dx *= tinyCol;
-            // open order is Body -> Head -> Anim, unlike standard notes
+            // open order is Body -> Head -> Anim, unlike standard notes.
+            // Inside a starpower phrase CH keeps the same body and head but
+            // tints the body its StarPower cyan (0,1,1) and adds the animated
+            // SP highlight over the top (SetOpenNoteState).
             ch::quadUpRot(v_, dx, 0.0f, zDraw,
                           -OW*0.5f, -ch::NOTE_PIVOT_Y*NH,
                            OW*0.5f, (1.0f-ch::NOTE_PIVOT_Y)*NH,
                           rotX, rotY, rotZ, noteZoom,
-                          0.0f,0.0f,0.2f,1.0f, 1,1,1, alpha);
+                          0.0f,0.0f,0.2f,1.0f,
+                          isSP ? 0.0f : 1.0f, 1.0f, 1.0f, alpha);
             drawLayer(texOpen_.id, ch::BLEND_SPRITE, noteGlow);
             ch::quadUpRot(v_, dx, 0.0f, zDraw,
                           -OW*0.5f, -ch::NOTE_PIVOT_Y*NH,
@@ -1766,17 +4815,37 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                           ch::NOTE_TINT[5][0], ch::NOTE_TINT[5][1],
                           ch::NOTE_TINT[5][2], alpha);
             drawLayer(texOpen_.id, ch::BLEND_SPRITE, noteGlow);
-            continue;
+            if (isSP) {
+                // The highlight sheet is a 4x4 grid of 512x64 frames, same
+                // pivot as everything else in the note family. Frame i sits at
+                // column i%4; rows run TOP-DOWN in sprite order, and with
+                // flipY loading the top PNG row is v=1 -- hence 0.75 - row.
+                const int col = animFrame % 4, row = animFrame / 4;
+                const float u0 = col * 0.25f, v0 = 0.75f - row * 0.25f;
+                ch::quadUpRot(v_, dx, 0.0f, zDraw,
+                              -OW*0.5f, -ch::NOTE_PIVOT_Y*NH,
+                               OW*0.5f, (1.0f-ch::NOTE_PIVOT_Y)*NH,
+                              rotX, rotY, rotZ, noteZoom,
+                              u0, v0, u0 + 0.25f, v0 + 0.25f,
+                              0.0f, 1.0f, 1.0f, alpha);
+                drawLayer(texSpOpen_.id, ch::BLEND_SPRITE, noteGlow);
+            }
+            }
         }
 
         for (int lane = 0; lane < 5; ++lane) {
+            if (!(n.frets & (1 << lane))) continue;
+            float yOff, zDraw, alpha, noteGlow;
+            if (!laneState(lane,yOff,zDraw,alpha,noteGlow)) continue;
+            const float rotX = -GetRotationX(mods,yOff);
+            const float rotY = GetRotationY(mods,yOff);
+            const float rotZ = -GetRotationZ(mods,float(n.beat),float(beat));
             // dizzyholds: a hold's head does not spin unless asked
             // (ArrowEffects.cpp:906). Identical to rotZ when the lane carries
             // no sustain or dizzy is off, so this costs nothing by default.
             const float rotZL = (n.sustain[lane] > 0.0)
                 ? -GetRotationZ(mods, float(n.beat), float(beat), true)
                 : rotZ;
-            if (!(n.frets & (1 << lane))) continue;
             const float noteZoom = GetZoom(mods, lane);
             float px2 = GetXPos(mods, lane, yOff, songTime, float(beat), bpm);
             float bump = GetYPosBump(mods, lane, yOff, float(beat), bpm);
@@ -1818,6 +4887,37 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
             const bool isTap  = (n.type == NoteType::Tap);
             const bool isHopo = (n.type == NoteType::Hopo);
 
+            if (isSP) {
+                // A starpower-phrase note is the same three-layer composite
+                // with CH's star sheets (NoteContainer.SetStandardNoteState):
+                // animated star body in the lane colour, the bottom layer at
+                // CH's fixed StarPowerAnim tint (0.321, 1, 1) -- it REPLACES
+                // the per-lane anim colour, not multiplies it -- and the star
+                // cap on top. Unlike plain taps, SP taps keep all three
+                // layers; the tap difference is which body sheet animates.
+                // Star sheets run on the same 16-frame 20fps clock as the
+                // note anim: CH has a separate star clock, but both default
+                // to 20fps/16 so the values are identical.
+                float au0 = float(animFrame)/16.0f, au1 = float(animFrame+1)/16.0f;
+                ch::quadUpRot(v_, cx, by, zDraw, hx0, hy0, hx1, hy1,
+                              rotX, rotY, rotZL, noteZoom, au0,0.0f,au1,1.0f,
+                              tintN[0], tintN[1], tintN[2], alpha);
+                drawLayer((isTap ? texStarBodyTap_ : texStarBody_).id,
+                          ch::BLEND_SPRITE, noteGlow);
+
+                ch::quadUpRot(v_, cx, by, zDraw, hx0, hy0, hx1, hy1,
+                              rotX, rotY, rotZL, noteZoom, au0,0.0f,au1,1.0f,
+                              0.321f, 1.0f, 1.0f, alpha);
+                drawLayer(texStarBottom_.id, ch::BLEND_SPRITE, noteGlow);
+
+                // Cap: frame 0 strum/tap, frame 2 HOPO -- the prefab wires
+                // bodySprites[4]/[5] to those frames and skips the odd ones.
+                float su0 = isHopo ? 0.4f : 0.0f, su1 = isHopo ? 0.6f : 0.2f;
+                ch::quadUpRot(v_, cx, by, zDraw, hx0, hy0, hx1, hy1,
+                              rotX, rotY, rotZL, noteZoom, su0,0.0f,su1,1.0f,
+                              1,1,1, alpha);
+                drawLayer(texStarCap_.id, ch::BLEND_SPRITE, noteGlow);
+            } else {
             // Body: frame 2 strum/HOPO, frame 3 tap. Tinted per fret.
             float bu0 = isTap ? 0.6f : 0.4f, bu1 = isTap ? 0.8f : 0.6f;
             ch::quadUpRot(v_, cx, by, zDraw, hx0, hy0, hx1, hy1,
@@ -1839,13 +4939,46 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                           rotX, rotY, rotZL, noteZoom, hu0,0.0f,hu1,1.0f,
                           1,1,1, alpha);
             drawLayer(texNotes_.id, ch::BLEND_SPRITE, noteGlow);
+            }
         }
     }
 
     drawFretBase(top); drawFretRest(top);   // popped frets, over the notes
 
-    if (piuMode)
-        drawPiu(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm);
+    if (piuMode) {
+        Mat4 piuDrawMvp{};
+        if (piuMvpOverride) {
+            piuDrawMvp = *piuMvpOverride;
+        } else {
+            const float virtW = logicalScreenWidth(W, H);
+            const float halfW = virtW * 0.5f;
+            Mat4 projection{};
+            projection.m[0] = 1.0f / halfW;
+            projection.m[5] = -1.0f / 240.0f;
+            projection.m[10] = projection.m[15] = 1.0f;
+            projection.m[12] = -1.0f;
+            projection.m[13] = 1.0f;
+
+            Mat4 placement{};
+            placement.m[0] = placement.m[5] = placement.m[10] =
+                placement.m[15] = 1.0f;
+            placement.m[12] = virtW * (float(vpX) + float(vpW) * 0.5f) /
+                              float(W);
+            placement.m[13] = 240.0f;
+            piuDrawMvp = mat_mul(
+                projection,
+                mat_mul(placement, piuFieldLocal(mods, beat, halfW)));
+        }
+        drawPiu(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
+                piuDrawMvp);
+    }
+
+    if (engineT > 0.0f) {
+        for (int i = 0; i < 4; ++i) fieldTint_[i] = originalTint[i];
+        drawEngine(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
+                   engineStyle, engineT, mx, my, mz, vpX, vpW,
+                   engineMvpOverride);
+    }
 
 }
 

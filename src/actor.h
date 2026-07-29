@@ -12,11 +12,11 @@
 //         lua/default.lua      an actor tree, plus any images it references
 //         effects/default.xml  a legacy tree, with effects/*.png beside it
 //
-// SCOPE, stated plainly. Six of Saitama2000's seven actor files contain zero
+// SCOPE, stated plainly. Most files in the legacy actor fixture contain zero
 // Lua -- they are pure command lists -- so the command/tween engine carries
 // most of the weight and the Lua host only has to serve `%function(self) ...
 // end` attributes. The engine below is complete for the ITG command set those
-// files use; the Lua binding surface is deliberately the subset Saitama needs
+// files use; the Lua binding surface is deliberately the subset the fixture needs
 // (see LuaHost::open), because a binding nobody calls is a binding nobody has
 // tested.
 //
@@ -158,7 +158,8 @@ struct Actor {
     bool        isAft = false;
     bool        aftCapturePrevious = false;
     std::string aftName;
-    int         aftW = 0, aftH = 0;
+    int         aftW = 0, aftH = 0;              // requested image size
+    int         aftTexW = 0, aftTexH = 0;        // power-of-two GL backing
     bool        aftAlpha = false, aftDepth = false, aftFloat = false;
     bool        aftPreserve = false;
     GLuint      aftTex = 0, aftFbo = 0, aftDepthRb = 0;
@@ -181,6 +182,7 @@ struct Actor {
     bool        textureWrapping = false;
     bool        textureFromTarget = false;
     Actor*      textureTarget = nullptr;       // SetTexture(aft:GetTexture())
+    int         textureBackingW = 0, textureBackingH = 0;
     int         spriteState = 0;
     bool        spriteAnimate = true;
     float       baseZoomX = 1.0f, baseZoomY = 1.0f;
@@ -286,10 +288,14 @@ public:
 
     // Textures published by an ActorFrameTexture's SetTextureName, so a later
     // Texture="<name>" or SetTexture() resolves to the live render target.
-    // id + pixel size: the display sprite's natural size must be the
-    // AFT's real allocation or the chart's virt/real basezoom math is
-    // scaling the wrong number.
-    struct NamedTex { GLuint id = 0; int w = 0, h = 0; };
+    // A render target has a requested image size inside a power-of-two GL
+    // backing. Display sprites use the image size while texture queries and
+    // UV normalization use the backing size.
+    struct NamedTex {
+        GLuint id = 0;
+        int w = 0, h = 0;
+        int backingW = 0, backingH = 0;
+    };
     std::map<std::string, NamedTex>& namedTextures() { return namedTex_; }
     // See ActorLayer::drainLuaMods. One tree, one lua_State, one `mods` table.
     int drainLuaMods(ModDoc& doc, int resolution);

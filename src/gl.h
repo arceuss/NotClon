@@ -29,6 +29,8 @@ typedef ptrdiff_t GLintptr;
 #define GL_COLOR_ATTACHMENT0              0x8CE0
 #define GL_DEPTH_ATTACHMENT               0x8D00
 #define GL_DEPTH_COMPONENT24              0x81A6
+#define GL_DEPTH_COMPONENT16              0x81A5
+#define GL_DEPTH_COMPONENT32F             0x8CAC
 #define GL_FRAMEBUFFER_COMPLETE           0x8CD5
 #define GL_TEXTURE0                       0x84C0
 #define GL_ACTIVE_UNIFORMS                0x8B86
@@ -39,6 +41,9 @@ typedef ptrdiff_t GLintptr;
 // Half-float colour, for an ActorFrameTexture asked to EnableFloat. A
 // feedback target that accumulates in 8 bits bands visibly.
 #define GL_RGBA16F                        0x881A
+#define GL_RGBA8_SNORM                    0x8F97
+#define GL_R8                             0x8229
+#define GL_SRGB8_ALPHA8                   0x8C43
 #define GL_RGB8                           0x8051
 #define GL_RGB16F                         0x881B
 #define GL_CLAMP_TO_EDGE                  0x812F
@@ -79,6 +84,7 @@ typedef ptrdiff_t GLintptr;
     X(PFNGLGENRENDERBUFFERSPROC,         glGenRenderbuffers) \
     X(PFNGLBINDRENDERBUFFERPROC,         glBindRenderbuffer) \
     X(PFNGLRENDERBUFFERSTORAGEPROC,      glRenderbufferStorage) \
+    X(PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC, glRenderbufferStorageMultisample) \
     X(PFNGLFRAMEBUFFERRENDERBUFFERPROC,  glFramebufferRenderbuffer) \
     X(PFNGLDELETERENDERBUFFERSPROC,      glDeleteRenderbuffers) \
     X(PFNGLCHECKFRAMEBUFFERSTATUSPROC,   glCheckFramebufferStatus) \
@@ -87,7 +93,8 @@ typedef ptrdiff_t GLintptr;
     X(PFNGLGENERATEMIPMAPPROC,           glGenerateMipmap) \
     X(PFNGLDELETEPROGRAMPROC,            glDeleteProgram) \
     X(PFNGLBINDATTRIBLOCATIONPROC,       glBindAttribLocation) \
-    X(PFNGLGETACTIVEUNIFORMPROC,         glGetActiveUniform)
+    X(PFNGLGETACTIVEUNIFORMPROC,         glGetActiveUniform) \
+    X(PFNGLBLENDFUNCSEPARATEPROC,        glBlendFuncSeparate)
 
 typedef GLuint (APIENTRY *PFNGLCREATESHADERPROC)(GLenum);
 typedef void   (APIENTRY *PFNGLSHADERSOURCEPROC)(GLuint, GLsizei, const GLchar* const*, const GLint*);
@@ -125,6 +132,7 @@ typedef void   (APIENTRY *PFNGLGENRENDERBUFFERSPROC)(GLsizei, GLuint*);
 typedef void   (APIENTRY *PFNGLDELETERENDERBUFFERSPROC)(GLsizei, const GLuint*);
 typedef void   (APIENTRY *PFNGLBINDRENDERBUFFERPROC)(GLenum, GLuint);
 typedef void   (APIENTRY *PFNGLRENDERBUFFERSTORAGEPROC)(GLenum, GLenum, GLsizei, GLsizei);
+typedef void   (APIENTRY *PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
 typedef void   (APIENTRY *PFNGLFRAMEBUFFERRENDERBUFFERPROC)(GLenum, GLenum, GLenum, GLuint);
 typedef GLenum (APIENTRY *PFNGLCHECKFRAMEBUFFERSTATUSPROC)(GLenum);
 typedef void   (APIENTRY *PFNGLDELETEFRAMEBUFFERSPROC)(GLsizei, const GLuint*);
@@ -133,6 +141,7 @@ typedef void   (APIENTRY *PFNGLGENERATEMIPMAPPROC)(GLenum);
 typedef void   (APIENTRY *PFNGLDELETEPROGRAMPROC)(GLuint);
 typedef void   (APIENTRY *PFNGLBINDATTRIBLOCATIONPROC)(GLuint, GLuint, const GLchar*);
 typedef void   (APIENTRY *PFNGLGETACTIVEUNIFORMPROC)(GLuint, GLuint, GLsizei, GLsizei*, GLint*, GLenum*, GLchar*);
+typedef void   (APIENTRY *PFNGLBLENDFUNCSEPARATEPROC)(GLenum, GLenum, GLenum, GLenum);
 
 #define X(type, name) extern type name;
 NC_GL_FUNCS

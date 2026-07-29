@@ -20,6 +20,7 @@
 #include "render.h"
 #include "modchart.h"
 #include "modfile.h"
+#include "engine_mesh.h"
 
 #include <cmath>
 #include <cstdio>
@@ -143,7 +144,8 @@ struct ActorPolygonVertex {
 // highway/note texture wants. Actor sprites are top-left origin and must load
 // with flipY=false -- devdocs/spec/background.md section 2.3 called this out, and
 // getting it wrong renders the whole actor tree upside down.
-Tex gl_loadTex(const std::string& path, bool repeat, bool flipY = true);
+Tex gl_loadTex(const std::string& path, bool repeat, bool flipY = true,
+               bool srgb = false, bool mipmaps = false);
 
 // Where the executable lives -- assets ship beside it (a post-build step
 // copies assets/ into the build dir), so nothing assumes a fixed install path.
@@ -226,6 +228,7 @@ extern const char* POST_FS;
 // ---------------------------------------------------------------------------
 struct RenderOpts {
     float noteSpeed = ch::NOTE_SPEED_DEFAULT;
+    double audioDuration = 0.0; // longest audio stem, in seconds; 0 if unavailable
     bool  playfield = false;   // drop neck/sidebars/strings/beatlines
     bool  noPost    = false;
     bool  noMods    = false;
@@ -263,7 +266,9 @@ public:
     void drawField(const Chart& chart, double beat, const RenderOpts& o,
                    FieldEval& E, int vpX, int vpW, float scrollNow,
                    float songTime, double nowSec, float bpm,
-                   const Mat4* mvpOverride = nullptr);
+                   const Mat4* mvpOverride = nullptr,
+                   const Mat4* piuMvpOverride = nullptr,
+                   const Mat4* engineMvpOverride = nullptr);
 
     // Requires a current GL context. assetDir must end with a separator.
     bool init(int w, int h, const std::string& assetDir);
@@ -320,6 +325,11 @@ public:
     void setActorTargetYInverted(bool inverted) {
         actorTargetYInverted_ = inverted;
     }
+    void setActorTargetSize(int w, int h) {
+        actorTargetW_ = w; actorTargetH_ = h;
+    }
+    int actorTargetWidth() const { return actorTargetW_; }
+    int actorTargetHeight() const { return actorTargetH_; }
     const Tex& actorMissingTexture() const { return actorMissing_; }
     // Null = no actor folders, and the passes are skipped entirely -- which is
     // what keeps this hash-neutral.
@@ -343,10 +353,20 @@ private:
     void destroyFbos();
     double lastHit(int lane, double now) const;
 
-    Mat4 view_{}, mvp_{}, mvp2_{};
-    GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0, cover_ = 0, piu_ = 0;
+    Mat4 view_{}, mvp_{}, mvp2_{}, piuMvp_{};
+    GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0;
+    GLuint cover_ = 0, piu_ = 0, engine_ = 0;
+    GLuint engineGlow_ = 0, yargEffect_ = 0;
+    GLuint moonOccluder_ = 0, moonBlur_ = 0;
+    GLuint yargBloomPrefilter_ = 0, yargBloomDownH_ = 0;
+    GLuint yargBloomDownV_ = 0, yargBloomUp_ = 0;
+    GLuint yargNormalProg_ = 0, yargAoEstimate_ = 0;
+    GLuint yargAoBlur_ = 0, yargAoFinal_ = 0;
+    GLuint linearCompose_ = 0;
+    bool engineUseAo_ = true;
     GLuint avao_ = 0, avbo_ = 0;
     bool actorTargetYInverted_ = false;
+    int actorTargetW_ = 0, actorTargetH_ = 0;
     double actorBeat_ = 0.0;
     double fieldSec_ = 0.0;   // when evalField reads live Lua PlayerOptions
     const Chart* actorChart_ = nullptr;
@@ -359,23 +379,61 @@ private:
     GLuint vao_ = 0, vbo_ = 0, qvao_ = 0, qvbo_ = 0;
     GLuint fbo_ = 0, colorTex_ = 0, postFbo_ = 0, postTex_ = 0;
     // Depth attachment on fbo_ ONLY, for the actor layer's z-mask
-    // (blend,noeffect + zwrite writes it; ztest reads it). The highway never
-    // enables depth testing -- every CH layer is ZWrite Off and the painter
-    // order is load-bearing -- so this is inert for everything but actors.
+    // (blend,noeffect + zwrite writes it; ztest reads it). The CH highway never
+    // enables depth testing -- its painter order is load-bearing. Engine-style
+    // 3D fields use their own isolated colour/depth targets below.
     GLuint depthRb_ = 0;
     // One more colour target, for --fxshader: a playfield shader cannot read
     // and write the same texture, so the scene is shaded colorTex_ -> fxTex_
     // and the post chain then reads fxTex_ instead. Allocated always, bound
     // only when a scene layer exists.
     GLuint fxFbo_ = 0, fxTex_ = 0;
+    GLuint moonSceneFbo_ = 0, moonSceneTex_ = 0;
+    GLuint moonSceneMsaaFbo_ = 0, moonSceneMsaaColor_ = 0, moonSceneDepth_ = 0;
+    int moonSceneW_ = 0, moonSceneH_ = 0;
+    GLuint moonGlowFbo_ = 0, moonGlowTex_ = 0, moonGlowDepth_ = 0;
+    GLuint moonBlurFbo_[2] = {}, moonBlurTex_[2] = {};
+    int moonGlowW_ = 0, moonGlowH_ = 0;
+    GLuint yargFbo_ = 0, yargTex_ = 0, yargDepth_ = 0;
+    GLuint yargNormalFbo_ = 0, yargNormalTex_ = 0, yargAoDepth_ = 0;
+    GLuint yargAoFbo_[4] = {}, yargAoTex_[4] = {};
+    GLuint yargBloomDownFbo_[6] = {}, yargBloomDownTex_[6] = {};
+    GLuint yargBloomUpFbo_[6] = {}, yargBloomUpTex_[6] = {};
+    int yargW_ = 0, yargH_ = 0;
+    int yargBloomMips_ = 1;
     GLint locPremul_ = -1;
 
     Tex texHighway_, texSide_, texString_, texBeat_;
     Tex texNotes_, texAnim_, texOpen_, texSustain_;
+    // Starpower phrase art, CH's own sheets: the star cap strip (frame 0 =
+    // strum/tap, frame 2 = HOPO -- the prefab skips the odd frames), the two
+    // 16-frame animated star bodies (plain and tap), the 16-frame bottom
+    // layer CH tints (0.321, 1, 1), and the 4x4 open-note highlight grid.
+    Tex texStarCap_, texStarBody_, texStarBodyTap_, texStarBottom_, texSpOpen_;
     // PIU mode: three arts each, indexed by ch::PIU_ART (DownLeft/UpLeft/Center).
     Tex texPiuTap_[3], texPiuRecep_[3], texPiuHoldBody_[3], texPiuHoldCap_[3];
     Tex texPiuFlash_;
     Tex texFretB_, texFretH_, texLift_, texHLight_;
+    struct EngineGpu {
+        GLuint vao = 0, vbo = 0;
+        GLsizei count = 0;
+    };
+    EngineGpu moonNote_, moonOpen_, moonSp_;
+    EngineGpu yargNormal_, yargHopo_, yargTap_, yargOpen_, yargFret_;
+    EngineGpu yargTrack_, yargTrackTrim_;
+    Tex texMoonHighway_, texMoonRail_, texMoonBeat_, texMoonBeatWeak_;
+    Tex texMoonMeasure_, texMoonIndicator_, texMoonStrike_;
+    Tex texMoonSustainFretted_, texMoonSustainOpen_, texMoonSpTail_;
+    Tex texYargNote_, texYargNoteShine_, texYargNoteShader_;
+    Tex texYargOpenNote_, texYargOpenHopo_;
+    Tex texYargFret_, texYargFretShine_;
+    Tex texYargTrackFade_, texYargTrackSmall_, texYargTrackSide_;
+    Tex texYargTrackTrim_;
+    Tex texYargSoloTrack_, texYargSoloRail_, texYargSoloTransitionTrack_;
+    Tex texYargSoloTransitionRailLeft_, texYargSoloTransitionRailRight_;
+    Tex texYargSpTrim_;
+    Tex texYargBeatline_, texYargSustain_, texYargSustainSecondary_;
+    Tex texYargOpenSustain_;
     Tex actorFont_, actorMissing_;
     int actorFontWidth_[256] = {};
     int actorFontAdvance_[256] = {};
@@ -395,7 +453,20 @@ private:
     // comment on the definition.
     void drawPiu(const Chart& chart, double beat, const RenderOpts& o,
                  const Mods& mods, float songTime, float scrollNow,
-                 float noteSpeed, float bpm);
+                 float noteSpeed, float bpm, const Mat4& mvp);
+    void loadEngineMesh(EngineGpu& gpu, const std::string& path);
+    void drawEngineMesh(const EngineGpu& gpu, const Mat4& camera,
+                        const Mat4& model, int kind, const float* color,
+                        float alpha, GLuint texture, GLuint texture2 = 0,
+                        GLuint texture3 = 0, float scroll = 0.0f,
+                        int materialFilter = -1, float materialState = 0.0f,
+                        const float* random = nullptr,
+                        float shaderTime = 0.0f);
+    void drawEngine(const Chart& chart, double beat, const RenderOpts& o,
+                    const Mods& mods, float songTime, float scrollNow,
+                    float noteSpeed, float bpm, int style, float alpha,
+                    float mx, float my, float mz, int vpX, int vpW,
+                    const Mat4* mvpOverride);
     void buildCamera();
 };
 

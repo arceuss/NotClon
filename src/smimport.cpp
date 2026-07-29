@@ -360,7 +360,7 @@ SmImportReport importSm(const std::string& smPath, const std::string& outDir,
         } else if (tag == "MODS" || tag == "ATTACKS") {
             // #ATTACKS is the same TIME=/LEN=/MODS= grammar as #MODS -- it is
             // the tag StepMania itself writes, where #MODS is the OpenITG
-            // spelling. Saitama2000 uses #ATTACKS exclusively, and reading only
+            // spelling. Some legacy charts use #ATTACKS exclusively; reading only
             // #MODS silently produced an empty modchart.
             //
             // Rejoin: the whole value after the tag is one line, and it
@@ -560,7 +560,7 @@ SmImportReport importSm(const std::string& smPath, const std::string& outDir,
     // SM: audio(beat0) = -#OFFSET (TimingData::GetElapsedTimeFromBeat starts
     // at -offset). CH: audio(beat0) = +Offset (TimeSync.cs:90 via
     // GameManager.cs:484-492). OPPOSITE signs, so the value flips here.
-    // Saitama2000's #OFFSET -2.733 becomes Offset 2.733: beat 0 plays 2.733s
+    // An #OFFSET of -2.733 becomes Offset 2.733: beat 0 plays 2.733s
     // into the audio in both engines.
     fprintf(o, "  Offset = %g\n", -offset);
     fprintf(o, "}\n[SyncTrack]\n{\n");

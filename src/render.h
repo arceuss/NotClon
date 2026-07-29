@@ -192,14 +192,16 @@ inline void buildSustainBody(std::vector<Vtx>& out, const nc::Mods& mods,
         const float t    = fminf(1.0f, fmaxf(0.0f, z - (SUS_FAR_LIMIT - 1.0f)));
         const float fade = 1.0f - t * t * (3.0f - 2.0f * t);
 
-        float yOff = z * nc::ARROW_SIZE * 1.6f;
-        yOff = nc::ApplyYMods(mods, lane, yOff, songBeat);
+        const float y0 = z*nc::ARROW_SIZE*1.6f;
+        const float yOff = nc::ApplyYMods(mods,lane,y0,songBeat);
         const float a  = fade * nc::GetAlpha(mods, yOff, songTime);
         const float cx = noteX(lane) +
                          nc::pxToUnits(nc::GetXPos(mods, lane, yOff, songTime, songBeat, bpm));
         const float dy = nc::pxToUnits(nc::GetYPosBump(mods, lane, yOff)) * 0.5f;
 
-        const float zD = nc::ApplyScrollZ(mods, z);   // reverse/centered
+        const float zAdjusted = yOff == y0 ? z
+                                           : yOff/(nc::ARROW_SIZE*1.6f);
+        const float zD = nc::ApplyScrollZ(mods,zAdjusted,lane);
         L[i] = {cx - halfW, dy, zD, u0, v, tint[0], tint[1], tint[2], a};
         R[i] = {cx + halfW, dy, zD, u1, v, tint[0], tint[1], tint[2], a};
         // The ITG bGlow pass, per row: flat white at GetGlow's alpha, under the
@@ -245,13 +247,15 @@ inline void buildSustainGlow(std::vector<Vtx>& out, const nc::Mods& mods,
         const float z = zr[i];
         float e = 1.0f - fminf(1.0f, fmaxf(0.0f,
                       (z - (tailEnd - SUS_GLOW_EDGE)) / SUS_GLOW_EDGE));
-        float yOff = z * nc::ARROW_SIZE * 1.6f;
-        yOff = nc::ApplyYMods(mods, lane, yOff, songBeat);
+        const float y0 = z*nc::ARROW_SIZE*1.6f;
+        const float yOff = nc::ApplyYMods(mods,lane,y0,songBeat);
         const float cx = noteX(lane) +
                          nc::pxToUnits(nc::GetXPos(mods, lane, yOff, songTime, songBeat, bpm));
         const float dy = nc::pxToUnits(nc::GetYPosBump(mods, lane, yOff)) * 0.5f;
 
-        const float zD = nc::ApplyScrollZ(mods, z);   // reverse/centered
+        const float zAdjusted = yOff == y0 ? z
+                                           : yOff/(nc::ARROW_SIZE*1.6f);
+        const float zD = nc::ApplyScrollZ(mods,zAdjusted,lane);
         L[i] = {cx - halfW, dy, zD, -1.0f, e, tint[0], tint[1], tint[2], z * 10.0f};
         R[i] = {cx + halfW, dy, zD,  1.0f, e, tint[0], tint[1], tint[2], z * 10.0f};
     }
@@ -350,8 +354,9 @@ inline void buildBeatLines(std::vector<Vtx>& out, const nc::Chart& chart,
 // Blue and Orange set m_FlipX, which mirrors u about the quad centre; the
 // geometry is unchanged because pivot.x is 0.5 and the extents are symmetric.
 // CH lefty flip swaps the four outer FretAnimator positions and negates their
-// local X scale; the centre fret is left alone. `flip` continuously applies
-// that same transform so 100% is the discrete CH layout.
+// local X scale; the centre fret is left alone. Partial `flip` translates a
+// full-width fret and switches its facing after the midpoint. Interpolating
+// the signed scale would collapse every outer fret to zero width at 50%.
 // One fret button, emitted into SIX separate buckets -- one per sortingOrder.
 //
 // These must stay separate: base, cover and halfCover all share the same sheet,
@@ -367,12 +372,10 @@ inline void buildFret(std::vector<Vtx>& oBase, std::vector<Vtx>& oLift,
                       int lane, float headDy, bool held, float flip) {
     const FretLane& F = FRETS[lane];
     float x = FRET_X[lane];
-    float face = 1.0f;
     const int opposite = 4 - lane;
-    if (flip != 0.0f && opposite != lane) {
+    if (flip != 0.0f && opposite != lane)
         x += (FRET_X[opposite] - x) * flip;
-        face -= 2.0f * flip;
-    }
+    const float face = opposite != lane && flip >= 0.5f ? -1.0f : 1.0f;
     const float hw = FRET_W * 0.5f * face;
     const float y0 = -FRET_PIVOT_Y * FRET_H;
     const float y1 = (1.0f - FRET_PIVOT_Y) * FRET_H;

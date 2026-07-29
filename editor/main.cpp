@@ -23,6 +23,7 @@
 #include "backends/imgui_impl_opengl3.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
@@ -275,6 +276,10 @@ int main(int argc, char** argv) {
         // stems are mixed; MusicStream is a NotClon-only fallback for folders
         // that predate this. Audio remains optional.
         haveAudio = audio.loadMix(nc::findAudioStems(dir, chart.musicStream));
+        opt.audioDuration = haveAudio ? audio.duration() : 0.0;
+        if (haveAudio)
+            lastTick = std::max(lastTick, int(std::ceil(
+                chart.secToBeat(opt.audioDuration) * chart.resolution)));
 
         // Actor + background layers, discovered exactly as src/main.cpp does:
         // one .sm beside the chart feeds both -- its #FG/#BGCHANGES folder

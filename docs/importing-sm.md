@@ -13,7 +13,7 @@ Out come `notes.chart`, `song.ini`, and a `.ncmod` carrying the file's mods.
 The import prints what it did:
 
 ```
-NAMCO - Saitama 2000   [dance-single Challenge 10, 2 blocks]
+Example legacy chart   [dance-single Challenge 10, 2 blocks]
   notes 510 (holds 52)   strum 466 / hopo 44 / tap 0
   bpm points 3   stops 1   last note 112.0s
   #MODS lines 185 -> 219 entries (219 scoped)

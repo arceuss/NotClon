@@ -21,6 +21,7 @@ struct Note {
     double beat = 0.0;
     int    tick = 0;
     NoteType type = NoteType::Strum;
+    NoteType openType = NoteType::Strum;
     int    frets = 0;        // bitmask over lanes 0..4
     bool   open = false;
     bool   tap = false;
@@ -32,6 +33,14 @@ struct Note {
 struct Section {
     double beat;
     std::string name;
+};
+
+enum class PhraseType { StarPower, Solo };
+
+struct Phrase {
+    int tick = 0;
+    int length = 0;
+    PhraseType type = PhraseType::StarPower;
 };
 
 struct BpmPoint {
@@ -70,10 +79,26 @@ public:
     std::vector<TimeSig>  timesigs;
     std::vector<BeatLine> beatlines;
     std::vector<Section>  sections;
+    std::vector<Phrase>   phrases;
     std::vector<Note>     notes;
 
     bool load(const std::string& path, const std::string& track = "ExpertSingle");
     void resolveNoteTypes();
+
+    const Phrase* phraseAt(PhraseType type, int tick) const {
+        const Phrase* current = nullptr;
+        for (const Phrase& phrase : phrases) {
+            if (phrase.tick > tick) break;
+            if (phrase.type == type) current = &phrase;
+        }
+        if (!current) return nullptr;
+        if (current->length == 0) return tick == current->tick ? current : nullptr;
+        const long long end = (long long)current->tick + current->length;
+        const bool inside = type == PhraseType::StarPower
+                          ? tick >= current->tick && tick < end
+                          : tick >= current->tick && tick <= end;
+        return inside ? current : nullptr;
+    }
 
     // Tick -> seconds, walking the tempo map.
     double tickToSec(double tick) const {
@@ -120,8 +145,8 @@ public:
         // monotonic, so a bisect is fine and exact enough for frame timing.
         //
         // `lo` is NEGATIVE on purpose. A chart with a negative #OFFSET puts
-        // beat 0 some way into the audio -- Saitama2000 is -2.733, so beat 0 is
-        // at 2.733s and everything before it is at a negative beat. Clamping lo
+        // beat 0 some way into the audio -- with -2.733, beat 0 is at 2.733s
+        // and everything before it is at a negative beat. Clamping lo
         // to 0 silently returned beat 0 for the whole intro, which is how the
         // intro came to be cut off the front of a render.
         double lo = -1024.0, hi = 4096.0;
@@ -156,6 +181,7 @@ inline bool Chart::load(const std::string& path, const std::string& track) {
 
     std::map<int, Note> byTick;
     std::vector<std::pair<int,double>> stopTicks;
+    int soloStart = -1, nextSoloStart = -1;
     std::string section;
     size_t pos = 0;
 
@@ -208,6 +234,31 @@ inline bool Chart::load(const std::string& path, const std::string& track) {
                 else if (a == 5) { n.forced = true; }
                 else if (a == 6) { n.tap = true; }
                 else if (a == 7) { n.open = true; if (b > 0) n.openSustain = b / double(resolution); }
+            } else if (sscanf(line.c_str(), "%d = %c %d %d", &tick, &kind, &a, &b) == 4 &&
+                       kind == 'S' && a == 2) {
+                phrases.push_back({tick,b,PhraseType::StarPower});
+            } else {
+                char event[512] = {0};
+                if (sscanf(line.c_str(), "%d = E \"%511[^\"]\"", &tick, event) != 2)
+                    continue;
+                std::string name = nc_trim(event);
+                const size_t left = name.find('[');
+                const size_t right = left == std::string::npos
+                                   ? std::string::npos : name.find(']',left+1);
+                if (right != std::string::npos)
+                    name = nc_trim(name.substr(left+1,right-left-1));
+                if (name == "solo") {
+                    if (soloStart < 0) soloStart = tick;
+                    else nextSoloStart = tick;
+                } else if (name == "soloend" && soloStart >= 0) {
+                    phrases.push_back({soloStart,tick-soloStart,PhraseType::Solo});
+                    if (nextSoloStart == tick) {
+                        soloStart = nextSoloStart;
+                        nextSoloStart = -1;
+                    } else {
+                        soloStart = nextSoloStart = -1;
+                    }
+                }
             }
         }
     }
@@ -268,6 +319,11 @@ inline bool Chart::load(const std::string& path, const std::string& track) {
 
     std::sort(notes.begin(), notes.end(),
               [](const Note& x, const Note& y) { return x.beat < y.beat; });
+    std::stable_sort(phrases.begin(), phrases.end(),
+              [](const Phrase& x, const Phrase& y) {
+                  if (x.tick != y.tick) return x.tick < y.tick;
+                  return int(x.type) < int(y.type);
+              });
     resolveNoteTypes();
     return true;
 }
@@ -289,27 +345,25 @@ inline bool Chart::load(const std::string& path, const std::string& track) {
 // INCLUDING same-tick chord siblings, not the previous note group. That only
 // ever matters for a single note following a chord, because isChord()
 // short-circuits first -- and in that case prevIsChord is true, so the
-// fret-equality test is skipped anyway. Grouping by tick is therefore safe.
+// fret-equality test is skipped anyway. Grouping by tick is therefore safe;
+// `type` describes the fretted components and `openType` keeps CH's rule that
+// an open component ignores the shared tap flag.
 inline void Chart::resolveNoteTypes() {
     const int hopoDist = int(65.0f * float(resolution) / 192.0f);
 
     for (size_t i = 0; i < notes.size(); ++i) {
         Note& n = notes[i];
 
-        // Tap wins over forced and natural hopo -- but only for non-open
-        // notes: MoonNote.cs guards it with (fret != OPEN && TAP).
-        if (n.tap && !n.open) { n.type = NoteType::Tap; continue; }
-
         int lanes = 0;
         for (int f = 0; f < 5; ++f) if (n.frets & (1 << f)) ++lanes;
-        const bool isChord = lanes > 1;
+        const bool isChord = lanes + int(n.open) > 1;
 
         bool natural = false;
         if (!isChord && i > 0) {
             const Note& p = notes[i - 1];
             int plane = 0;
             for (int f = 0; f < 5; ++f) if (p.frets & (1 << f)) ++plane;
-            const bool prevIsChord = plane > 1;
+            const bool prevIsChord = plane + int(p.open) > 1;
 
             // rawNote: the single lane, or 7 for an open note
             auto raw = [](const Note& x) {
@@ -322,7 +376,8 @@ inline void Chart::resolveNoteTypes() {
         }
 
         const bool hopo = n.forced ? !natural : natural;
-        n.type = hopo ? NoteType::Hopo : NoteType::Strum;
+        n.openType = hopo ? NoteType::Hopo : NoteType::Strum;
+        n.type = n.tap && n.frets ? NoteType::Tap : n.openType;
     }
 }
 

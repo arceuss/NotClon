@@ -485,6 +485,12 @@ void actorNaturalSize(Actor& actor, float& w, float& h) {
     w = float(iw > 0 ? iw : 1) / float(std::max(actor.sheetCols, 1));
     h = float(ih > 0 ? ih : 1) / float(std::max(actor.sheetRows, 1));
 }
+
+int nextPowerOfTwo(int value) {
+    int result = 1;
+    while (result < value) result <<= 1;
+    return result;
+}
 void emitScaleToCover(Sched& S, float left, float top,
                       float right, float bottom) {
     float naturalW = 1.0f, naturalH = 1.0f;
@@ -1900,6 +1906,8 @@ void ensureActorTexture(Actor& actor, const Tex& missing) {
         const int height = source.aftTex ? source.aftH : source.tex.h;
         if (id) {
             actor.tex = {id, width, height};
+            actor.textureBackingW = source.aftTex ? source.aftTexW : source.tex.w;
+            actor.textureBackingH = source.aftTex ? source.aftTexH : source.tex.h;
             actor.texLoaded = true;
         }
     }
@@ -1910,6 +1918,8 @@ void ensureActorTexture(Actor& actor, const Tex& missing) {
                 actor.tex.id = it->second.id;
                 actor.tex.w = it->second.w;
                 actor.tex.h = it->second.h;
+                actor.textureBackingW = it->second.backingW;
+                actor.textureBackingH = it->second.backingH;
                 actor.sheetCols = actor.sheetRows = 1;
                 actor.textureFromTarget = true;
                 actor.texLoaded = true;
@@ -2069,11 +2079,15 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         GLint previousFrontFace = GL_CCW;
         glGetIntegerv(GL_FRONT_FACE, &previousFrontFace);
         const bool previousYInverted = R.actorTargetYInverted();
+        const int previousTargetW = R.actorTargetWidth();
+        const int previousTargetH = R.actorTargetHeight();
         R.setActorTargetYInverted(true);
+        R.setActorTargetSize(a.aftW, a.aftH);
         glFrontFace(GL_CW);
         drawActorChildren(R, a, sec, beat, targetRoot);
         glFrontFace(GLenum(previousFrontFace));
         R.setActorTargetYInverted(previousYInverted);
+        R.setActorTargetSize(previousTargetW, previousTargetH);
         glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFbo));
         glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         return;
@@ -2144,6 +2158,14 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         if (a.customTexRect) {
             su0 = a.texRect[0]; sv0 = a.texRect[1];
             su1 = a.texRect[2]; sv1 = a.texRect[3];
+        }
+        if (a.textureFromTarget) {
+            const int backingW = a.textureBackingW > 0 ? a.textureBackingW : a.tex.w;
+            const int backingH = a.textureBackingH > 0 ? a.textureBackingH : a.tex.h;
+            const float imageU = backingW > 0 ? float(a.tex.w) / float(backingW) : 1.0f;
+            const float imageV = backingH > 0 ? float(a.tex.h) / float(backingH) : 1.0f;
+            su0 *= imageU; su1 *= imageU;
+            sv0 *= imageV; sv1 *= imageV;
         }
         const double texElapsed = std::max(0.0, sec - a.texCoordVelocityStart);
         float texOffsetX = a.texCoordBaseX + float(texElapsed) * a.texCoordVelX;
@@ -2709,6 +2731,8 @@ void LuaHost::aftCreate(Actor& a) {
     if (a.aftTex) return;                       // Create() called twice
     if (a.aftW <= 0) a.aftW = 512;
     if (a.aftH <= 0) a.aftH = 512;
+    a.aftTexW = nextPowerOfTwo(a.aftW);
+    a.aftTexH = nextPowerOfTwo(a.aftH);
 
     glGenTextures(1, &a.aftTex);
     glBindTexture(GL_TEXTURE_2D, a.aftTex);
@@ -2719,7 +2743,7 @@ void LuaHost::aftCreate(Actor& a) {
         ? (a.aftAlpha ? GL_RGBA16F : GL_RGB16F)
         : (a.aftAlpha ? GL_RGBA8 : GL_RGB8);
     const GLenum channels = a.aftAlpha ? GL_RGBA : GL_RGB;
-    glTexImage2D(GL_TEXTURE_2D, 0, fmt, a.aftW, a.aftH, 0, channels,
+    glTexImage2D(GL_TEXTURE_2D, 0, fmt, a.aftTexW, a.aftTexH, 0, channels,
                  a.aftFloat ? GL_FLOAT : GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -2735,7 +2759,8 @@ void LuaHost::aftCreate(Actor& a) {
     if (a.aftDepth) {
         glGenRenderbuffers(1, &a.aftDepthRb);
         glBindRenderbuffer(GL_RENDERBUFFER, a.aftDepthRb);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, a.aftW, a.aftH);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24,
+                              a.aftTexW, a.aftTexH);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                                   GL_RENDERBUFFER, a.aftDepthRb);
     }
@@ -2749,7 +2774,9 @@ void LuaHost::aftCreate(Actor& a) {
     glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFbo));
 
     if (tree_ && !a.aftName.empty())
-        tree_->namedTextures()[a.aftName] = {a.aftTex, a.aftW, a.aftH};
+        tree_->namedTextures()[a.aftName] = {
+            a.aftTex, a.aftW, a.aftH, a.aftTexW, a.aftTexH
+        };
     note("ActorFrameTexture '" + a.aftName + "' created");
 }
 
@@ -2850,6 +2877,20 @@ int LuaHost::actorCall(lua_State* L) {
             lua_pushvalue(L, 1);
             return 1;
         case AM_GETTEXW:
+            if (actor->isAft && actor->aftW > 0) {
+                lua_pushnumber(L, actor->aftTexW > 0
+                                 ? actor->aftTexW : nextPowerOfTwo(actor->aftW));
+                return 1;
+            }
+            if (actor->tex.w <= 0) {
+                float w = 0, h = 0;
+                actorNaturalSize(*actor, w, h);
+                actor->tex.w = int(w * std::max(actor->sheetCols, 1));
+                actor->tex.h = int(h * std::max(actor->sheetRows, 1));
+            }
+            lua_pushnumber(L, actor->textureBackingW > 0
+                             ? actor->textureBackingW : actor->tex.w);
+            return 1;
         case AM_GETIMAGEW:
             if (actor->tex.w <= 0 && actor->aftW <= 0) {
                 float w = 0, h = 0;
@@ -2860,6 +2901,20 @@ int LuaHost::actorCall(lua_State* L) {
             lua_pushnumber(L, actor->aftW > 0 ? actor->aftW : actor->tex.w);
             return 1;
         case AM_GETTEXH:
+            if (actor->isAft && actor->aftH > 0) {
+                lua_pushnumber(L, actor->aftTexH > 0
+                                 ? actor->aftTexH : nextPowerOfTwo(actor->aftH));
+                return 1;
+            }
+            if (actor->tex.h <= 0) {
+                float w = 0, h = 0;
+                actorNaturalSize(*actor, w, h);
+                actor->tex.w = int(w * std::max(actor->sheetCols, 1));
+                actor->tex.h = int(h * std::max(actor->sheetRows, 1));
+            }
+            lua_pushnumber(L, actor->textureBackingH > 0
+                             ? actor->textureBackingH : actor->tex.h);
+            return 1;
         case AM_GETIMAGEH:
             if (actor->tex.h <= 0 && actor->aftH <= 0) {
                 float w = 0, h = 0;
@@ -3309,7 +3364,7 @@ int LuaHost::actorCall(lua_State* L) {
                 // QueueCommand stores a command on this actor, then calls the
                 // same PlayCommand when its zero-length tween is reached.
                 // ActorFrame::HandleMessage propagates either path to every
-                // descendant (except broadcasts). Shame's stacked pose sheets
+                // descendant (except broadcasts). Some stacked pose sheets
                 // use queuecommand('Attack') on their containing ActorFrame.
                 struct W { static void go(ActorTree* t, double tm,
                                           Actor& x, const char* n) {
@@ -4098,7 +4153,7 @@ bool ActorLayer::loadFromSm(const std::string& smPath, const std::string& songDi
     // The .sm's own timing, so a change's beat resolves to the same audio
     // seconds the renderer uses. SmTiming ports GetElapsedTimeFromBeat with
     // #STOPS -- the hand-rolled beatToSec that used to live here ignored them,
-    // so Saitama2000's FGCHANGES after its beat-224 0.15s stop fired 0.15s
+    // so FGCHANGES after a beat-224 0.15s stop fired 0.15s
     // early.
     smTiming_.parse(raw);
     haveSmTiming_ = true;

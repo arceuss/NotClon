@@ -706,6 +706,18 @@ int main(int argc, char** argv) {
         return result;
     }
 
+    const std::vector<std::string> stems =
+        nc::findAudioStems(chartDir, chart.musicStream);
+    std::string unreadableStem;
+    for (const std::string& stem : stems) {
+        const double duration = audioDuration(stem);
+        if (duration <= 0.0) {
+            if (unreadableStem.empty()) unreadableStem = stem;
+        } else {
+            opt.audioDuration = std::max(opt.audioDuration, duration);
+        }
+    }
+
     // Background layer: #BGCHANGES stills/movies from the same .sm, auto-on
     // like the actor layer (--nobg opts out), plus any --bgshader layers over
     // them. No .sm and no --bgshader means no Background is ever constructed
@@ -754,11 +766,9 @@ int main(int argc, char** argv) {
     int frameCount = 1;
     double t0 = 0.0, t1 = 0.0;
     if (!previewOnly) {
-        const std::vector<std::string> stems =
-            nc::findAudioStems(chartDir, chart.musicStream);
         // Default the start to where the AUDIO starts, not to beat 0. With a
-        // negative #OFFSET beat 0 is some way into the song (Saitama2000: beat
-        // 0 is at 2.733s), so starting at beat 0 lops that much off the front.
+        // negative #OFFSET beat 0 is some way into the song (for -2.733, beat 0
+        // is at 2.733s), so starting at beat 0 lops that much off the front.
         // min() so a positive-offset chart, where audio 0 is already past beat
         // 0, is unaffected -- R.E.M. III stays at exactly 0.
         if (!fromGiven) beatA = std::min(0.0, chart.secToBeat(0.0));
@@ -766,15 +776,13 @@ int main(int argc, char** argv) {
         if (toGiven) {
             t1 = chart.beatToSec(beatB);
         } else {
-            for (const std::string& stem : stems) {
-                const double duration = audioDuration(stem);
-                if (duration <= 0.0) {
-                    fprintf(stderr, "cannot read audio duration: %s\n", stem.c_str());
-                    return 1;
-                }
-                t1 = std::max(t1, duration);
+            if (!unreadableStem.empty()) {
+                fprintf(stderr, "cannot read audio duration: %s\n",
+                        unreadableStem.c_str());
+                return 1;
             }
             if (!stems.empty()) {
+                t1 = opt.audioDuration;
                 beatB = chart.secToBeat(t1);
             } else {
                 beatB = chart.notes.empty() ? 16.0 : chart.notes.back().beat + 8.0;

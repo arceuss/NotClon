@@ -59,7 +59,7 @@ struct Mods {
     // overhead drives it to 0 (PlayerOptions.cpp:349-353). One underlying
     // value, which is why the importer maps all three names onto this knob.
     float tilt = 0;
-    // Not a PlayerOption: Saitama2000's lua/default.xml calls P1:wag() with
+    // Not a PlayerOption: a legacy actor calls P1:wag() with
     // effectmagnitude(0,0,21) effectperiod(2) effectclock('bgm') -- a +-21
     // degree rotZ of the whole player on a 2-beat sine. This knob is that
     // exact call, scaled by percent; a NotClon extension until the actor
@@ -88,6 +88,9 @@ struct Mods {
     // redirects Hold Head to Tap Note), and NotClon sustains keep their CH
     // ribbons under this mode.
     float piu = 0;
+    // Engine visual modes. These replace note/receptor art without changing
+    // the chart, scroll timing or ArrowEffects position pipeline.
+    float moonscraper = 0, yarg = 0;
     float sudden = 0, hidden = 0;
     float suddenOffset = 0, hiddenOffset = 0;
     // Per-column reverse contributions (PlayerOptions.cpp:1313-1332
@@ -375,7 +378,7 @@ inline float ApplyYMods(const Mods& m, int col, float yOffset, float songBeat) {
 // baseline shift is -R/zoom/2, so that term is subtracted back out. centered
 // lerps the shift toward 0.0f (SM5's value; OITG's literal 0.5f at :154 is a
 // half-pixel typo). Values outside 0..1 extrapolate, which is load-bearing:
-// Saitama2000 strobes `-150% Centered` to throw the whole field off-path.
+// Legacy actors strobe `-150% Centered` to throw the whole field off-path.
 // ---------------------------------------------------------------------------
 static const float Y_REVERSE_OFFSET_PX = 270.0f;
 
@@ -418,6 +421,22 @@ inline float ApplyScrollZ(const Mods& m, float z, int col = -1) {
     if (rev == 0.0f && m.centered == 0.0f) return z;
     const float K = ARROW_SIZE * 1.6f;
     return ApplyScrollPos(m, z * K, col) / K;
+}
+
+// Effects added to GetYPos after reverse. Kept separate from GetYPosBump so
+// the flat pump field does not mistake Z depth for Y displacement.
+inline float GetYPosOffset(const Mods& m, int col, float yOffset,
+                           float songBeat = 0.0f, float bpm = 120.0f) {
+    float y = 0.0f;
+    if (m.beaty != 0.0f) {
+        const float a = BeatFactor(songBeat, bpm, m.beatyOffset, m.beatyMult);
+        if (a != 0.0f) y += m.beaty * a * sinf(yOffset / 15.0f + 3.14159265f / 2.0f);
+    }
+    if (m.tipsy != 0.0f)
+        y += m.tipsy * (cosf(m.tipsyOffset * 1.2f + col * 1.8f) * ARROW_SIZE * 0.4f);
+    if (col >= 0 && col < NUM_LANES && m.moveyCol[col] != 0.0f)
+        y += m.moveyCol[col] * ARROW_SIZE;
+    return y;
 }
 
 // Vertical bob. ITG's bumpy rides on top of the arrow's own position.

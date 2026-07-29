@@ -69,12 +69,21 @@ add_executable(sm-timing-test devtools/tests/sm_timing_test.cpp)
 target_include_directories(sm-timing-test PRIVATE src)
 add_test(NAME sm-timing COMMAND sm-timing-test)
 
+add_executable(chart-phrase-test devtools/tests/chart_phrase_test.cpp)
+target_include_directories(chart-phrase-test PRIVATE src)
+add_test(NAME chart-phrase COMMAND chart-phrase-test)
+set_tests_properties(chart-phrase PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # ---------------------------------------------------------------------------
 # The shared render core. Both binaries link this so a frame has exactly one
 # implementation -- the editor must preview what the encoder will write.
+# ufbx v0.23.0 (fcc5d6ba444cfd3eb80677dba5e37e493941abe5) is vendored
+# under its MIT option; see third_party/ufbx/LICENSE.
 # ---------------------------------------------------------------------------
 add_library(notclon_core STATIC
+  third_party/ufbx/ufbx.c
   src/gl.cpp
+  src/engine_mesh.cpp
   src/renderer.cpp
   src/modfile.cpp
   src/smimport.cpp
@@ -99,6 +108,11 @@ add_test(NAME lua-message COMMAND lua-message-test)
 add_executable(actor-runtime-test devtools/tests/actor_runtime_test.cpp)
 target_link_libraries(actor-runtime-test PRIVATE notclon_core)
 add_test(NAME actor-runtime COMMAND actor-runtime-test)
+
+add_executable(engine-mesh-test devtools/tests/engine_mesh_test.cpp)
+target_link_libraries(engine-mesh-test PRIVATE notclon_core)
+add_test(NAME engine-mesh COMMAND engine-mesh-test)
+set_tests_properties(engine-mesh PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # Assets ship beside the executables: the binaries resolve <exe>/assets/ at
 # runtime, so build/ is a complete, movable install -- zip it and it runs.
@@ -141,7 +155,7 @@ add_custom_command(TARGET notclon-editor POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${SDL3_ROOT}/lib/x64/SDL3.dll $<TARGET_FILE_DIR:notclon-editor>)
 
-foreach(t notclon_core notclon notclon-editor imgui notclon_lua lua-cmd-test sm-timing-test lua-message-test actor-runtime-test)
+foreach(t notclon_core notclon notclon-editor imgui notclon_lua lua-cmd-test sm-timing-test chart-phrase-test lua-message-test actor-runtime-test)
   if(MSVC)
     target_compile_options(${t} PRIVATE /O2)
   else()
