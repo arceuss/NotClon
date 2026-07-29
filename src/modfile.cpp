@@ -99,6 +99,11 @@ const ModInfo MODS[] = {
     {"movey2",        0.0f},
     {"movey3",        0.0f},
     {"movey4",        0.0f},
+    {"movez0",        0.0f},
+    {"movez1",        0.0f},
+    {"movez2",        0.0f},
+    {"movez3",        0.0f},
+    {"movez4",        0.0f},
     {"tiny0",         0.0f},
     {"tiny1",         0.0f},
     {"tiny2",         0.0f},
@@ -392,11 +397,14 @@ void modValuesToState(const float* v, float beat, Mods& m, PostFx& fx,
                   "movex knobs must be contiguous, one per lane");
     static_assert(MOD_MOVEY4 - MOD_MOVEY0 == NUM_LANES - 1,
                   "movey knobs must be contiguous, one per lane");
+    static_assert(MOD_MOVEZ4 - MOD_MOVEZ0 == NUM_LANES - 1,
+                  "movez knobs must be contiguous, one per lane");
     static_assert(MOD_TINY4 - MOD_TINY0 == NUM_LANES - 1,
                   "tiny knobs must be contiguous, one per lane");
     for (int c = 0; c < NUM_LANES; ++c) {
         m.movexCol[c] = v[MOD_MOVEX0 + c];
         m.moveyCol[c] = v[MOD_MOVEY0 + c];
+        m.movezCol[c] = v[MOD_MOVEZ0 + c];
         m.tinyCol[c] = v[MOD_TINY0 + c];
     }
     m.zigzagZ = v[MOD_ZIGZAGZ]; m.zigzagZPeriod = v[MOD_ZIGZAGZPERIOD];

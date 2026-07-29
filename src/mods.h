@@ -130,6 +130,7 @@ struct Mods {
     // SM5 ports of such charts rewrite these rows.
     float movexCol[NUM_LANES] = {0, 0, 0, 0, 0};
     float moveyCol[NUM_LANES] = {0, 0, 0, 0, 0};
+    float movezCol[NUM_LANES] = {0, 0, 0, 0, 0};
     float tinyCol[NUM_LANES] = {0, 0, 0, 0, 0};
     // Z-axis twins of the periodic shapes (ArrowEffects.cpp:1200-1290). Same
     // functions, applied to depth instead of sideways.
@@ -467,7 +468,43 @@ inline float GetYPosBump(const Mods& m, int col, float yOffset,
         const float steps = m.digitalZSteps + 1.0f;
         y += (m.digitalZ * ARROW_SIZE * 0.5f) * floorf(steps * sinf(a) + 0.5f) / steps;
     }
+    if (col >= 0 && col < NUM_LANES && m.movezCol[col] != 0.0f)
+        y += m.movezCol[col] * ARROW_SIZE;
     return y;
+}
+
+// The real depth coordinate returned by NotITG's GAMESTATE:GetZ. Rendering
+// still folds depth into GetYPosBump because NotClon's highway has no Z-buffer,
+// but Lua must not mistake Y-only tipsy/movey displacement for note depth.
+inline float GetZPos(const Mods& m, int col, float yOffset,
+                     float songBeat = 0.0f, float bpm = 120.0f) {
+    float z = 0.0f;
+    if (m.beatz != 0.0f) {
+        const float a = BeatFactor(songBeat, bpm, m.beatzOffset, m.beatzMult);
+        if (a != 0.0f) z += m.beatz * a * sinf(yOffset / 15.0f + 3.14159265f / 2.0f);
+    }
+    if (m.bumpy != 0.0f)
+        z += m.bumpy * 40.0f * sinf((yOffset + m.bumpyOffset * 64.0f) /
+                                    ((m.bumpyPeriod * 16.0f) + 16.0f));
+    const float PI2_ = 3.14159265f;
+    if (m.zigzagZ != 0.0f) {
+        const float a = PI2_ * (1.0f / (m.zigzagZPeriod + 1.0f)) *
+                        (yOffset / ARROW_SIZE);
+        z += (m.zigzagZ * ARROW_SIZE * 0.5f) * rageTriangle(a);
+    }
+    if (m.sawtoothZ != 0.0f) {
+        const float t = (0.5f / (m.sawtoothZPeriod + 1.0f) * yOffset) / ARROW_SIZE;
+        z += (m.sawtoothZ * ARROW_SIZE) * (t - floorf(t));
+    }
+    if (m.digitalZ != 0.0f) {
+        const float a = PI2_ * (yOffset + 1.0f * m.digitalZOffset) /
+                        (ARROW_SIZE + (m.digitalZPeriod * ARROW_SIZE));
+        const float steps = m.digitalZSteps + 1.0f;
+        z += (m.digitalZ * ARROW_SIZE * 0.5f) * floorf(steps * sinf(a) + 0.5f) / steps;
+    }
+    if (col >= 0 && col < NUM_LANES && m.movezCol[col] != 0.0f)
+        z += m.movezCol[col] * ARROW_SIZE;
+    return z;
 }
 
 // ---------------------------------------------------------------------------

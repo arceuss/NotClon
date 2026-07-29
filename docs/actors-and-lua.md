@@ -3,8 +3,8 @@
 NotClon can render StepMania/OpenITG **actor folders** — the `lua/`,
 `effects/`-style folders that classic modfiles use for foreground visuals:
 sprites, tweened animations, masks, message-driven effects, and embedded Lua.
-Stock SM5 `default.lua` ActorDef tables are preferred; converted `default.xml`
-files remain a fallback.
+Stock SM5 `default.lua` ActorDef tables are preferred; legacy `default.xml`
+files remain a compatibility fallback.
 
 If a song folder has a `.sm` file next to the chart, its `#FGCHANGES` /
 `#BGCHANGES` entries load these folders automatically. You can also load one
@@ -39,25 +39,32 @@ provides them as shims. `table.getn(t)` behaves as `#t`.
 
 ## What an actor file looks like
 
-The format is the SM 3.9 one — an `<ActorFrame>` tree where attributes are
-command chains and `%function(self) ... end` attributes are Lua:
+The canonical format is an SM5.1 ActorDef table returned from `default.lua`:
 
-```xml
-<ActorFrame> <children>
-  <Layer
-    File="frame.png"
-    OnCommand="x,320;y,240;sleep,0.6;decelerate,0.6;x,160;linear,0.3;diffusealpha,0"
-  />
-  <Layer
-    Type="Quad"
-    InitCommand="hidden,1"
-    FlashMessageCommand="diffusealpha,1;linear,0.5;diffusealpha,0"
-  />
-</children> </ActorFrame>
+```lua
+return Def.ActorFrame{
+    Def.Sprite{
+        Texture="frame.png",
+        OnCommand=function(self)
+            self:x(320):y(240):sleep(0.6)
+            self:decelerate(0.6):x(160):linear(0.3):diffusealpha(0)
+        end,
+    },
+    Def.Quad{
+        InitCommand=function(self) self:visible(false) end,
+        FlashMessageCommand=function(self)
+            self:diffusealpha(1):linear(0.5):diffusealpha(0)
+        end,
+    },
+}
 ```
 
-Coordinates are in StepMania's virtual **640×480** screen space, origin at the
-top-left. Supported commands include the tweens (`sleep`, `linear`,
+An unresolved chart texture uses `assets/_missing.png`; the diagnostic log
+still prints the original path so the chart can be repaired.
+
+Coordinates use StepMania's virtual **480-high, aspect-correct** screen space,
+origin at the top-left: 640×480 at 4:3 and 854×480 at 16:9. Supported commands
+include the tweens (`sleep`, `linear`,
 `accelerate`, `decelerate`, `spring`, `bouncebegin`, `bounceend`), position and
 size (`x`, `y`, `addx`, `addy`, `zoom`, `zoomto`, `zoomtowidth`,
 `zoomtoheight`, `rotationx/y/z`), colour (`diffuse`, `diffusealpha`, `blend`),
@@ -85,17 +92,22 @@ The embedded Lua exposes a deliberately small surface:
 - `GAMESTATE:GetPlayerState(...):GetPlayerOptions('ModsLevel_Song')` exposes
   live per-player options. `FromString`, direct modifier methods and
   `GAMESTATE:ApplyGameCommand(...)` mutate the CH fields the same frame.
+- `GAMESTATE:LaunchAttack(start, length, mods[, player])` schedules an attack
+  in song seconds and rebuilds PlayerOptions at its start and end. Its optional
+  player argument follows the legacy API: 1 is P1 and 2 is P2.
 - `MESSAGEMAN:Broadcast('Name')` — trigger `NameMessageCommand`s
 - `SCREEN_WIDTH`, `SCREEN_HEIGHT`, `SCREEN_CENTER_X`, and `SCREEN_CENTER_Y` —
-  the virtual-screen constants (`640`, `480`, `320`, and `240`)
+  the aspect-correct virtual-screen bounds and centres
 - `DISPLAY` and `PREFSMAN` compatibility methods used during actor setup
 - `Trace(value)` — append a value to the actor diagnostic log
 - `self` is persistent actor userdata. Position, rotation, zoom, colour,
   tween, effect, state, getter, texture and command methods return `self` where
   StepMania does, so chains work.
 - `ActorFrameTexture` setup (`SetTextureName`, `SetWidth`, `SetHeight`,
-  `Enable*`, `Create`, `GetTexture`) allocates a real FBO. Its children render
-  into that target and named textures feed later sprites/AFTs.
+  `Enable*`, `Create`, `GetTexture`) allocates a real FBO. SM5 Lua AFTs render
+  their children into that target; legacy NotITG XML AFT markers snapshot the
+  framebuffer at their draw-order position. Named textures feed later
+  sprites/AFTs in either case.
 - Actor-valued Lua globals and `MESSAGEMAN` broadcasts cross actor-folder
   boundaries, matching the one screen-wide environment used by SM modfiles.
 - `SCREENMAN:GetTopScreen():GetChild('PlayerP1'/'PlayerP2')` returns typed
@@ -179,8 +191,9 @@ shader gives them.
 
 Honest list, so you don't fight the tool:
 
-- `%function` bodies run for `InitCommand`, `OnCommand`, `*MessageCommand` and
-  self-requeued `UpdateCommand` loops. Each queued event sees the beat for its
+- Lua command functions and legacy XML `%function` bodies run for `InitCommand`,
+  `OnCommand`, `*MessageCommand` and self-requeued `UpdateCommand` loops. Each
+  queued event sees the beat for its
   own scheduled second, not the final preview beat. Forward rendering steps the
   loop once; a cold or backward seek reloads the tree and deterministically
   replays it from activation.
@@ -198,6 +211,11 @@ Honest list, so you don't fight the tool:
   messages are not emitted.
 - Only actor-valued globals are mirrored between separately loaded folders;
   arbitrary scalar/table globals remain local to their Lua state.
+- Player and NoteField proxy targets are captured to a full-frame texture
+  before the proxy transform. Their 2D placement can overlap without a
+  half-screen seam, but perspective, skew and 3D rotation transform that
+  rasterized field rather than drawing the NoteField geometry again; pixels
+  clipped at the outer capture edge cannot be recovered by a later proxy.
 - Mirin, NotITG spline APIs, shader flags and general theme-object lookup are
   outside the stock-SM5 surface implemented here.
 

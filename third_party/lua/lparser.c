@@ -116,6 +116,11 @@ static void check_match (LexState *ls, int what, int who, int where) {
 
 static TString *str_checkname (LexState *ls) {
   TString *ts;
+  if (ls->t.token == TK_CMD) {
+    ts = luaX_newstring(ls, "cmd", 3);
+    luaX_next(ls);
+    return ts;
+  }
   check(ls, TK_NAME);
   ts = ls->t.seminfo.ts;
   luaX_next(ls);

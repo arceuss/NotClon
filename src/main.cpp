@@ -26,6 +26,21 @@
 #include <string>
 #include <vector>
 
+static double audioDuration(const std::string& path) {
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd,
+             "ffprobe -v error -show_entries format=duration "
+             "-of default=noprint_wrappers=1:nokey=1 \"%s\" 2>NUL",
+             path.c_str());
+    FILE* pipe = _popen(cmd, "r");
+    if (!pipe) return 0.0;
+    char line[128] = {};
+    const double duration = fgets(line, sizeof line, pipe) ? atof(line) : 0.0;
+    const int status = _pclose(pipe);
+    return status == 0 && std::isfinite(duration) && duration > 0.0
+         ? duration : 0.0;
+}
+
 static void usage() {
     printf(
 "NotClon -- offline Clone Hero chart renderer.\n"
@@ -44,8 +59,9 @@ static void usage() {
 "                        -100%..100%, re-rolled at each chart section)\n"
 "  --randseed <n>        seed for --randmods; same seed = same modchart\n"
 "  --randcount <n>       how many mods at once (default 3)\n"
-"  --actor <sub[@beat]>  load <dir>/<sub>/default.xml as a foreground actor\n"
-"                        tree at <beat> (default 0). Repeatable. With none\n"
+"  --actor <sub[@beat]>  load <dir>/<sub>/default.lua (or legacy XML) as a\n"
+"                        foreground tree at <beat> (default 0). Repeatable.\n"
+"                        With none\n"
 "                        given, a .sm beside the chart supplies #FG/#BGCHANGES.\n"
 "  --noactors            skip the actor layer entirely\n"
 "  --bgshader <f.frag>   add a GLSL shader background layer (OpenITG uniform\n"
@@ -87,6 +103,9 @@ static void usage() {
 "                        sample the hardcoded modchart.h into a .ncmod.\n"
 "                        Needs --dir for the tempo map.\n"
 "  --export-step <beats> sampling grid for the above (default 4)\n"
+"  --dump-mods <f.ncmod> run the adjacent or --actor Lua/XML modfile and\n"
+"                        dump every live song PlayerOptions change, rounded\n"
+"                        to the nearest chart tick. Needs --dir.\n"
 "\n"
 "Examples\n"
 "  notclon --dir \"charts/REM III\" --from 232 --to 264 --enc av1 --out clip.mp4\n"
@@ -179,12 +198,12 @@ static nc::ModDoc randomModchart(const nc::Chart& chart, unsigned seed,
         // want. Without this the knobs accumulate into undifferentiated mush.
         for (int id : prev)
             if (std::find(cur.begin(), cur.end(), id) == cur.end())
-                doc.entries.push_back(nc::ModEntry{tick, id, 0.0f, 0.6f, 0, true});
+                doc.entries.push_back(nc::ModEntry{tick, id, 0.0f, 0.6f, 0, 0, true});
         for (int id : cur) {
             const float v = positiveOnly(id) ? uni()      //    0% .. +100%
                                              : uni() * 2.0f - 1.0f;  // -100..+100
             const float ap = 0.35f + uni();               // eased, not snapped
-            doc.entries.push_back(nc::ModEntry{tick, id, v, ap, 0, true});
+            doc.entries.push_back(nc::ModEntry{tick, id, v, ap, 0, 0, true});
         }
         prev = cur;
     }
@@ -275,7 +294,7 @@ static int exportModchart(const nc::Chart& chart, const std::string& chartDir,
     sample(grid[0], cur.data());
     for (int k = 0; k < NK; ++k)
         if (fabsf(cur[k] - nc::modDefault(KNOBS[k].id)) > EPS)
-            doc.entries.push_back(nc::ModEntry{0, KNOBS[k].id, cur[k], -1.0f, 0, true});
+            doc.entries.push_back(nc::ModEntry{0, KNOBS[k].id, cur[k], -1.0f, 0, 0, true});
 
     for (size_t i = 0; i + 1 < grid.size(); ++i) {
         const double b0 = grid[i], b1 = grid[i + 1];
@@ -292,11 +311,11 @@ static int exportModchart(const nc::Chart& chart, const std::string& chartDir,
             if (fabsf(pre[k] - cur[k]) > EPS)      // ramp across the segment
                 doc.entries.push_back(nc::ModEntry{
                     t0 + 1, KNOBS[k].id, pre[k],
-                    float(fabsf(pre[k] - cur[k]) / dt), 0, true});
+                    float(fabsf(pre[k] - cur[k]) / dt), 0, 0, true});
             if (jump) {                            // then snap at the boundary
                 doc.entries.push_back(nc::ModEntry{
                     int(b1 * chart.resolution + 0.5), KNOBS[k].id, nxt[k],
-                    -1.0f, 0, true});
+                    -1.0f, 0, 0, true});
                 ++jumps;
             }
         }
@@ -309,6 +328,76 @@ static int exportModchart(const nc::Chart& chart, const std::string& chartDir,
     return 0;
 }
 
+static int dumpActorMods(const nc::Chart& chart, const std::string& chartDir,
+                         const std::string& path, nc::ActorLayer& actors,
+                         nc::Renderer& renderer) {
+    auto setChartDir = [&](nc::ModDoc& doc) {
+        std::error_code ec;
+        const auto abs = std::filesystem::absolute(chartDir, ec);
+        doc.chartDir = ec ? chartDir : abs.generic_string();
+    };
+
+    nc::ModDoc legacy;
+    setChartDir(legacy);
+    const int legacyEntries = actors.drainLuaMods(legacy, chart.resolution);
+
+    double lastBeat = chart.notes.empty() ? 16.0 : chart.notes.back().beat + 8.0;
+    for (const std::string& stem : nc::findAudioStems(chartDir, chart.musicStream)) {
+        const double duration = audioDuration(stem);
+        if (duration > 0.0) lastBeat = std::max(lastBeat, chart.secToBeat(duration));
+    }
+    actors.pump(renderer, chart.beatToSec(lastBeat), lastBeat);
+    std::vector<nc::PlayerModChange> changes;
+    actors.collectPlayerModChanges(changes);
+    const int players = actors.livePlayerCount();
+
+    nc::ModDoc doc;
+    if (players > 0) {
+        setChartDir(doc);
+        doc.players = players;
+        int positions[2][nc::MOD_COUNT];
+        std::fill(&positions[0][0], &positions[0][0] + 2 * nc::MOD_COUNT, -1);
+        int activeTick = 0;
+        bool haveTick = false;
+        for (const nc::PlayerModChange& change : changes) {
+            const int tick = int(std::llround(
+                chart.secToBeat(change.sec) * chart.resolution));
+            if (!haveTick || tick != activeTick) {
+                std::fill(&positions[0][0],
+                          &positions[0][0] + 2 * nc::MOD_COUNT, -1);
+                activeTick = tick;
+                haveTick = true;
+            }
+            if (change.player < 1 || change.player > 2 ||
+                change.mod < 0 || change.mod >= nc::MOD_COUNT)
+                continue;
+            int& position = positions[change.player - 1][change.mod];
+            if (position >= 0) {
+                doc.entries[position].percent = change.target;
+                doc.entries[position].approach = change.speed;
+            } else {
+                position = int(doc.entries.size());
+                doc.entries.push_back(nc::ModEntry{
+                    tick, change.mod, change.target, change.speed, 0,
+                    players == 2 ? change.player : 0, true});
+            }
+        }
+    } else {
+        doc = legacy;
+    }
+    doc.rebuild(chart);
+    if (!doc.save(path)) return 1;
+
+    printf("dumped %s: %zu entries from %s through beat %.3f%c",
+           path.c_str(), doc.entries.size(), players > 0 ? "live PlayerOptions"
+                                                         : "Lua mod tables",
+           lastBeat, 10);
+    if (players > 0 && legacyEntries > 0)
+        printf("  live PlayerOptions took precedence over %d static table entries%c",
+               legacyEntries, 10);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { usage(); return 0; }
 
@@ -317,7 +406,7 @@ int main(int argc, char** argv) {
     std::string modPath;
     int W = 1920, H = 1080, fps = 60;
     double beatA = 0.0, beatB = -1.0;
-    bool fromGiven = false;
+    bool fromGiven = false, toGiven = false;
     bool previewOnly = false, bench = false;
     std::string enc_name = "x264";
     double previewBeat = 240.0;
@@ -336,7 +425,7 @@ int main(int argc, char** argv) {
     std::string fxChainArg;
     double syncMs = 0.0;
     bool noBf = false;
-    std::string smPath, exportPath;
+    std::string smPath, exportPath, dumpPath;
     double exportStep = 4.0;
     nc::SmImportOpts smOpts;
 
@@ -364,7 +453,7 @@ int main(int argc, char** argv) {
         else if (a == "--h")       H = atoi(next().c_str());
         else if (a == "--fps")     fps = atoi(next().c_str());
         else if (a == "--from")  { beatA = atof(next().c_str()); fromGiven = true; }
-        else if (a == "--to")      beatB = atof(next().c_str());
+        else if (a == "--to")    { beatB = atof(next().c_str()); toGiven = true; }
         else if (a == "--speed")   opt.noteSpeed = float(atof(next().c_str()));
         else if (a == "--nopost")  opt.noPost = true;
         else if (a == "--nomods")  opt.noMods = true;
@@ -381,6 +470,7 @@ int main(int argc, char** argv) {
         else if (a == "--sm-strum")  smOpts.allStrum = true;
         else if (a == "--export-modchart") exportPath = next();
         else if (a == "--export-step")     exportStep = atof(next().c_str());
+        else if (a == "--dump-mods")       dumpPath = next();
     }
 
     // Import mode: convert and exit. No GL context is created, so this works
@@ -400,6 +490,9 @@ int main(int argc, char** argv) {
                r.bpmPoints, r.stops, r.lastSec, 10);
         printf("  #MODS lines %d -> %d entries (%d scoped)%c",
                r.modLines, r.modEntries, r.modIntervals, 10);
+        if (r.copiedAssets > 0)
+            printf("  copied %d referenced asset file%s into --dir%c",
+                   r.copiedAssets, r.copiedAssets == 1 ? "" : "s", 10);
         // An empty .ncmod is a legitimate result -- plenty of charts keep no
         // native mods at all -- but "0 -> 0 entries" buried in a status block
         // reads as a failed import. Say what happened and where the modchart
@@ -476,7 +569,10 @@ int main(int argc, char** argv) {
     // silent: you get a picture either way and it is simply the wrong one.
     nc::ModDoc doc;
     nc::ModDoc doc2;                 // player 2, when a chart drives one
-    if (randMods) {
+    if (!dumpPath.empty()) {
+        opt.noMods = true;
+        printf("modchart: actor dump%c", 10);
+    } else if (randMods) {
         if (randCount < 1) randCount = 1;
         doc = randomModchart(chart, randSeed, randCount);
         opt.doc = &doc;
@@ -495,7 +591,9 @@ int main(int argc, char** argv) {
             printf("%d .ncmod files in %s -- pass --mods to pick one; "
                    "rendering without a modchart%c", n, chartDir.c_str(), 10);
     }
-    if (randMods) {
+    if (!dumpPath.empty()) {
+        /* actor runtime is the source */
+    } else if (randMods) {
         /* already built */
     } else if (!modPath.empty()) {
         if (!doc.load(modPath)) return 1;
@@ -595,6 +693,19 @@ int main(int argc, char** argv) {
         if (!actors.empty()) R.setActorLayer(&actors);
     }
 
+    if (!dumpPath.empty()) {
+        if (noActors || actors.empty()) {
+            fprintf(stderr, "--dump-mods found no actor modfile; keep actors enabled "
+                            "and use an adjacent .sm or --actor <folder>%c", 10);
+            return 1;
+        }
+        const size_t oldLogSize = actors.log().size();
+        const int result = dumpActorMods(chart, chartDir, dumpPath, actors, R);
+        for (size_t i = oldLogSize; i < actors.log().size(); ++i)
+            printf("actor: %s%c", actors.log()[i].c_str(), 10);
+        return result;
+    }
+
     // Background layer: #BGCHANGES stills/movies from the same .sm, auto-on
     // like the actor layer (--nobg opts out), plus any --bgshader layers over
     // them. No .sm and no --bgshader means no Background is ever constructed
@@ -643,7 +754,8 @@ int main(int argc, char** argv) {
     int frameCount = 1;
     double t0 = 0.0, t1 = 0.0;
     if (!previewOnly) {
-        if (beatB < 0) beatB = chart.notes.empty() ? 16.0 : chart.notes.back().beat + 8.0;
+        const std::vector<std::string> stems =
+            nc::findAudioStems(chartDir, chart.musicStream);
         // Default the start to where the AUDIO starts, not to beat 0. With a
         // negative #OFFSET beat 0 is some way into the song (Saitama2000: beat
         // 0 is at 2.733s), so starting at beat 0 lops that much off the front.
@@ -651,8 +763,29 @@ int main(int argc, char** argv) {
         // 0, is unaffected -- R.E.M. III stays at exactly 0.
         if (!fromGiven) beatA = std::min(0.0, chart.secToBeat(0.0));
         t0 = chart.beatToSec(beatA);
-        t1 = chart.beatToSec(beatB);
-        frameCount = int((t1 - t0) * fps);
+        if (toGiven) {
+            t1 = chart.beatToSec(beatB);
+        } else {
+            for (const std::string& stem : stems) {
+                const double duration = audioDuration(stem);
+                if (duration <= 0.0) {
+                    fprintf(stderr, "cannot read audio duration: %s\n", stem.c_str());
+                    return 1;
+                }
+                t1 = std::max(t1, duration);
+            }
+            if (!stems.empty()) {
+                beatB = chart.secToBeat(t1);
+            } else {
+                beatB = chart.notes.empty() ? 16.0 : chart.notes.back().beat + 8.0;
+                t1 = chart.beatToSec(beatB);
+            }
+        }
+        if (t1 <= t0) {
+            fprintf(stderr, "render range ends before it starts\n");
+            return 1;
+        }
+        frameCount = std::max(1, int(std::ceil((t1 - t0) * fps)));
         // NVENC hands the encode to the GPU's dedicated hardware block, which
         // sits completely idle while we render.
         std::string vcodec;
@@ -671,8 +804,6 @@ int main(int argc, char** argv) {
         // this wrong is silent and total: ffmpeg cannot open the input, exits,
         // and every frame we write goes into a broken pipe, so the run reports
         // success and produces no file.
-        const std::vector<std::string> stems =
-            nc::findAudioStems(chartDir, chart.musicStream);
         if (stems.empty())
             printf("no audio found in %s -- encoding video only\n", chartDir.c_str());
         else if (stems.size() > 1)
@@ -687,8 +818,10 @@ int main(int argc, char** argv) {
         else if (stems.empty())
             snprintf(cmd, sizeof cmd,
                      "%s -y -hide_banner -loglevel warning "
-                     "-f rawvideo -pix_fmt rgb24 -s %dx%d -r %d -i - %s \"%s\"",
-                     nc::nc_ffmpeg().c_str(), W, H, fps, vcodec.c_str(), out.c_str());
+                     "-f rawvideo -pix_fmt rgb24 -s %dx%d -r %d -i - %s "
+                     "-t %.6f \"%s\"",
+                     nc::nc_ffmpeg().c_str(), W, H, fps, vcodec.c_str(),
+                     t1 - t0, out.c_str());
         else {
             // Video is input 0; each stem is its own -ss'd input, mixed at
             // unity gain the way CH layers them (amix normalize=0).
@@ -701,8 +834,12 @@ int main(int argc, char** argv) {
             c = head;
             for (const auto& sp : stems) {
                 char in[600];
-                snprintf(in, sizeof in, "-ss %.6f -i \"%s\" ",
-                         t0 > 0 ? t0 : 0.0, sp.c_str());
+                if (t0 > 0.0)
+                    snprintf(in, sizeof in, "-ss %.6f -i \"%s\" ", t0, sp.c_str());
+                else if (t0 < 0.0)
+                    snprintf(in, sizeof in, "-itsoffset %.6f -i \"%s\" ", -t0, sp.c_str());
+                else
+                    snprintf(in, sizeof in, "-i \"%s\" ", sp.c_str());
                 c += in;
             }
             if (stems.size() > 1) {
@@ -713,7 +850,10 @@ int main(int argc, char** argv) {
                       ":duration=longest:normalize=0[aout]\" -map 0:v -map \"[aout]\" ";
                 c += fl;
             }
-            c += vcodec + " -c:a aac -b:a 320k -shortest \"" + out + "\"";
+            char tail[768];
+            snprintf(tail, sizeof tail, "%s -c:a aac -b:a 320k -t %.6f \"%s\"",
+                     vcodec.c_str(), t1 - t0, out.c_str());
+            c += tail;
             snprintf(cmd, sizeof cmd, "%s", c.c_str());
         }
         printf("encoding %d frames (beat %.1f..%.1f)\n", frameCount, beatA, beatB);

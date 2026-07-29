@@ -349,6 +349,9 @@ inline void buildBeatLines(std::vector<Vtx>& out, const nc::Chart& chart,
 //
 // Blue and Orange set m_FlipX, which mirrors u about the quad centre; the
 // geometry is unchanged because pivot.x is 0.5 and the extents are symmetric.
+// CH lefty flip swaps the four outer FretAnimator positions and negates their
+// local X scale; the centre fret is left alone. `flip` continuously applies
+// that same transform so 100% is the discrete CH layout.
 // One fret button, emitted into SIX separate buckets -- one per sortingOrder.
 //
 // These must stay separate: base, cover and halfCover all share the same sheet,
@@ -361,10 +364,16 @@ inline void buildFret(std::vector<Vtx>& oBase, std::vector<Vtx>& oLift,
                       std::vector<Vtx>& oCover, std::vector<Vtx>& oHead,
                       std::vector<Vtx>& oHeadCover, std::vector<Vtx>& oLight,
                       std::vector<Vtx>& oHalf,
-                      int lane, float headDy, bool held) {
+                      int lane, float headDy, bool held, float flip) {
     const FretLane& F = FRETS[lane];
-    const float x = FRET_X[lane];
-    const float hw = FRET_W * 0.5f;
+    float x = FRET_X[lane];
+    float face = 1.0f;
+    const int opposite = 4 - lane;
+    if (flip != 0.0f && opposite != lane) {
+        x += (FRET_X[opposite] - x) * flip;
+        face -= 2.0f * flip;
+    }
+    const float hw = FRET_W * 0.5f * face;
     const float y0 = -FRET_PIVOT_Y * FRET_H;
     const float y1 = (1.0f - FRET_PIVOT_Y) * FRET_H;
     const float z = FRET_Z;
@@ -378,7 +387,7 @@ inline void buildFret(std::vector<Vtx>& oBase, std::vector<Vtx>& oLift,
     quadUp(oBase, x - hw, y0, x + hw, y1, z, a, 0.0f, b, 1.0f, 1, 1, 1, 1);
 
     {   // 66x18 @ PPU 680, transform scale (1,2,1), local y -0.01
-        float lw = LIFT_W * 0.5f;
+        float lw = LIFT_W * 0.5f * face;
         float ly0 = LIFT_Y - FRET_PIVOT_Y * LIFT_H;
         float ly1 = LIFT_Y + (1.0f - FRET_PIVOT_Y) * LIFT_H;
         quadUp(oLift, x - lw, ly0, x + lw, ly1, z, 0.0f, 0.0f, 1.0f, 1.0f, 1, 1, 1, 1);

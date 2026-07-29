@@ -7,6 +7,8 @@
 #include "actor.h"
 #include "background.h"
 
+#include <algorithm>
+
 namespace nc {
 
 // ---------------------------------------------------------------------------
@@ -96,13 +98,16 @@ layout(location=2) in vec4 aCol;
 layout(location=3) in vec2 aLocal;
 out vec2 vUV; out vec4 vCol; out vec2 vLocal;
 uniform float uDepth;
+uniform float uInvertY;
 // Half the virtual screen. Height is pinned at 480 (240 here); width follows
 // the output aspect -- SM5 and current NotITG both run widescreen this way,
 // and charts scale themselves by SCREEN_WIDTH/640. Defaults keep 4:3.
 uniform vec2 uVirtHalf = vec2(320.0, 240.0);
 void main() {
     vUV = aUV; vCol = aCol; vLocal = aLocal;
-    gl_Position = vec4(aPos.x / uVirtHalf.x - 1.0, 1.0 - aPos.y / uVirtHalf.y, uDepth, 1.0);
+    gl_Position = vec4(aPos.x / uVirtHalf.x - 1.0,
+                       (1.0 - aPos.y / uVirtHalf.y) * uInvertY,
+                       uDepth, 1.0);
 }
 )";
 
@@ -111,11 +116,16 @@ in vec2 vUV; in vec4 vCol; in vec2 vLocal;
 out vec4 oCol;
 uniform sampler2D uTex;
 uniform float uHasTex;
+uniform float uGlow;
 uniform vec2 uFadeX;
 uniform vec2 uFadeY;
 void main() {
     vec4 c = vCol;
-    if (uHasTex > 0.5) c *= texture(uTex, vUV);
+    if (uHasTex > 0.5) {
+        vec4 texel = texture(uTex, vUV);
+        if (uGlow > 0.5) c.a *= texel.a;
+        else c *= texel;
+    }
     if (uFadeX.x > 0.0) c.a *= clamp(vLocal.x / uFadeX.x, 0.0, 1.0);
     if (uFadeX.y > 0.0) c.a *= clamp((1.0-vLocal.x) / uFadeX.y, 0.0, 1.0);
     if (uFadeY.x > 0.0) c.a *= clamp(vLocal.y / uFadeY.x, 0.0, 1.0);
@@ -241,13 +251,13 @@ void Renderer::buildCamera() {
     float pitch = ch::CAM_PITCH_DEG * 3.14159265f / 180.0f;
     float fwd[3] = {0.0f, -sinf(pitch), cosf(pitch)};
     float at[3]  = {eye[0] + fwd[0]*10, eye[1] + fwd[1]*10, eye[2] + fwd[2]*10};
-    const Mat4 view = mat_lookAt(eye, at);
+    view_ = mat_lookAt(eye, at);
     mvp_ = mat_mul(mat_perspective(ch::CAM_FOV, float(W)/float(H),
                                    ch::CAM_NEAR, ch::CAM_FAR),
-                   view);
+                   view_);
     mvp2_ = mat_mul(mat_perspective(ch::CAM_FOV, float(W)*0.5f/float(H),
                                     ch::CAM_NEAR, ch::CAM_FAR),
-                    view);
+                    view_);
     // Unity is left-handed; this right-handed lookAt puts +x on the left.
     // Negating clip-space x once lets every Unity coordinate be used verbatim
     // instead of sprinkling sign flips through the geometry.
@@ -286,7 +296,6 @@ void Renderer::makeFbos() {
     // clip every frame to a corner and read back black.
     mk(postFbo_, postTex_);
     mk(fxFbo_, fxTex_);            // --fxshader's intermediate; see renderer.h
-    for (int pn = 0; pn < 2; ++pn) mk(playerSourceFbo_[pn], playerSourceTex_[pn]);
 }
 
 void Renderer::destroyFbos() {
@@ -295,11 +304,6 @@ void Renderer::destroyFbos() {
     if (postFbo_) { glDeleteFramebuffers(1, &postFbo_); postFbo_ = 0; }
     if (fxFbo_)   { glDeleteFramebuffers(1, &fxFbo_);   fxFbo_ = 0; }
     if (fxTex_)   { glDeleteTextures(1, &fxTex_);       fxTex_ = 0; }
-    for (int pn = 0; pn < 2; ++pn) {
-        if (playerSourceFbo_[pn]) glDeleteFramebuffers(1, &playerSourceFbo_[pn]);
-        if (playerSourceTex_[pn]) glDeleteTextures(1, &playerSourceTex_[pn]);
-        playerSourceFbo_[pn] = playerSourceTex_[pn] = 0;
-    }
     if (colorTex_) { glDeleteTextures(1, &colorTex_); colorTex_ = 0; }
     if (postTex_)  { glDeleteTextures(1, &postTex_);  postTex_ = 0; }
 }
@@ -335,6 +339,7 @@ bool Renderer::init(int w, int h, const std::string& A) {
     texLift_    = gl_loadTex(A + "frets/spr_targets_lift.png", false);
     texHLight_  = gl_loadTex(A + "frets/Head_Lights.png", false);
     actorFont_  = gl_loadTex(A + "fonts/_eurostile normal (mipmaps) 16x16.png", false);
+    actorMissing_ = gl_loadTex(A + "_missing.png", false, false);
     int rawFontWidth[256];
     for (int& width : rawFontWidth) width = 32;
     int addToWidths = 0, advanceExtra = 1;
@@ -422,12 +427,24 @@ double Renderer::lastHit(int lane, double now) const {
     return now - best;
 }
 
+void Renderer::applyFieldTint() {
+    if (fieldTint_[0] == 1.0f && fieldTint_[1] == 1.0f &&
+        fieldTint_[2] == 1.0f && fieldTint_[3] == 1.0f) return;
+    for (ch::Vtx& vertex : v_) {
+        vertex.r *= fieldTint_[0];
+        vertex.g *= fieldTint_[1];
+        vertex.b *= fieldTint_[2];
+        vertex.a *= fieldTint_[3];
+    }
+}
+
 // A bucket of pre-tinted silhouette quads through the note-glow program:
 // the texture's alpha with the vertex colour's RGB, premultiplied. Used for
 // the hold-body glow pass, whose alpha varies per ROW (GetGlow is a function
 // of yOffset), so it cannot go through drawLayer's uniform-alpha repaint.
 void Renderer::drawGlowLayer(GLuint tex) {
     if (v_.empty()) return;
+    applyFieldTint();
     glUseProgram(glow_);
     glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     glBindTexture(GL_TEXTURE_2D, tex);
@@ -442,6 +459,7 @@ void Renderer::drawGlowLayer(GLuint tex) {
 // wants the neck's straight-alpha blend, so there is no uPremul to set.
 void Renderer::drawPiuLayer(GLuint tex, int blend) {
     if (v_.empty()) return;
+    applyFieldTint();
     glUseProgram(piu_);
     glBlendFunc(blend == ch::BLEND_ADD ? GL_ONE : GL_ONE,
                 blend == ch::BLEND_ADD ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
@@ -451,7 +469,7 @@ void Renderer::drawPiuLayer(GLuint tex, int blend) {
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(glGetUniformLocation(piu_, "uTex"), 0);
     glUniform2f(glGetUniformLocation(piu_, "uVirt"),
-                480.0f * float(W) / float(H), 480.0f);
+                logicalScreenWidth(W, H), 480.0f);
     glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(v_.size() * sizeof(ch::Vtx)),
                  v_.data(), GL_STREAM_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, GLsizei(v_.size()));
@@ -483,7 +501,7 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
     // and as wide as the output aspect calls for. Hard-coding 640 would squash
     // every panel horizontally on a 16:9 render.
     const float VIRT_H = 480.0f;
-    const float VIRT_W = 480.0f * float(W) / float(H);
+    const float VIRT_W = logicalScreenWidth(W, H);
     const float CENTER_X = VIRT_W * 0.5f;
     // Pump's own column spacing, PUMP_COL_SPACING = 50 (GameManager.cpp:53),
     // NOT dance's 64. Every pixel the mods hand back is in 64-per-lane space
@@ -803,6 +821,7 @@ void Renderer::drawActorQuad(float cx, float cy, float w, float h, float rotZDeg
     drawActorQuad3D(cx, cy, 0.0f, 0.0f, 0.0f, w, h,
                     0.0f, 0.0f, rotZDeg, 0.0f,
                     -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                    0.0f, 0.0f, 0.0f, 0.0f,
                     r, g, b, a, tex, blend, zWrite, zTest, clearZ,
                     u0, v0, u1, v1);
 }
@@ -814,10 +833,17 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
                                float vanishX, float vanishY,
                                float fadeLeft, float fadeRight,
                                float fadeTop, float fadeBottom,
+                               float cropLeft, float cropRight,
+                               float cropTop, float cropBottom,
                                float r, float g, float b, float a,
                                GLuint tex, int blend, bool zWrite, bool zTest,
                                bool clearZ, float u0, float v0,
-                               float u1, float v1) {
+                               float u1, float v1, GLuint customProgram,
+                               const std::vector<ActorShaderBinding>* customUniforms,
+                               int imageW, int imageH, bool textureGlow,
+                               const std::vector<ActorPolygonVertex>* polygon,
+                               bool polygonTriangles, int cullMode,
+                               float polygonZoomZ) {
     // blend,noeffect writes depth with NO colour, so it must still draw at
     // alpha 0 -- that is the whole point of a mask actor.
     if (a <= 0.0f && blend != 2) return;
@@ -837,7 +863,7 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
     const float m20 = -sY;
     const float m21 = cY*sX;
     const float m22 = cY*cX;
-    const float virtW = 480.0f * float(W) / float(H);
+    const float virtW = logicalScreenWidth(W, H);
     const float cameraDist = fovDeg > 0.0f
         ? virtW * 0.5f / tanf(fovDeg * 3.14159265f / 360.0f) : 0.0f;
     auto P = [&](float dx, float dy, float u, float v,
@@ -865,8 +891,112 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
     P(-hw, -hh, u0, v0, 0, 0, q[0]); P(hw, -hh, u1, v0, 1, 0, q[1]);
     P(hw, hh, u1, v1, 1, 1, q[2]);   P(-hw, -hh, u0, v0, 0, 0, q[3]);
     P(hw, hh, u1, v1, 1, 1, q[4]);   P(-hw, hh, u0, v1, 0, 1, q[5]);
+    const bool drawPolygon = polygon && !polygon->empty();
+    const bool useFadeMesh = !drawPolygon &&
+        (fadeLeft > 0.0f || fadeRight > 0.0f ||
+         fadeTop > 0.0f || fadeBottom > 0.0f);
+    std::vector<float> fadedQuadData;
+    if (useFadeMesh) {
+        // Sprite edge fades are five independently cropped rectangles: the
+        // opaque inside, then left/right/top/bottom strips. Keep raw crop
+        // values until each rectangle is clipped; negative crops deliberately
+        // affect fade sizing before the eventual 0..1 clamp.
+        float fadeSizeLeft = fadeLeft, fadeSizeRight = fadeRight;
+        float fadeSizeTop = fadeTop, fadeSizeBottom = fadeBottom;
+        const float horizontalRemaining = 1.0f - (cropLeft + cropRight);
+        const float horizontalFade = fadeLeft + fadeRight;
+        if (horizontalFade > 0.0f && horizontalRemaining < horizontalFade) {
+            const float leftPart = fadeLeft / horizontalFade;
+            fadeSizeLeft = leftPart * horizontalRemaining;
+            fadeSizeRight = (1.0f - leftPart) * horizontalRemaining;
+        }
+        const float verticalRemaining = 1.0f - (cropTop + cropBottom);
+        const float verticalFade = fadeTop + fadeBottom;
+        if (verticalFade > 0.0f && verticalRemaining < verticalFade) {
+            const float topPart = fadeTop / verticalFade;
+            fadeSizeTop = topPart * verticalRemaining;
+            fadeSizeBottom = (1.0f - topPart) * verticalRemaining;
+        }
 
-    glUseProgram(actor_);
+        const float baseLeft = std::clamp(cropLeft, 0.0f, 1.0f);
+        const float baseRight = 1.0f - std::clamp(cropRight, 0.0f, 1.0f);
+        const float baseTop = std::clamp(cropTop, 0.0f, 1.0f);
+        const float baseBottom = 1.0f - std::clamp(cropBottom, 0.0f, 1.0f);
+        const float baseWidth = baseRight - baseLeft;
+        const float baseHeight = baseBottom - baseTop;
+        fadedQuadData.reserve(5 * 6 * 10);
+
+        auto appendRect = [&](float rawLeft, float rawRight,
+                              float rawTop, float rawBottom,
+                              float alphaTL, float alphaTR,
+                              float alphaBL, float alphaBR) {
+            if (rawLeft + rawRight >= 1.0f ||
+                rawTop + rawBottom >= 1.0f ||
+                baseWidth <= 0.0f || baseHeight <= 0.0f) return;
+            const float rectLeft = std::clamp(rawLeft, 0.0f, 1.0f);
+            const float rectRight = 1.0f - std::clamp(rawRight, 0.0f, 1.0f);
+            const float rectTop = std::clamp(rawTop, 0.0f, 1.0f);
+            const float rectBottom = 1.0f - std::clamp(rawBottom, 0.0f, 1.0f);
+            if (rectLeft >= rectRight || rectTop >= rectBottom) return;
+            const float x0 = (rectLeft - baseLeft) / baseWidth;
+            const float x1 = (rectRight - baseLeft) / baseWidth;
+            const float y0 = (rectTop - baseTop) / baseHeight;
+            const float y1 = (rectBottom - baseTop) / baseHeight;
+            auto append = [&](float lx, float ly, float vertexAlpha) {
+                float vertex[10];
+                P((lx - 0.5f) * w, (ly - 0.5f) * h,
+                  u0 + (u1 - u0) * lx, v0 + (v1 - v0) * ly,
+                  lx, ly, vertex);
+                vertex[7] *= vertexAlpha;
+                fadedQuadData.insert(fadedQuadData.end(), vertex, vertex + 10);
+            };
+            append(x0, y0, alphaTL); append(x1, y0, alphaTR);
+            append(x1, y1, alphaBR); append(x0, y0, alphaTL);
+            append(x1, y1, alphaBR); append(x0, y1, alphaBL);
+        };
+
+        appendRect(cropLeft + fadeLeft, cropRight + fadeRight,
+                   cropTop + fadeTop, cropBottom + fadeBottom,
+                   1.0f, 1.0f, 1.0f, 1.0f);
+        if (fadeSizeLeft > 0.001f) {
+            const float edgeAlpha = fadeSizeLeft / fadeLeft;
+            appendRect(cropLeft, 1.0f - (cropLeft + fadeSizeLeft),
+                       cropTop + fadeTop, cropBottom + fadeBottom,
+                       0.0f, edgeAlpha, 0.0f, edgeAlpha);
+        }
+        if (fadeSizeRight > 0.001f) {
+            const float edgeAlpha = fadeSizeRight / fadeRight;
+            appendRect(1.0f - (cropRight + fadeSizeRight), cropRight,
+                       cropTop + fadeTop, cropBottom + fadeBottom,
+                       edgeAlpha, 0.0f, edgeAlpha, 0.0f);
+        }
+        if (fadeSizeTop > 0.001f) {
+            const float edgeAlpha = fadeSizeTop / fadeTop;
+            appendRect(cropLeft + fadeLeft, cropRight + fadeRight,
+                       cropTop, 1.0f - (cropTop + fadeSizeTop),
+                       0.0f, 0.0f, edgeAlpha, edgeAlpha);
+        }
+        if (fadeSizeBottom > 0.001f) {
+            const float edgeAlpha = fadeSizeBottom / fadeBottom;
+            appendRect(cropLeft + fadeLeft, cropRight + fadeRight,
+                       1.0f - (cropBottom + fadeSizeBottom), cropBottom,
+                       edgeAlpha, edgeAlpha, 0.0f, 0.0f);
+        }
+    }
+    std::vector<float> polygonData;
+    if (drawPolygon) {
+        polygonData.reserve(polygon->size() * 10);
+        for (const ActorPolygonVertex& vertex : *polygon) {
+            const float data[10] = {
+                vertex.x, vertex.y, vertex.u, vertex.v,
+                r, g, b, a, vertex.z, 0.0f
+            };
+            polygonData.insert(polygonData.end(), data, data + 10);
+        }
+    }
+
+    const GLuint actorProgram = customProgram ? customProgram : actor_;
+    glUseProgram(actorProgram);
     glBindVertexArray(avao_);
     glBindBuffer(GL_ARRAY_BUFFER, avbo_);
     // blend: 0 normal, 1 add, 2 noeffect (colour write off -- used with zwrite
@@ -907,17 +1037,83 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(zTest ? GL_LEQUAL : GL_ALWAYS);
     glDepthMask(zWrite ? GL_TRUE : GL_FALSE);
-    glUniform1f(glGetUniformLocation(actor_, "uDepth"), blend == 2 ? -0.1f : 0.1f);
-    glUniform2f(glGetUniformLocation(actor_, "uVirtHalf"),
-                240.0f * float(W) / float(H), 240.0f);
+    if (drawPolygon && cullMode != 0) {
+        glEnable(GL_CULL_FACE);
+        glCullFace(cullMode == 1 ? GL_BACK : GL_FRONT);
+    }
+    glUniform1f(glGetUniformLocation(actorProgram, "uDepth"), blend == 2 ? -0.1f : 0.1f);
+    glUniform1f(glGetUniformLocation(actorProgram, "uInvertY"),
+                actorTargetYInverted_ ? -1.0f : 1.0f);
+    glUniform2f(glGetUniformLocation(actorProgram, "uVirtHalf"),
+                logicalScreenWidth(W, H) * 0.5f, 240.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glUniform1i(glGetUniformLocation(actor_, "uTex"), 0);
-    glUniform1f(glGetUniformLocation(actor_, "uHasTex"), tex ? 1.0f : 0.0f);
-    glUniform2f(glGetUniformLocation(actor_, "uFadeX"), fadeLeft, fadeRight);
-    glUniform2f(glGetUniformLocation(actor_, "uFadeY"), fadeTop, fadeBottom);
-    glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+    if (customProgram) {
+        glUniform1i(glGetUniformLocation(actorProgram, "sampler0"), 0);
+        glUniform2f(glGetUniformLocation(actorProgram, "textureSize"),
+                    float(imageW), float(imageH));
+        glUniform2f(glGetUniformLocation(actorProgram, "imageSize"),
+                    float(imageW), float(imageH));
+        GLint viewport[4] = {};
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        glUniform2f(glGetUniformLocation(actorProgram, "resolution"),
+                    float(viewport[2]), float(viewport[3]));
+        if (drawPolygon) {
+            glUniform3f(glGetUniformLocation(actorProgram, "ncCenter"), cx, cy, cz);
+            glUniform3f(glGetUniformLocation(actorProgram, "ncZoom"),
+                        w, h, polygonZoomZ);
+            glUniform3f(glGetUniformLocation(actorProgram, "ncRot0"), m00, m10, m20);
+            glUniform3f(glGetUniformLocation(actorProgram, "ncRot1"), m01, m11, m21);
+            glUniform3f(glGetUniformLocation(actorProgram, "ncRot2"), m02, m12, m22);
+            glUniform1f(glGetUniformLocation(actorProgram, "ncSkewX"), skewX);
+            glUniform1f(glGetUniformLocation(actorProgram, "ncCameraDist"), cameraDist);
+            glUniform2f(glGetUniformLocation(actorProgram, "ncVanish"), vanishX, vanishY);
+        }
+        int textureUnit = 1;
+        if (customUniforms) for (const ActorShaderBinding& uniform : *customUniforms) {
+            const GLint location = glGetUniformLocation(actorProgram, uniform.name.c_str());
+            if (location < 0) continue;
+            if (uniform.components == 1) glUniform1f(location, uniform.value[0]);
+            else if (uniform.components == 2)
+                glUniform2f(location, uniform.value[0], uniform.value[1]);
+            else if (uniform.components == 4)
+                glUniform4f(location, uniform.value[0], uniform.value[1],
+                            uniform.value[2], uniform.value[3]);
+            else if (uniform.texture) {
+                glActiveTexture(GL_TEXTURE0 + textureUnit);
+                glBindTexture(GL_TEXTURE_2D, uniform.texture);
+                glUniform1i(location, textureUnit++);
+            }
+        }
+        glActiveTexture(GL_TEXTURE0);
+        glEnable(GL_ALPHA_TEST);
+        glAlphaFunc(GL_GREATER, 0.01f);
+    } else {
+        glUniform1i(glGetUniformLocation(actorProgram, "uTex"), 0);
+        glUniform1f(glGetUniformLocation(actorProgram, "uHasTex"), tex ? 1.0f : 0.0f);
+        glUniform1f(glGetUniformLocation(actorProgram, "uGlow"), textureGlow ? 1.0f : 0.0f);
+        glUniform2f(glGetUniformLocation(actorProgram, "uFadeX"), 0.0f, 0.0f);
+        glUniform2f(glGetUniformLocation(actorProgram, "uFadeY"), 0.0f, 0.0f);
+    }
+    if (drawPolygon) {
+        glBufferData(GL_ARRAY_BUFFER,
+                     GLsizeiptr(polygonData.size() * sizeof(float)),
+                     polygonData.data(), GL_STREAM_DRAW);
+        glDrawArrays(polygonTriangles ? GL_TRIANGLES : GL_TRIANGLE_STRIP,
+                     0, GLsizei(polygon->size()));
+    } else if (useFadeMesh) {
+        if (!fadedQuadData.empty()) {
+            glBufferData(GL_ARRAY_BUFFER,
+                         GLsizeiptr(fadedQuadData.size() * sizeof(float)),
+                         fadedQuadData.data(), GL_STREAM_DRAW);
+            glDrawArrays(GL_TRIANGLES, 0, GLsizei(fadedQuadData.size() / 10));
+        }
+    } else {
+        glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    if (customProgram) glDisable(GL_ALPHA_TEST);
+    if (drawPolygon && cullMode != 0) glDisable(GL_CULL_FACE);
     if (blend == 2) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
@@ -972,6 +1168,7 @@ void Renderer::drawActorText(const std::string& text,
                                 drawWidth * zoomX, 32.0f * zoomY,
                                 rotXDeg, rotYDeg, rotZDeg, skewX,
                                 fovDeg, vanishX, vanishY, 0, 0, 0, 0,
+                                0, 0, 0, 0,
                                 r, g, b, a, actorFont_.id, blend,
                                 zWrite, zTest, clearZ && firstGlyph,
                                 u0, v0, u1, v1);
@@ -984,19 +1181,101 @@ void Renderer::drawActorText(const std::string& text,
 }
 
 void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
-                                     float zoomX, float zoomY,
+                                     float zoomX, float zoomY, float zoomZ,
                                      float rotXDeg, float rotYDeg, float rotZDeg,
                                      float skewX, float fovDeg,
                                      float vanishX, float vanishY,
                                      float r, float g, float b, float a) {
-    if (pn < 1 || pn > 2 || !playerSourceTex_[pn - 1]) return;
-    const float virtW = 480.0f * float(W) / float(H);
-    drawActorQuad3D(x, y, z, 0, 0,
-                    virtW * zoomX, 480.0f * zoomY,
-                    rotXDeg, rotYDeg, rotZDeg, skewX,
-                    fovDeg, vanishX, vanishY, 0, 0, 0, 0,
-                    r, g, b, a, playerSourceTex_[pn - 1], 0,
-                    false, false, false, 0.0f, 1.0f, 1.0f, 0.0f);
+    if (pn < 1 || pn > 2 || a <= 0.0f || !actorChart_ || !actorOpts_ ||
+        !actorFields_[pn - 1]) return;
+
+    // Convert the highway's camera space to the actor layer's pixel space
+    // without dividing by clip W. At the normal 45-degree actor camera this
+    // reproduces the ordinary field projection exactly, but the vertices keep
+    // their depth so proxy rotation and perspective act on the highway itself.
+    const float halfW = logicalScreenWidth(W, H) * 0.5f;
+    const float halfH = 240.0f;
+    const float baseDistance = halfW / tanf(45.0f * 3.14159265f / 360.0f);
+    const float viewZ0 = view_.m[14];
+    if (fabsf(viewZ0) < 1e-5f) return;
+    const float sceneCot = 1.0f / tanf(ch::CAM_FOV * 3.14159265f / 360.0f);
+    const float sceneAspect = actorOpts_->doc2
+                            ? float(W) * 0.5f / float(H)
+                            : float(W) / float(H);
+
+    Mat4 cameraToActor{};
+    cameraToActor.m[0] = -halfW * sceneCot / (sceneAspect * -viewZ0);
+    cameraToActor.m[5] = -halfH * sceneCot / -viewZ0;
+    cameraToActor.m[10] = -baseDistance / viewZ0;
+    cameraToActor.m[14] = baseDistance;
+    cameraToActor.m[15] = 1.0f;
+
+    Mat4 local{};
+    local.m[0] = zoomX;
+    local.m[4] = skewX * zoomY;
+    local.m[5] = zoomY;
+    local.m[10] = zoomZ;
+    local.m[15] = 1.0f;
+
+    const float rx = rotXDeg * 3.14159265f / 180.0f;
+    const float ry = rotYDeg * 3.14159265f / 180.0f;
+    const float rz = rotZDeg * 3.14159265f / 180.0f;
+    const float cX = cosf(rx), sX = sinf(rx);
+    const float cY = cosf(ry), sY = sinf(ry);
+    const float cZ = cosf(rz), sZ = sinf(rz);
+    Mat4 model{};
+    model.m[0] = cZ*cY;
+    model.m[1] = cZ*sY*sX+sZ*cX;
+    model.m[2] = cZ*sY*cX-sZ*sX;
+    model.m[4] = -sZ*cY;
+    model.m[5] = -sZ*sY*sX+cZ*cX;
+    model.m[6] = -sZ*sY*cX-cZ*sX;
+    model.m[8] = -sY;
+    model.m[9] = cY*sX;
+    model.m[10] = cY*cX;
+    model.m[12] = x;
+    model.m[13] = y;
+    model.m[14] = z;
+    model.m[15] = 1.0f;
+
+    Mat4 projection{};
+    const float invertY = actorTargetYInverted_ ? -1.0f : 1.0f;
+    if (fovDeg != 0.0f) {
+        const float actorFov = fovDeg > 0.0f ? fovDeg : 45.0f;
+        const float cameraDistance = halfW /
+            tanf(actorFov * 3.14159265f / 360.0f);
+        const float vx = fovDeg > 0.0f ? vanishX : halfW;
+        const float vy = fovDeg > 0.0f ? vanishY : halfH;
+        projection.m[0] = cameraDistance / halfW;
+        projection.m[5] = -cameraDistance / halfH * invertY;
+        projection.m[8] = 1.0f - vx / halfW;
+        projection.m[9] = (-1.0f + vy / halfH) * invertY;
+        projection.m[11] = -1.0f;
+        projection.m[12] = -cameraDistance;
+        projection.m[13] = cameraDistance * invertY;
+        projection.m[15] = cameraDistance;
+    } else {
+        projection.m[0] = 1.0f / halfW;
+        projection.m[5] = -invertY / halfH;
+        projection.m[12] = -1.0f;
+        projection.m[13] = invertY;
+        projection.m[15] = 1.0f;
+    }
+
+    const Mat4 actorModel = mat_mul(model, local);
+    const Mat4 actorView = mat_mul(cameraToActor,
+                                   actorFields_[pn - 1]->viewEff);
+    const Mat4 actorMvp = mat_mul(projection, mat_mul(actorModel, actorView));
+
+    const float oldTint[4] = {
+        fieldTint_[0], fieldTint_[1], fieldTint_[2], fieldTint_[3]
+    };
+    fieldTint_[0] = r; fieldTint_[1] = g;
+    fieldTint_[2] = b; fieldTint_[3] = a;
+    drawField(*actorChart_, actorBeat_, *actorOpts_, *actorFields_[pn - 1],
+              0, W, actorScrollNow_, actorSongTime_, actorNowSec_, actorBpm_,
+              &actorMvp);
+    for (int i = 0; i < 4; ++i) fieldTint_[i] = oldTint[i];
 }
 
 // The sustain glow: its own program, additive, no texture. Mirrors drawLayer
@@ -1004,6 +1283,7 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
 // to bind.
 void Renderer::drawSustainGlow() {
     if (v_.empty()) return;
+    applyFieldTint();
     glUseProgram(susGlow_);
     glBlendFunc(GL_ONE, GL_ONE);                 // SustainGlow.shader Blend One One
     glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(v_.size() * sizeof(ch::Vtx)),
@@ -1015,6 +1295,7 @@ void Renderer::drawSustainGlow() {
 
 void Renderer::drawLayer(GLuint tex, int blend, float glow) {
     if (v_.empty()) return;
+    applyFieldTint();
     switch (blend) {
         case ch::BLEND_NECK: glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); break;
         case ch::BLEND_ADD:  glBlendFunc(GL_ONE, GL_ONE); break;
@@ -1032,7 +1313,12 @@ void Renderer::drawLayer(GLuint tex, int blend, float glow) {
     // every frame with no appearance mod live -- that is what keeps this
     // hash-neutral.
     if (glow > 0.0f) {
-        for (ch::Vtx& vt : v_) { vt.r = vt.g = vt.b = 1.0f; vt.a = glow; }
+        for (ch::Vtx& vt : v_) {
+            vt.r = fieldTint_[0];
+            vt.g = fieldTint_[1];
+            vt.b = fieldTint_[2];
+            vt.a = glow * fieldTint_[3];
+        }
         glUseProgram(glow_);
         glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(v_.size() * sizeof(ch::Vtx)),
                      v_.data(), GL_STREAM_DRAW);
@@ -1058,6 +1344,7 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
     float& noteSpeed = E.noteSpeed;
     float& piuT = E.piuT;
     Mat4& mvpEff = E.mvpEff;
+    Mat4& viewEff = E.viewEff;
     const float bpm = float(chart.bpmAt(beat));
     (void)bpm;
     // bg.<name> knob values for shader background layers. The trailing evalAt
@@ -1112,6 +1399,7 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
     // wag% * 21 degrees on a 2-beat bgm-clock sine.
     const Mat4& baseMvp = o.doc2 ? mvp2_ : mvp_;
     mvpEff = baseMvp;
+    viewEff = view_;
     {
         const float tiltDeg = 30.0f * mods.tilt;
         float zoom = 1.0f - 0.5f * mods.mini;
@@ -1134,6 +1422,7 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
             F.m[10] = zoom *  cx_;
             F.m[15] = 1.0f;
             mvpEff = mat_mul(baseMvp, F);
+            viewEff = mat_mul(view_, F);
         }
     }
 
@@ -1147,14 +1436,15 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
 // half-width projection while the full framebuffer remains available.
 void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                          FieldEval& E, int vpX, int vpW, float scrollNow,
-                         float songTime, double nowSec, float bpm) {
+                         float songTime, double nowSec, float bpm,
+                         const Mat4* mvpOverride) {
     Mods& mods = E.mods;
     float& mx = E.mx; float& my = E.my; float& mz = E.mz;
     const float noteSpeed = E.noteSpeed;
     const float piuT = E.piuT;
     Mat4& mvpEff = E.mvpEff;
-    Mat4 drawMvp = mvpEff;
-    if (vpX != 0 || vpW != W) {
+    Mat4 drawMvp = mvpOverride ? *mvpOverride : mvpEff;
+    if (!mvpOverride && (vpX != 0 || vpW != W)) {
         Mat4 place{};
         place.m[0] = float(vpW) / float(W);
         place.m[5] = place.m[10] = place.m[15] = 1.0f;
@@ -1164,7 +1454,7 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     (void)nowSec;
     const bool hasStops = !chart.stops.empty();
     auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
-    glViewport(0, 0, W, H);
+    if (!mvpOverride) glViewport(0, 0, W, H);
     glUseProgram(prog_);
     glUniformMatrix4fv(glGetUniformLocation(prog_, "uMVP"), 1, GL_FALSE, drawMvp.m);
     glUniform1i(glGetUniformLocation(prog_, "uTex"), 0);
@@ -1316,15 +1606,20 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         size_t n0[7];
         for (int i = 0; i < 7; ++i) n0[i] = bk[i]->size();
         ch::buildFret(B.base, B.lift, B.cover, B.head, B.headCover,
-                      B.light, B.half, lane, popY, held);
+                       B.light, B.half, lane, popY, held, mods.flip);
         // The receptor rule, ReceptorArrowRow.cpp:46-54: a receptor is an
         // arrow evaluated at fYOffset = 0. Which mods move frets is a
         // CONSEQUENCE: tornado's term is identically 0 there (cos(acos(b))==b)
         // and ITG's bumpy is sin(0)==0; drunk/flip/invert/beat/tipsy displace.
         // NotClon's bumpyOffset extension makes bumpy nonzero at 0 -- accepted,
         // it is our knob. Guarded so the all-zero case never touches a vertex.
-        const float wdx = pxToUnits(GetXPos(mods, lane, 0.0f, songTime,
-                                            float(beat), bpm));
+        float wdxPx = GetXPos(mods, lane, 0.0f, songTime, float(beat), bpm);
+        // buildFret applies flip on CH's authored 0.2-wide fret ladder so 100%
+        // lands on the exact lefty positions. Remove GetXPos's 0.1935-wide
+        // note-ladder contribution here; every other ArrowEffects term stays.
+        if (mods.flip != 0.0f)
+            wdxPx -= (laneXPixels(4 - lane) - laneXPixels(lane)) * mods.flip;
+        const float wdx = pxToUnits(wdxPx);
         const float wdy = pxToUnits(GetYPosBump(mods, lane, 0.0f, float(beat), bpm)) * 0.5f;
         const float wdz = ApplyScrollZ(mods, 0.0f);
         if (wdx != 0.0f || wdy != 0.0f || wdz != 0.0f)
@@ -1576,10 +1871,19 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
         actors_->setAutoplay(!o.noBot);
         actors_->pump(*this, songTime);
     }
+    const int actorPlayers = actors_ ? actors_->livePlayerCount() : 0;
     FieldEval E = evalField(chart, beat, o, o.doc, 1);
-    const bool twoFields = o.doc2 != nullptr;
+    const bool twoFields = o.doc2 != nullptr || actorPlayers > 1;
     FieldEval E2;
-    if (twoFields) E2 = evalField(chart, beat, o, o.doc2, 2);
+    if (twoFields) E2 = evalField(chart, beat, o, o.doc2 ? o.doc2 : o.doc, 2);
+    actorChart_ = &chart;
+    actorOpts_ = &o;
+    actorFields_[0] = &E;
+    actorFields_[1] = twoFields ? &E2 : nullptr;
+    actorScrollNow_ = scrollNow;
+    actorSongTime_ = songTime;
+    actorNowSec_ = nowSec;
+    actorBpm_ = bpm;
     Mods& mods = E.mods; PostFx& fx = E.fx;
     float& mx = E.mx; float& my = E.my; float& mz = E.mz;
     float (&bgKnobs)[MAX_BG_UNIFORMS] = E.bgKnobs;
@@ -1587,28 +1891,12 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     float& fieldX = E.fieldX; float& fieldY = E.fieldY;
     Mat4& mvpEff = E.mvpEff;
 
-    // A NoteField reached through Player/ActorProxy is a renderer-owned local
-    // source. Keep the two-player half-width projection, but centre each field
-    // in its own transparent texture so Player and proxy transforms operate on
-    // the same local origin SM5 uses.
-    const int actorPlayers = actors_ ? actors_->livePlayerCount() : 0;
-    if (actorPlayers > 0) {
-        const int sourceFieldW = twoFields ? W / 2 : W;
-        for (int pn = 1; pn <= (twoFields ? 2 : 1); ++pn) {
-            glBindFramebuffer(GL_FRAMEBUFFER, playerSourceFbo_[pn - 1]);
-            glViewport(0, 0, W, H);
-            glClearColor(0, 0, 0, 0);
-            glClear(GL_COLOR_BUFFER_BIT);
-            FieldEval& source = pn == 1 ? E : E2;
-            const int sourceX = (W - sourceFieldW) / 2;
-            drawField(chart, beat, o, source, sourceX, sourceFieldW,
-                      scrollNow, songTime, nowSec, bpm);
-        }
-    }
     glBindFramebuffer(GL_FRAMEBUFFER, fbo_);
     glViewport(0, 0, W, H);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    glDepthMask(GL_TRUE);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glDepthMask(GL_FALSE);
 
     // #BGCHANGES media (stills / movies / shaders): the true back plane, drawn
     // into fbo_ so post processes it -- NotITG's layout.xml captures background
@@ -1673,6 +1961,9 @@ void Renderer::drawFrame(const Chart& chart, double beat, const RenderOpts& o,
     // does (its captured region spans background + playfields, and post.frag
     // runs on the result).
     if (actors_) actors_->drawForeground(*this, songTime);
+    actorChart_ = nullptr;
+    actorOpts_ = nullptr;
+    actorFields_[0] = actorFields_[1] = nullptr;
 
     // ---- playfield shaders -------------------------------------------------
     // A --fxshader layer runs over the finished frame, so it can warp or fold

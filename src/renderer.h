@@ -30,6 +30,18 @@
 
 namespace nc {
 
+// SM5 ScreenDimensions.cpp:31-42. A 640x480 theme widens with the display,
+// then rounds the logical width down to an even integer after ceilf (854 at
+// 16:9). Actor Lua constants and actor projection must use this same value.
+inline float logicalScreenWidth(int pixelW, int pixelH) {
+    const float scaled = pixelH > 0
+                       ? fmaxf(640.0f, 480.0f * float(pixelW) / float(pixelH))
+                       : 640.0f;
+    int width = int(ceilf(scaled));
+    width -= width % 2;
+    return float(width);
+}
+
 // Forward-declared, not held by value: actor.h includes THIS header (it needs
 // Tex and Renderer), so owning an ActorLayer here would be a cycle. The caller
 // owns it and hands over a pointer.
@@ -116,6 +128,15 @@ inline GLuint gl_program(const char* vs, const char* fs, const char* label) {
 }
 
 struct Tex { GLuint id = 0; int w = 0, h = 0; };
+struct ActorShaderBinding {
+    std::string name;
+    int components = 0;                        // 1/2/4 float, 0 = sampler2D
+    float value[4] = {};
+    GLuint texture = 0;
+};
+struct ActorPolygonVertex {
+    float x = 0, y = 0, z = 0, u = 0, v = 0;
+};
 
 // flipY=true puts PNG row 0 at v=1, which is Unity's convention and what every
 // highway/note texture wants. Actor sprites are top-left origin and must load
@@ -234,12 +255,14 @@ public:
         float noteSpeed = 10.0f;
         float piuT = 0.0f;
         Mat4 mvpEff{};
+        Mat4 viewEff{};
     };
     FieldEval evalField(const Chart& chart, double beat, const RenderOpts& o,
                         const ModDoc* doc, int plr);
     void drawField(const Chart& chart, double beat, const RenderOpts& o,
                    FieldEval& E, int vpX, int vpW, float scrollNow,
-                   float songTime, double nowSec, float bpm);
+                   float songTime, double nowSec, float bpm,
+                   const Mat4* mvpOverride = nullptr);
 
     // Requires a current GL context. assetDir must end with a separator.
     bool init(int w, int h, const std::string& assetDir);
@@ -250,7 +273,7 @@ public:
                    GLuint postTarget);
 
     // --- actor layer -------------------------------------------------------
-    // Actors are 2D, in SM's virtual 640x480 space, drawn with their OWN
+    // Actors are 2D, in SM's 480-high aspect-correct space, drawn with their OWN
     // program and VBO. Deliberately not routed through drawLayer/SCENE_FS:
     // that path is what the pinned hashes certify, and an actor has different
     // blending, no premultiply and an ortho projection.
@@ -267,10 +290,19 @@ public:
                          float fovDeg, float vanishX, float vanishY,
                          float fadeLeft, float fadeRight,
                          float fadeTop, float fadeBottom,
+                         float cropLeft, float cropRight,
+                         float cropTop, float cropBottom,
                          float r, float g, float b, float a,
                          GLuint tex, int blend, bool zWrite, bool zTest, bool clearZ,
                          float u0 = 0.0f, float v0 = 0.0f,
-                         float u1 = 1.0f, float v1 = 1.0f);
+                         float u1 = 1.0f, float v1 = 1.0f,
+                          GLuint customProgram = 0,
+                          const std::vector<ActorShaderBinding>* customUniforms = nullptr,
+                          int imageW = 0, int imageH = 0,
+                          bool textureGlow = false,
+                          const std::vector<ActorPolygonVertex>* polygon = nullptr,
+                          bool polygonTriangles = true, int cullMode = 0,
+                          float polygonZoomZ = 1.0f);
     void drawActorText(const std::string& text,
                        float cx, float cy, float cz, float zoomX, float zoomY,
                        float rotXDeg, float rotYDeg, float rotZDeg, float skewX,
@@ -278,11 +310,16 @@ public:
                        float r, float g, float b, float a,
                        int blend, bool zWrite, bool zTest, bool clearZ);
     void drawActorPlayerSource(int pn, float x, float y,
-                               float z, float zoomX, float zoomY,
+                               float z, float zoomX, float zoomY, float zoomZ,
                                float rotXDeg, float rotYDeg, float rotZDeg,
                                float skewX, float fovDeg,
                                float vanishX, float vanishY,
                                float r, float g, float b, float a);
+    bool actorTargetYInverted() const { return actorTargetYInverted_; }
+    void setActorTargetYInverted(bool inverted) {
+        actorTargetYInverted_ = inverted;
+    }
+    const Tex& actorMissingTexture() const { return actorMissing_; }
     // Null = no actor folders, and the passes are skipped entirely -- which is
     // what keeps this hash-neutral.
     void setActorLayer(ActorLayer* a) { actors_ = a; }
@@ -305,16 +342,21 @@ private:
     void destroyFbos();
     double lastHit(int lane, double now) const;
 
-    Mat4 mvp_{}, mvp2_{};
+    Mat4 view_{}, mvp_{}, mvp2_{};
     GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0, cover_ = 0, piu_ = 0;
     GLuint avao_ = 0, avbo_ = 0;
+    bool actorTargetYInverted_ = false;
     double actorBeat_ = 0.0;
     double fieldSec_ = 0.0;   // when evalField reads live Lua PlayerOptions
+    const Chart* actorChart_ = nullptr;
+    const RenderOpts* actorOpts_ = nullptr;
+    FieldEval* actorFields_[2] = {};
+    float actorScrollNow_ = 0.0f, actorSongTime_ = 0.0f, actorBpm_ = 0.0f;
+    double actorNowSec_ = 0.0;
     ActorLayer* actors_ = nullptr;
     Background* bg_ = nullptr;
     GLuint vao_ = 0, vbo_ = 0, qvao_ = 0, qvbo_ = 0;
     GLuint fbo_ = 0, colorTex_ = 0, postFbo_ = 0, postTex_ = 0;
-    GLuint playerSourceFbo_[2] = {}, playerSourceTex_[2] = {};
     // Depth attachment on fbo_ ONLY, for the actor layer's z-mask
     // (blend,noeffect + zwrite writes it; ztest reads it). The highway never
     // enables depth testing -- every CH layer is ZWrite Off and the painter
@@ -333,16 +375,18 @@ private:
     Tex texPiuTap_[3], texPiuRecep_[3], texPiuHoldBody_[3], texPiuHoldCap_[3];
     Tex texPiuFlash_;
     Tex texFretB_, texFretH_, texLift_, texHLight_;
-    Tex actorFont_;
+    Tex actorFont_, actorMissing_;
     int actorFontWidth_[256] = {};
     int actorFontAdvance_[256] = {};
 
     std::vector<ch::Vtx> v_;
+    float fieldTint_[4] = {1, 1, 1, 1};
     std::vector<double>  hitTimes_[5];
 
     // glow > 0 re-draws the same quad as a flat-white silhouette on top, which
     // is ITG's second sprite pass (see NOTE_GLOW_FS). 0 skips it entirely.
     void drawLayer(GLuint tex, int blend, float glow = 0.0f);
+    void applyFieldTint();
     void drawSustainGlow();
     void drawGlowLayer(GLuint tex);
     void drawPiuLayer(GLuint tex, int blend);

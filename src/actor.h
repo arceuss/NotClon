@@ -2,15 +2,15 @@
 // engine, and the Lua that drives them.
 //
 // This is what `#FGCHANGES:0.000=lua=1.000=0=0=1=====;` loads -- the folder
-// named in the change holds `default.xml` plus its own images. NotClon keeps
-// the same convention, so a song folder is:
+// named in the change holds `default.lua` (or legacy `default.xml`) plus its
+// own images. NotClon keeps the same convention, so a song folder is:
 //
 //     charts/<Song>/
 //         notes.chart          the chart
 //         <name>.ncmod         the modchart
 //         <audio>.ogg          named by [Song] MusicStream
-//         lua/default.xml      an actor tree, plus any images it references
-//         effects/default.xml  another, with effects/*.png beside it
+//         lua/default.lua      an actor tree, plus any images it references
+//         effects/default.xml  a legacy tree, with effects/*.png beside it
 //
 // SCOPE, stated plainly. Six of Saitama2000's seven actor files contain zero
 // Lua -- they are pure command lists -- so the command/tween engine carries
@@ -46,6 +46,19 @@ class LuaHost;
 class ActorTree;
 class ActorLayer;
 
+struct PlayerModSnapshot {
+    float target[MOD_COUNT] = {};
+    float speed[MOD_COUNT] = {};
+};
+
+struct PlayerModChange {
+    double sec = 0.0;
+    int player = 1;
+    int mod = MOD_DRUNK;
+    float target = 0.0f;
+    float speed = 1.0f;
+};
+
 struct LuaMessageParams {
     const char* player = nullptr;
     const char* tapNoteScore = nullptr;
@@ -54,22 +67,29 @@ struct LuaMessageParams {
 // --- easings ---------------------------------------------------------------
 // The seven ITG tweens. `sleep` is one of them: it holds the old value for the
 // duration and then snaps, which is why it doubles as "reset the tween state".
-enum class Ease { Instant, Linear, Accelerate, Decelerate, Spring, BounceBegin, BounceEnd, Sleep };
+enum class Ease {
+    Instant, Linear, Accelerate, Decelerate, Spring, BounceBegin, BounceEnd,
+    Sleep, InCubic, OutCubic, InOutCubic, InOutQuad, InOutSine,
+    InCirc, OutCirc, InOutCirc, InExpo, OutExpo, InOutExpo,
+    InQuart, OutQuart, InQuint, InOutQuint,
+    PositiveSine6, NegativeSine6, Spring2
+};
 float easeApply(Ease e, float t);           // t in [0,1] -> eased fraction
 
 // --- the animatable state of one actor -------------------------------------
 struct ActorState {
-    float x = 0, y = 0, z = 0;
+    float x = 0, y = 0, z = 0, aux = 0;
     float zoomX = 1, zoomY = 1, zoomZ = 1;
     float rotX = 0, rotY = 0, rotZ = 0;     // degrees
     float r = 1, g = 1, b = 1, a = 1;
-    float glowA = 0;
+    float glowR = 1, glowG = 1, glowB = 1, glowA = 0;
     bool  hidden = false;
     // Sizing overrides for a textured actor, in virtual 640x480 SM pixels.
     float sizeX = -1, sizeY = -1;           // <0 = use the texture's own size
-    int   horizAlign = 0;                   // -1 left, 0 centre, +1 right
-    int   vertAlign = 0;
+    float horizAlign = 0;                   // -1 left, 0 centre, +1 right
+    float vertAlign = 0;                    // intermediate values are valid
     float skewX = 0;                        // x += skewX * y, SM's skewx
+    float cropLeft = 0, cropRight = 0, cropTop = 0, cropBottom = 0;
     int   blend = 0;                        // 0 normal, 1 add, 2 noeffect
     bool  zWrite = false, zTest = false, clearZ = false;
     // Camera state inherited from the nearest ActorFrame/WrapperState whose
@@ -87,17 +107,18 @@ struct Seg {
 };
 
 enum {
-    PROP_X, PROP_Y, PROP_Z, PROP_ZOOMX, PROP_ZOOMY, PROP_ZOOMZ,
+    PROP_X, PROP_Y, PROP_Z, PROP_AUX, PROP_ZOOMX, PROP_ZOOMY, PROP_ZOOMZ,
     PROP_ROTX, PROP_ROTY, PROP_ROTZ, PROP_DIFFUSE, PROP_DIFFUSEALPHA,
     PROP_GLOWALPHA, PROP_HIDDEN, PROP_SIZE, PROP_HALIGN, PROP_VALIGN,
-    PROP_BLEND, PROP_ZWRITE, PROP_ZTEST, PROP_CLEARZ, PROP_SKEWX, PROP_COUNT
+    PROP_BLEND, PROP_ZWRITE, PROP_ZTEST, PROP_CLEARZ, PROP_SKEWX,
+    PROP_CROPLEFT, PROP_CROPRIGHT, PROP_CROPTOP, PROP_CROPBOTTOM, PROP_COUNT
 };
 
 // An Actor effect (bob/bounce/spin/wag/pulse/vibrate). Pure function of the
 // effect clock, so it survives seeking for free.
 struct Effect {
     enum Kind { None, Bob, Bounce, Spin, Wag, Pulse, Vibrate,
-                DiffuseShift, DiffuseBlink } kind = None;
+                DiffuseShift, DiffuseBlink, GlowShift } kind = None;
     float magX = 0, magY = 0, magZ = 0;
     float period = 1.0f;
     float delay = 0.0f;
@@ -120,6 +141,7 @@ struct Actor {
     ~Actor();
     std::string type;                       // ActorFrame | Sprite | Quad
     std::string name;
+    std::string var;                        // legacy XML Var= Lua global
     std::string file;                       // texture path, resolved
     Tex         tex;
     bool        texLoaded = false;
@@ -128,13 +150,13 @@ struct Actor {
     std::string text;
 
     // --- ActorFrameTexture ---------------------------------------------------
-    // A render target that binds its texture and draws its own children into
-    // it. Sibling order still matters: a sprite before the AFT samples the
-    // previous frame, while one after it samples the just-rendered contents.
+    // SM5 binds this target and draws its children into it. NotITG XML instead
+    // snapshots everything already drawn when the AFT sibling is reached.
     //
     // Create() allocates; SetTextureName() publishes it under a name other
     // actors can reference by Texture= or SetTexture().
     bool        isAft = false;
+    bool        aftCapturePrevious = false;
     std::string aftName;
     int         aftW = 0, aftH = 0;
     bool        aftAlpha = false, aftDepth = false, aftFloat = false;
@@ -156,16 +178,43 @@ struct Actor {
     float              spriteTotal = 0.0f;
     int                sheetCols = 1, sheetRows = 1;
     bool        textureFiltering = true;
+    bool        textureWrapping = false;
     bool        textureFromTarget = false;
+    Actor*      textureTarget = nullptr;       // SetTexture(aft:GetTexture())
     int         spriteState = 0;
     bool        spriteAnimate = true;
     float       baseZoomX = 1.0f, baseZoomY = 1.0f;
     bool        textureFilterDirty = false;
     bool        customTexRect = false;
     float       texRect[4] = {0, 0, 1, 1};
+    float       texCoordVelX = 0, texCoordVelY = 0;
+    float       texCoordBaseX = 0, texCoordBaseY = 0;
+    double      texCoordVelocityStart = 0;
     float       fadeLeft = 0, fadeRight = 0, fadeTop = 0, fadeBottom = 0;
     float       fov = -1, vanishX = 0, vanishY = 0;
     bool        vanishSet = false;
+    float       farDist = 1000.0f;
+    bool        drawByZPosition = false;
+
+    // NotITG actor-local GLSL. The program is compiled lazily after a GL
+    // context exists; Lua uniforms are retained because OnCommand normally
+    // sets them long before the actor first draws.
+    struct ShaderUniform {
+        std::string name;
+        int components = 0;                    // 1/2/4 float, 0 = texture
+        float value[4] = {};
+        Actor* texture = nullptr;
+    };
+    std::string shaderVert;
+    std::string shaderFrag;
+    GLuint      shaderProgram = 0;
+    bool        shaderTried = false;
+    std::vector<ShaderUniform> shaderUniforms;
+
+    using PolygonVertex = ActorPolygonVertex;
+    std::vector<PolygonVertex> polygonVertices;
+    bool        polygonTriangles = true;
+    int         cullMode = 0;                  // 0 none, 1 back, 2 front
 
     // ActorProxy and ActorFrame wrapper state are real typed objects in SM5.
     // They are kept outside children: a proxy target is not owned by the
@@ -243,11 +292,13 @@ public:
     std::map<std::string, NamedTex>& namedTextures() { return namedTex_; }
     // See ActorLayer::drainLuaMods. One tree, one lua_State, one `mods` table.
     int drainLuaMods(ModDoc& doc, int resolution);
-    // Canonical SM5 Lua drives the live ModsLevel_Song PlayerOptions instead
-    // of being flattened into ModDoc keyframes. Returns false for XML trees
-    // and Lua trees which never requested this player.
+    // Lua-driven SM5 and legacy NotITG trees both drive the live
+    // ModsLevel_Song PlayerOptions. Returns false until the tree requests the
+    // player; a drained legacy table remains only a seek/layout fallback.
     bool playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                     float& mx, float& my, float& mz) const;
+    bool playerModSnapshot(int pn, PlayerModSnapshot& out) const;
+    void collectPlayerModChanges(std::vector<PlayerModChange>& out) const;
     bool playerState(int pn, double sec, double beat, ActorState& out) const;
     bool drawPlayer(Renderer& R, int pn, double sec, double beat);
     int livePlayerCount() const;
@@ -349,8 +400,16 @@ public:
     // using the target's speed, exactly like PlayerOptions::Approach().
     void  pushPlayerOptions(int pn);
     void  applyGameCommand(const std::string& command, int player);
+    void  launchAttack(double startSec, double lengthSec,
+                       const std::string& mods, int player);
+    float noteZ(int pn, int col, float yOffset) const;
+    void  setLegacyXml(bool legacy);
     bool  playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                      float& mx, float& my, float& mz) const;
+    bool  playerModSnapshot(int pn, PlayerModSnapshot& out) const;
+    const std::vector<PlayerModChange>& playerModChanges() const {
+        return poChanges_;
+    }
     int   livePlayerCount() const { return requestedPlayers_; }
     void  collectActorGlobals(std::map<std::string, Actor*>& out);
     void  setActorGlobal(const std::string& name, Actor& actor);
@@ -373,6 +432,15 @@ private:
     static int playerOptionsCall(lua_State* L);
     void  applyModString(int pn, const std::string& mods);
     void  advancePlayerOptions(double sec);
+    void  rebuildPlayerOptionsFromAttacks(int pn, double sec);
+    void  recordPlayerModChange(int pn, int id);
+
+    struct PlayerAttack {
+        double startSec = 0.0;
+        double endSec = 0.0;
+        std::string mods;
+        int player = 0;             // 0 = both, otherwise legacy 1/2
+    };
 
     lua_State* L_ = nullptr;
     ActorTree* tree_ = nullptr;   // owns the named-texture registry
@@ -387,6 +455,9 @@ private:
     float poSpeed_[2][MOD_COUNT] = {};
     double poClock_ = -1.0;
     int requestedPlayers_ = 0;
+    bool legacyColumnNames_ = false;
+    std::vector<PlayerModChange> poChanges_;
+    std::vector<PlayerAttack> attacks_;
 };
 
 // --- the scheduler ---------------------------------------------------------
@@ -428,10 +499,13 @@ public:
     bool drawPlayer(Renderer& R, int pn, double sec, double beat);
     bool playerMods(int pn, double sec, float beat, Mods& mods, PostFx& fx,
                     float& mx, float& my, float& mz) const;
+    bool playerModSnapshot(int pn, double sec, PlayerModSnapshot& out) const;
+    void collectPlayerModChanges(std::vector<PlayerModChange>& out) const;
     int livePlayerCount() const;
     void broadcast(const std::string& msg, double sec);
     void setAutoplay(bool enabled) { autoplay_ = enabled; }
     void pump(Renderer& R, double sec);
+    void pump(Renderer& R, double sec, double beat);
     void drawBackground(Renderer& R, double sec);
     void drawForeground(Renderer& R, double sec);
     const std::vector<std::string>& log() const { return log_; }

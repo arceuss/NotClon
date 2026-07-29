@@ -61,6 +61,22 @@ Convert a StepMania file (chart, mods, and timing come across):
 build/notclon.exe --import-sm "path/to/song.sm" --dir "charts/MySong"
 ```
 
+When `--dir` is somewhere other than the `.sm` folder, the importer creates it
+and copies the `.sm`, referenced audio/media, and complete scheduled actor
+folders before writing the converted chart.
+
+Dump a Lua/XML modfile's live song-level PlayerOptions into a `.ncmod`:
+
+```
+build/notclon.exe --dir "charts/MySong" --dump-mods "charts/MySong/dumped.ncmod"
+```
+
+The adjacent `.sm` supplies its actor schedule; `--actor <folder>` can select a
+folder explicitly. Every PlayerOptions change is rounded to the nearest chart
+tick, so a modfile that rewrites many values every update can produce a large
+but directly loadable `.ncmod`. Scheduled `GAMESTATE:LaunchAttack` start/end
+changes are included in the same stream.
+
 A song folder is laid out like a Clone Hero song: `notes.chart`, `song.ini`,
 audio named the CH way (`song.ogg`, `guitar.ogg`, …), plus a `.ncmod` modchart.
 The editor's **Open chart** button loads a `notes.chart`; a `.ncmod` remembers

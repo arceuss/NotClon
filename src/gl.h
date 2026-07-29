@@ -23,6 +23,8 @@ typedef ptrdiff_t GLintptr;
 #define GL_INFO_LOG_LENGTH                0x8B84
 #define GL_FRAMEBUFFER                    0x8D40
 #define GL_FRAMEBUFFER_BINDING            0x8CA6
+#define GL_READ_FRAMEBUFFER               0x8CA8
+#define GL_DRAW_FRAMEBUFFER               0x8CA9
 #define GL_RENDERBUFFER                   0x8D41
 #define GL_COLOR_ATTACHMENT0              0x8CE0
 #define GL_DEPTH_ATTACHMENT               0x8D00
@@ -67,10 +69,12 @@ typedef ptrdiff_t GLintptr;
     X(PFNGLUNIFORM1FPROC,                glUniform1f) \
     X(PFNGLUNIFORM2FPROC,                glUniform2f) \
     X(PFNGLUNIFORM3FPROC,                glUniform3f) \
+    X(PFNGLUNIFORM4FPROC,                glUniform4f) \
     X(PFNGLUNIFORM1IPROC,                glUniform1i) \
     X(PFNGLUNIFORMMATRIX4FVPROC,         glUniformMatrix4fv) \
     X(PFNGLGENFRAMEBUFFERSPROC,          glGenFramebuffers) \
     X(PFNGLBINDFRAMEBUFFERPROC,          glBindFramebuffer) \
+    X(PFNGLBLITFRAMEBUFFERPROC,          glBlitFramebuffer) \
     X(PFNGLFRAMEBUFFERTEXTURE2DPROC,     glFramebufferTexture2D) \
     X(PFNGLGENRENDERBUFFERSPROC,         glGenRenderbuffers) \
     X(PFNGLBINDRENDERBUFFERPROC,         glBindRenderbuffer) \
@@ -108,10 +112,14 @@ typedef GLint  (APIENTRY *PFNGLGETUNIFORMLOCATIONPROC)(GLuint, const GLchar*);
 typedef void   (APIENTRY *PFNGLUNIFORM1FPROC)(GLint, GLfloat);
 typedef void   (APIENTRY *PFNGLUNIFORM2FPROC)(GLint, GLfloat, GLfloat);
 typedef void   (APIENTRY *PFNGLUNIFORM3FPROC)(GLint, GLfloat, GLfloat, GLfloat);
+typedef void   (APIENTRY *PFNGLUNIFORM4FPROC)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
 typedef void   (APIENTRY *PFNGLUNIFORM1IPROC)(GLint, GLint);
 typedef void   (APIENTRY *PFNGLUNIFORMMATRIX4FVPROC)(GLint, GLsizei, GLboolean, const GLfloat*);
 typedef void   (APIENTRY *PFNGLGENFRAMEBUFFERSPROC)(GLsizei, GLuint*);
 typedef void   (APIENTRY *PFNGLBINDFRAMEBUFFERPROC)(GLenum, GLuint);
+typedef void   (APIENTRY *PFNGLBLITFRAMEBUFFERPROC)(GLint, GLint, GLint, GLint,
+                                                     GLint, GLint, GLint, GLint,
+                                                     GLbitfield, GLenum);
 typedef void   (APIENTRY *PFNGLFRAMEBUFFERTEXTURE2DPROC)(GLenum, GLenum, GLenum, GLuint, GLint);
 typedef void   (APIENTRY *PFNGLGENRENDERBUFFERSPROC)(GLsizei, GLuint*);
 typedef void   (APIENTRY *PFNGLDELETERENDERBUFFERSPROC)(GLsizei, const GLuint*);

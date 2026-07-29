@@ -13,7 +13,7 @@ templates/modchart/
     song.ogg               <- 60s of silence, so the timeline is a real minute
     song.ini
     example.ncmod          <- the modchart, and it names the shader it drives
-    lua/default.xml        <- an actor tree (sprites, animations)
+    lua/default.lua        <- an SM5.1 actor tree (sprites, animations)
     shaders/example.frag   <- a background shader
     shaders/playfield.frag <- a playfield shader
     chains/echo.ncfx       <- a multi-pass chain with feedback
@@ -60,8 +60,8 @@ of whatever the document names.
 stab that undoes itself with `len=`, a drop, a bar of `stealth`, and a clean
 landing. Every knob is listed in [../../docs/ncmod-format.md](../../docs/ncmod-format.md).
 
-**`lua/default.xml`** — an actor tree showing the three things actors do:
-tweened command chains, message-driven effects, and a Lua chunk. Load it with
+**`lua/default.lua`** — an SM5.1 ActorDef showing the three things actors do:
+tweened command functions, message-driven effects, and ordinary Lua. Load it with
 `--actor lua`, or let a `.sm`'s `#FGCHANGES` load it automatically.
 
 **`shaders/playfield.frag`** — a *playfield* shader. Where a background shader

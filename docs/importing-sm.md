@@ -4,8 +4,10 @@
 build/notclon.exe --import-sm "path/to/song.sm" --dir "charts/My Song"
 ```
 
-This converts and exits — it doesn't render anything. Put the audio in the
-output folder first (or alongside the `.sm`, and the importer will link it).
+This converts and exits — it doesn't render anything. If the output directory
+differs from the `.sm` folder, it is created and receives the source `.sm`,
+referenced audio and media, plus each complete actor folder so its Lua/XML and
+nested assets stay together.
 
 Out come `notes.chart`, `song.ini`, and a `.ncmod` carrying the file's mods.
 The import prints what it did:
@@ -20,6 +22,24 @@ NAMCO - Saitama 2000   [dance-single Challenge 10, 2 blocks]
 
 By default it takes the hardest `dance-single` chart; `--sm-diff <n>` picks a
 different `#NOTES` block by index.
+
+## Dumping a Lua/XML modfile
+
+`#MODS` and `#ATTACKS` are already imported directly. For a modern chart whose
+mods are driven from an actor tree instead, run its song-level PlayerOptions and
+write the observed changes to a new `.ncmod`:
+
+```
+build/notclon.exe --dir "charts/My Song" --dump-mods "charts/My Song/dumped.ncmod"
+```
+
+The adjacent `.sm` provides the actor schedule. Use `--actor <folder>` when no
+schedule is present. Changes retain their target and approach rate and are
+rounded to the nearest chart tick; repeated writes to the same knob on that
+tick collapse to the last one. `GAMESTATE:LaunchAttack` start/end rebuilds are
+captured too. A framework that rewrites dozens of mods every update will
+consequently produce a large file. Actor drawing, AFT contents and arbitrary
+shader state are not `.ncmod` knobs and are not part of this dump.
 
 ## What converts
 
@@ -63,7 +83,7 @@ you can see what you got rather than guessing.
 
 ## After importing
 
-Re-running the import **overwrites the `.ncmod`**. If you've hand-edited it,
+Re-running the import **overwrites the imported `.ncmod`**. If you've hand-edited it,
 keep a copy or re-apply your changes afterwards.
 
 If you plan to use `piu` mode for a section, chart that section as **tap

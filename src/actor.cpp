@@ -1,6 +1,7 @@
 #include "actor.h"
 #include "smbg.h"
 #include "smimport.h"
+#include "../third_party/stb_image.h"
 
 extern "C" {
 #include "lua.h"
@@ -9,8 +10,10 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -35,6 +38,39 @@ float easeApply(Ease e, float t) {
         case Ease::BounceEnd:   return fabsf(sinf(t * 3.14159265f * 2.5f)) * t +
                                        (1.0f - t) * 0.0f + (t == 1.0f ? 1.0f : 0.0f);
         case Ease::Sleep:       return 0.0f;     // hold, then the next seg snaps
+        case Ease::InCubic:     return t * t * t;
+        case Ease::OutCubic: { const float u = 1.0f - t; return 1.0f - u*u*u; }
+        case Ease::InOutCubic:
+            return t < 0.5f ? 4.0f*t*t*t
+                            : 1.0f - powf(-2.0f*t + 2.0f, 3.0f)*0.5f;
+        case Ease::InOutQuad:   return t < 0.5f ? 2.0f*t*t
+                                                : 1.0f - powf(-2.0f*t + 2.0f, 2.0f)*0.5f;
+        case Ease::InOutSine:   return -(cosf(3.14159265f * t) - 1.0f) * 0.5f;
+        case Ease::InCirc:      return 1.0f - sqrtf(std::max(0.0f, 1.0f - t*t));
+        case Ease::OutCirc: { const float u = t - 1.0f;
+                              return sqrtf(std::max(0.0f, 1.0f - u*u)); }
+        case Ease::InOutCirc:
+            return t < 0.5f
+                 ? (1.0f - sqrtf(std::max(0.0f, 1.0f - 4.0f*t*t))) * 0.5f
+                 : (sqrtf(std::max(0.0f, 1.0f - powf(-2.0f*t + 2.0f, 2.0f))) + 1.0f) * 0.5f;
+        case Ease::InExpo:      return t <= 0.0f ? 0.0f : powf(2.0f, 10.0f*t - 10.0f);
+        case Ease::OutExpo:     return 1.001f * (-powf(2.0f, -10.0f*t) + 1.0f);
+        case Ease::InOutExpo:
+            return t < 0.5f
+                 ? 0.5f * powf(2.0f, 20.0f*t - 10.0f) - 0.0005f
+                 : 0.5f * 1.0005f * (-powf(2.0f, -20.0f*t + 10.0f) + 2.0f);
+        case Ease::InQuart:     return t*t*t*t;
+        case Ease::OutQuart: { const float u = 1.0f - t; return 1.0f - u*u*u*u; }
+        case Ease::InQuint:     return t*t*t*t*t;
+        case Ease::InOutQuint:
+            return t < 0.5f ? 16.0f*t*t*t*t*t
+                            : 1.0f - powf(-2.0f*t + 2.0f, 5.0f)*0.5f;
+        case Ease::PositiveSine6:
+            return std::max(sinf(3.14159265f * t * 6.0f), 0.0f);
+        case Ease::NegativeSine6:
+            return std::max(-sinf(3.14159265f * t * 6.0f), 0.0f);
+        case Ease::Spring2:
+            return 1.0f - cosf(t * 3.14159265f * 9.5f) / (1.0f + t * 6.0f);
         default:                return 1.0f;     // Instant
     }
 }
@@ -66,6 +102,26 @@ struct XmlNode {
         return nullptr;
     }
 };
+
+std::vector<const XmlNode*> orderedXmlChildren(const XmlNode& node) {
+    std::vector<const XmlNode*> out;
+    out.reserve(node.kids.size());
+    for (const XmlNode& child : node.kids) out.push_back(&child);
+    const std::string* type = node.attr("Type");
+    if (node.tag == "ActorFrame" || (type && *type == "ActorFrame")) {
+        std::stable_sort(out.begin(), out.end(),
+            [](const XmlNode* a, const XmlNode* b) { return a->tag < b->tag; });
+    }
+    return out;
+}
+
+void appendLegacyCommand(Actor& actor, const std::string& key,
+                         const std::string& value) {
+    if (key == "Command") actor.commands.push_back({"OnCommand", value});
+    else if (key.size() > 7 &&
+             key.compare(key.size() - 7, 7, "Command") == 0)
+        actor.commands.push_back({key, value});
+}
 
 void xmlUnescape(std::string& s) {
     struct { const char* e; char c; } M[] = {
@@ -158,12 +214,10 @@ struct Cmd { std::string verb; std::vector<std::string> args; std::string lua; }
 
 bool isLuaCommand(const std::string& src) {
     const std::string s = trimws(src);
-    if (s.empty() || s[0] != '%') return false;
-    size_t p = 1;
-    if (s.compare(p, 8, "function") != 0) return false;
-    p += 8;
-    while (p < s.size() && isspace((unsigned char)s[p])) ++p;
-    return p < s.size() && s[p] == '(';
+    // ActorCommands.cpp treats every leading-percent value as a Lua function
+    // expression. Besides `%function(...) ... end`, legacy charts commonly
+    // use a named reference such as `%setup_aft`.
+    return !s.empty() && s[0] == '%';
 }
 
 std::vector<Cmd> parseChain(const std::string& src) {
@@ -196,6 +250,57 @@ std::vector<Cmd> parseChain(const std::string& src) {
         }
         out.push_back(c);
     }
+    return out;
+}
+
+bool legacyFirstArgIsString(const std::string& verb) {
+    return verb == "luaeffect" || verb == "horizalign" ||
+           verb == "vertalign" || verb == "effectclock" ||
+           verb == "blend" || verb == "ztestmode" ||
+           verb == "cullmode" || verb == "playcommand" ||
+           verb == "queuecommand" || verb == "queuemessage" ||
+           verb == "settext";
+}
+
+std::string legacyLuaString(const std::string& value) {
+    std::string out = "'";
+    for (char c : value) {
+        if (c == '\\' || c == '\'') out += '\\';
+        out += c;
+    }
+    out += '\'';
+    return out;
+}
+
+// OpenITG does not parse old XML command arguments as floats. ActorCommands.cpp
+// turns the whole chain into a Lua function and leaves ordinary arguments as
+// expressions; legacy XML loaders do the same. Keep that behavior here
+// so `xy,sw/2,sh/2` and timing expressions retain their authored values.
+std::string legacyCommandAsLua(const std::string& src) {
+    std::string out = "%function(self,parent)\n";
+    for (const Cmd& cmd : parseChain(src)) {
+        out += "self:" + cmd.verb + "(";
+        for (size_t i = 0; i < cmd.args.size(); ++i) {
+            if (i) out += ',';
+            std::string arg = cmd.args[i];
+            if (i == 0 && legacyFirstArgIsString(cmd.verb)) {
+                out += legacyLuaString(arg);
+            } else if (!arg.empty() && arg[0] == '#') {
+                int components = 0;
+                for (size_t p = 1; p + 1 < arg.size(); p += 2) {
+                    if (components++) out += ',';
+                    const std::string byte = arg.substr(p, 2);
+                    out += std::to_string(strtol(byte.c_str(), nullptr, 16) / 255.0);
+                }
+                if (components == 3) out += ",1";
+            } else {
+                if (!arg.empty() && arg[0] == '+') arg.erase(arg.begin());
+                out += arg;
+            }
+        }
+        out += ")\n";
+    }
+    out += "end";
     return out;
 }
 
@@ -238,6 +343,7 @@ float argf(const Cmd& c, size_t i, float d = 0.0f) {
 }  // namespace
 
 Actor::~Actor() {
+    if (shaderProgram) glDeleteProgram(shaderProgram);
     if (aftDepthRb) glDeleteRenderbuffers(1, &aftDepthRb);
     if (aftFbo) glDeleteFramebuffers(1, &aftFbo);
     if (aftTex) glDeleteTextures(1, &aftTex);
@@ -288,6 +394,7 @@ void emit(Sched& S, int prop, int n, const float* to) {
         case PROP_X: from = &S.cur.x; break;
         case PROP_Y: from = &S.cur.y; break;
         case PROP_Z: from = &S.cur.z; break;
+        case PROP_AUX: from = &S.cur.aux; break;
         case PROP_ZOOMX: from = &S.cur.zoomX; break;
         case PROP_ZOOMY: from = &S.cur.zoomY; break;
         case PROP_ZOOMZ: from = &S.cur.zoomZ; break;
@@ -295,6 +402,10 @@ void emit(Sched& S, int prop, int n, const float* to) {
         case PROP_ROTY: from = &S.cur.rotY; break;
         case PROP_ROTZ: from = &S.cur.rotZ; break;
         case PROP_SKEWX: from = &S.cur.skewX; break;
+        case PROP_CROPLEFT: from = &S.cur.cropLeft; break;
+        case PROP_CROPRIGHT: from = &S.cur.cropRight; break;
+        case PROP_CROPTOP: from = &S.cur.cropTop; break;
+        case PROP_CROPBOTTOM: from = &S.cur.cropBottom; break;
         case PROP_DIFFUSEALPHA: from = &S.cur.a; break;
         case PROP_GLOWALPHA: from = &S.cur.glowA; break;
         default: break;
@@ -303,6 +414,12 @@ void emit(Sched& S, int prop, int n, const float* to) {
         s.from[0] = S.cur.r; s.from[1] = S.cur.g; s.from[2] = S.cur.b; s.from[3] = S.cur.a;
         for (int i = 0; i < 4; ++i) s.to[i] = to[i];
         S.cur.r = to[0]; S.cur.g = to[1]; S.cur.b = to[2]; S.cur.a = to[3];
+    } else if (prop == PROP_GLOWALPHA && n == 4) {
+        s.from[0] = S.cur.glowR; s.from[1] = S.cur.glowG;
+        s.from[2] = S.cur.glowB; s.from[3] = S.cur.glowA;
+        for (int i = 0; i < 4; ++i) s.to[i] = to[i];
+        S.cur.glowR = to[0]; S.cur.glowG = to[1];
+        S.cur.glowB = to[2]; S.cur.glowA = to[3];
     } else if (prop == PROP_SIZE) {
         s.from[0] = S.cur.sizeX; s.from[1] = S.cur.sizeY;
         s.to[0] = to[0]; s.to[1] = to[1];
@@ -314,8 +431,8 @@ void emit(Sched& S, int prop, int n, const float* to) {
         s.from[0] = to[0]; s.to[0] = to[0];
         switch (prop) {
             case PROP_HIDDEN: S.cur.hidden = to[0] != 0; break;
-            case PROP_HALIGN: S.cur.horizAlign = int(to[0]); break;
-            case PROP_VALIGN: S.cur.vertAlign  = int(to[0]); break;
+            case PROP_HALIGN: S.cur.horizAlign = to[0]; break;
+            case PROP_VALIGN: S.cur.vertAlign  = to[0]; break;
             case PROP_BLEND:  S.cur.blend      = int(to[0]); break;
             case PROP_ZWRITE: S.cur.zWrite     = to[0] != 0; break;
             case PROP_ZTEST:  S.cur.zTest      = to[0] != 0; break;
@@ -328,6 +445,82 @@ void emit(Sched& S, int prop, int n, const float* to) {
 }
 
 void emit1(Sched& S, int prop, float v) { emit(S, prop, 1, &v); }
+void emitXY(Sched& S, float x, float y) {
+    const double t = S.t;
+    const float dur = S.dur;
+    const Ease ease = S.ease;
+    emit1(S, PROP_X, x);
+    S.t = t;
+    S.dur = dur;
+    S.ease = ease;
+    emit1(S, PROP_Y, y);
+}
+void emitXYZ(Sched& S, float x, float y, float z) {
+    const double t = S.t;
+    const float dur = S.dur;
+    const Ease ease = S.ease;
+    emit1(S, PROP_X, x);
+    S.t = t; S.dur = dur; S.ease = ease;
+    emit1(S, PROP_Y, y);
+    S.t = t; S.dur = dur; S.ease = ease;
+    emit1(S, PROP_Z, z);
+}
+void emitZoom(Sched& S, float zoom) {
+    const double t = S.t;
+    const float dur = S.dur;
+    const Ease ease = S.ease;
+    emit1(S, PROP_ZOOMX, zoom);
+    S.t = t;
+    S.dur = dur;
+    S.ease = ease;
+    emit1(S, PROP_ZOOMY, zoom);
+}
+void actorNaturalSize(Actor& actor, float& w, float& h) {
+    int iw = actor.tex.w;
+    int ih = actor.tex.h;
+    if ((iw <= 0 || ih <= 0) && !actor.file.empty() && actor.file[0] != '@') {
+        int channels = 0;
+        stbi_info(actor.file.c_str(), &iw, &ih, &channels);
+    }
+    w = float(iw > 0 ? iw : 1) / float(std::max(actor.sheetCols, 1));
+    h = float(ih > 0 ? ih : 1) / float(std::max(actor.sheetRows, 1));
+}
+void emitScaleToCover(Sched& S, float left, float top,
+                      float right, float bottom) {
+    float naturalW = 1.0f, naturalH = 1.0f;
+    actorNaturalSize(*S.a, naturalW, naturalH);
+    const float width = right - left;
+    const float height = bottom - top;
+    const float zoom = std::max(fabsf(width / naturalW),
+                                fabsf(height / naturalH));
+    const float alignX = (float(S.cur.horizAlign) + 1.0f) * 0.5f;
+    const float alignY = (float(S.cur.vertAlign) + 1.0f) * 0.5f;
+    const double t = S.t;
+    const float dur = S.dur;
+    const Ease ease = S.ease;
+    emit1(S, PROP_X, left + width * alignX);
+    S.t = t; S.dur = dur; S.ease = ease;
+    emit1(S, PROP_Y, top + height * alignY);
+    S.t = t; S.dur = dur; S.ease = ease;
+    emitZoom(S, zoom);
+}
+void emitStretchTo(Sched& S, float left, float top,
+                   float right, float bottom) {
+    float naturalW = 1.0f, naturalH = 1.0f;
+    actorNaturalSize(*S.a, naturalW, naturalH);
+    const float width = right - left;
+    const float height = bottom - top;
+    const double t = S.t;
+    const float dur = S.dur;
+    const Ease ease = S.ease;
+    emit1(S, PROP_X, left + width * 0.5f);
+    S.t = t; S.dur = dur; S.ease = ease;
+    emit1(S, PROP_Y, top + height * 0.5f);
+    S.t = t; S.dur = dur; S.ease = ease;
+    emit1(S, PROP_ZOOMX, width / naturalW);
+    S.t = t; S.dur = dur; S.ease = ease;
+    emit1(S, PROP_ZOOMY, height / naturalH);
+}
 ActorState evalActor(const Actor& a, double sec);
 void settleTweens(Sched& S, bool finish) {
     bool touched[PROP_COUNT] = {};
@@ -351,6 +544,7 @@ void settleTweens(Sched& S, bool finish) {
             case PROP_X: emit1(S, prop, target.x); break;
             case PROP_Y: emit1(S, prop, target.y); break;
             case PROP_Z: emit1(S, prop, target.z); break;
+            case PROP_AUX: emit1(S, prop, target.aux); break;
             case PROP_ZOOMX: emit1(S, prop, target.zoomX); break;
             case PROP_ZOOMY: emit1(S, prop, target.zoomY); break;
             case PROP_ZOOMZ: emit1(S, prop, target.zoomZ); break;
@@ -358,12 +552,20 @@ void settleTweens(Sched& S, bool finish) {
             case PROP_ROTY: emit1(S, prop, target.rotY); break;
             case PROP_ROTZ: emit1(S, prop, target.rotZ); break;
             case PROP_SKEWX: emit1(S, prop, target.skewX); break;
+            case PROP_CROPLEFT: emit1(S, prop, target.cropLeft); break;
+            case PROP_CROPRIGHT: emit1(S, prop, target.cropRight); break;
+            case PROP_CROPTOP: emit1(S, prop, target.cropTop); break;
+            case PROP_CROPBOTTOM: emit1(S, prop, target.cropBottom); break;
             case PROP_DIFFUSE: {
                 const float v[4] = {target.r, target.g, target.b, target.a};
                 emit(S, prop, 4, v);
             } break;
             case PROP_DIFFUSEALPHA: emit1(S, prop, target.a); break;
-            case PROP_GLOWALPHA: emit1(S, prop, target.glowA); break;
+            case PROP_GLOWALPHA: {
+                const float v[4] = {target.glowR, target.glowG,
+                                    target.glowB, target.glowA};
+                emit(S, prop, 4, v);
+            } break;
             case PROP_HIDDEN: emit1(S, prop, target.hidden ? 1.0f : 0.0f); break;
             case PROP_SIZE: {
                 const float v[2] = {target.sizeX, target.sizeY};
@@ -400,15 +602,17 @@ void runCmds(Sched& S, const std::vector<Cmd>& cmds, int depth, LuaHost* lua) {
         else if (v == "x")     emit1(S, PROP_X, argf(c, 0));
         else if (v == "y")     emit1(S, PROP_Y, argf(c, 0));
         else if (v == "z")     emit1(S, PROP_Z, argf(c, 0));
+        else if (v == "xy")    emitXY(S, argf(c, 0), argf(c, 1));
         else if (v == "addx")  emit1(S, PROP_X, S.cur.x + argf(c, 0));
         else if (v == "addy")  emit1(S, PROP_Y, S.cur.y + argf(c, 0));
         else if (v == "addz")  emit1(S, PROP_Z, S.cur.z + argf(c, 0));
-        else if (v == "zoom")  { const float z = argf(c, 0, 1);
-                                 emit1(S, PROP_ZOOMX, z); emit1(S, PROP_ZOOMY, z); }
+        else if (v == "zoom")  emitZoom(S, argf(c, 0, 1));
         else if (v == "zoomx") emit1(S, PROP_ZOOMX, argf(c, 0, 1));
         else if (v == "zoomy") emit1(S, PROP_ZOOMY, argf(c, 0, 1));
         else if (v == "zoomto") { const float sz[2] = {argf(c, 0), argf(c, 1)};
                                   emit(S, PROP_SIZE, 2, sz); }
+        else if (v == "scaletocover")
+            emitScaleToCover(S, argf(c, 0), argf(c, 1), argf(c, 2), argf(c, 3));
         else if (v == "zoomtowidth")  { const float sz[2] = {argf(c, 0), S.cur.sizeY};
                                         emit(S, PROP_SIZE, 2, sz); }
         else if (v == "zoomtoheight") { const float sz[2] = {S.cur.sizeX, argf(c, 0)};
@@ -416,13 +620,20 @@ void runCmds(Sched& S, const std::vector<Cmd>& cmds, int depth, LuaHost* lua) {
         else if (v == "rotationx") emit1(S, PROP_ROTX, argf(c, 0));
         else if (v == "rotationy") emit1(S, PROP_ROTY, argf(c, 0));
         else if (v == "rotationz") emit1(S, PROP_ROTZ, argf(c, 0));
+        else if (v == "aux")       emit1(S, PROP_AUX, argf(c, 0));
         else if (v == "skewx")     emit1(S, PROP_SKEWX, argf(c, 0));
+        else if (v == "cropleft")  emit1(S, PROP_CROPLEFT, argf(c, 0));
+        else if (v == "cropright") emit1(S, PROP_CROPRIGHT, argf(c, 0));
+        else if (v == "croptop")   emit1(S, PROP_CROPTOP, argf(c, 0));
+        else if (v == "cropbottom")emit1(S, PROP_CROPBOTTOM, argf(c, 0));
         // --- colour ---
         else if (v == "diffuse") { const float d[4] = {argf(c,0,1), argf(c,1,1),
                                                        argf(c,2,1), argf(c,3,1)};
                                    emit(S, PROP_DIFFUSE, 4, d); }
         else if (v == "diffusealpha") emit1(S, PROP_DIFFUSEALPHA, argf(c, 0, 1));
-        else if (v == "glow")         emit1(S, PROP_GLOWALPHA, argf(c, 3, 1));
+        else if (v == "glow") { const float g[4] = {argf(c,0,1), argf(c,1,1),
+                                                     argf(c,2,1), argf(c,3,1)};
+                                emit(S, PROP_GLOWALPHA, 4, g); }
         // --- flags ---
         else if (v == "hidden")    emit1(S, PROP_HIDDEN, argf(c, 0, 1));
         else if (v == "horizalign") {
@@ -445,6 +656,7 @@ void runCmds(Sched& S, const std::vector<Cmd>& cmds, int depth, LuaHost* lua) {
         else if (v == "wag")     S.a->effect.kind = Effect::Wag;
         else if (v == "pulse")   S.a->effect.kind = Effect::Pulse;
         else if (v == "vibrate") S.a->effect.kind = Effect::Vibrate;
+        else if (v == "glowshift") S.a->effect.kind = Effect::GlowShift;
         else if (v == "stopeffect") S.a->effect.kind = Effect::None;
         else if (v == "effectmagnitude") { S.a->effect.magX = argf(c, 0);
                                            S.a->effect.magY = argf(c, 1);
@@ -499,6 +711,7 @@ ActorState evalActor(const Actor& a, double sec) {
             case PROP_X: st.x = L(0); break;
             case PROP_Y: st.y = L(0); break;
             case PROP_Z: st.z = L(0); break;
+            case PROP_AUX: st.aux = L(0); break;
             case PROP_ZOOMX: st.zoomX = L(0); break;
             case PROP_ZOOMY: st.zoomY = L(0); break;
             case PROP_ZOOMZ: st.zoomZ = L(0); break;
@@ -506,13 +719,19 @@ ActorState evalActor(const Actor& a, double sec) {
             case PROP_ROTY: st.rotY = L(0); break;
             case PROP_ROTZ: st.rotZ = L(0); break;
             case PROP_SKEWX: st.skewX = L(0); break;
+            case PROP_CROPLEFT: st.cropLeft = L(0); break;
+            case PROP_CROPRIGHT: st.cropRight = L(0); break;
+            case PROP_CROPTOP: st.cropTop = L(0); break;
+            case PROP_CROPBOTTOM: st.cropBottom = L(0); break;
             case PROP_DIFFUSEALPHA: st.a = L(0); break;
-            case PROP_GLOWALPHA: st.glowA = L(0); break;
+            case PROP_GLOWALPHA:
+                st.glowR = L(0); st.glowG = L(1); st.glowB = L(2); st.glowA = L(3);
+                break;
             case PROP_DIFFUSE: st.r = L(0); st.g = L(1); st.b = L(2); st.a = L(3); break;
             case PROP_SIZE: st.sizeX = L(0); st.sizeY = L(1); break;
             case PROP_HIDDEN: st.hidden = s.to[0] != 0; break;
-            case PROP_HALIGN: st.horizAlign = int(s.to[0]); break;
-            case PROP_VALIGN: st.vertAlign = int(s.to[0]); break;
+            case PROP_HALIGN: st.horizAlign = s.to[0]; break;
+            case PROP_VALIGN: st.vertAlign = s.to[0]; break;
             case PROP_BLEND:  st.blend = int(s.to[0]); break;
             case PROP_ZWRITE: st.zWrite = s.to[0] != 0; break;
             case PROP_ZTEST:  st.zTest = s.to[0] != 0; break;
@@ -527,9 +746,12 @@ ActorState evalActor(const Actor& a, double sec) {
 void applyEffect(const Actor& a, ActorState& st, double sec, double beat) {
     const Effect& e = a.effect;
     if (e.kind == Effect::None) return;
-    const double clk = (e.beatClock ? beat : sec) - e.delay;
     const float p = (e.period > 0.0001f) ? e.period : 1.0f;
-    const float ph = float(clk) / p;
+    const float total = p + std::max(0.0f, e.delay);
+    const double clk = e.beatClock ? beat : sec;
+    float into = fmodf(float(clk), total);
+    if (into < 0.0f) into += total;
+    const float ph = std::min(into / p, 1.0f);
     const float s = sinf(ph * 2.0f * 3.14159265f);
     switch (e.kind) {
         case Effect::Bob:    st.x += e.magX * s; st.y += e.magY * s; st.z += e.magZ * s; break;
@@ -567,6 +789,13 @@ void applyEffect(const Actor& a, ActorState& st, double sec, double beat) {
             const float* c = fr < 0.5f ? e.c1 : e.c2;
             st.r *= c[0]; st.g *= c[1]; st.b *= c[2]; st.a *= c[3];
         } break;
+        case Effect::GlowShift: {
+            const float t = sinf((ph + 0.25f) * 2.0f * 3.14159265f) * 0.5f + 0.5f;
+            st.glowR = e.c1[0] * t + e.c2[0] * (1.0f - t);
+            st.glowG = e.c1[1] * t + e.c2[1] * (1.0f - t);
+            st.glowB = e.c1[2] * t + e.c2[2] * (1.0f - t);
+            st.glowA = (e.c1[3] * t + e.c2[3] * (1.0f - t)) * st.a;
+        } break;
         default: break;
     }
 }
@@ -590,7 +819,7 @@ namespace {
 // `Texture` resolves against the .sprite's own folder. The sheet grid comes
 // from the texture's FILENAME -- a trailing "<cols>x<rows>" -- which is the
 // same convention assets/pump uses. Without this a .sprite reaches gl_loadTex,
-// which cannot decode an ini, and the actor draws as the fallback white quad.
+// which cannot decode an ini, and the actor draws with the missing-art texture.
 static void parseSpriteFile(const std::string& path, Actor& a) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return;
@@ -621,6 +850,8 @@ static void parseSpriteFile(const std::string& path, Actor& a) {
             frames[atoi(k.c_str() + 5)] = atoi(v.c_str());
         else if (k.size() > 5 && lower(k).compare(0, 5, "delay") == 0)
             delays[atoi(k.c_str() + 5)] = float(atof(v.c_str()));
+        else
+            appendLegacyCommand(a, k, v);
     }
     if (texName.empty()) return;
 
@@ -710,27 +941,65 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
     else if (a.type != "ActorFrame" && a.type != "quad" && a.type != "Quad" &&
              a.type != "Sprite" && a.type != "CODE")
         a.type = "Sprite";               // Layer/AutoActor/anything else
+    if (a.type == "ActorFrameTexture") a.aftCapturePrevious = true;
     if (const std::string* nm = n.attr("Name")) a.name = *nm;
+    if (const std::string* var = n.attr("Var")) a.var = *var;
+    auto shaderPath = [&](const std::string& value) {
+        return (value.size() > 1 && (value[0] == '/' || value[1] == ':'))
+             ? value : dir + "/" + value;
+    };
+    if (const std::string* vert = n.attr("Vert")) a.shaderVert = shaderPath(*vert);
+    if (const std::string* frag = n.attr("Frag")) a.shaderFrag = shaderPath(*frag);
+    else if (const std::string* shader = n.attr("Shader"))
+        a.shaderFrag = shaderPath(*shader);
     // BitmapText's File= names a font, not an image. Record both values before
     // the File= branch so the font name never reaches the texture loader.
     a.isText = a.type == "BitmapText" || n.attr("Text") != nullptr;
     if (const std::string* text = n.attr("Text")) a.text = *text;
+    // ActorSound is a registered, non-visual actor. Its File= may be an `@`
+    // Lua expression (commonly THEME:GetPath); it is not an AutoActor texture.
+    if (a.type == "ActorSound") {
+        for (const auto& at : n.attrs)
+            appendLegacyCommand(a, at.first, at.second);
+        for (const XmlNode* kid : orderedXmlChildren(n)) {
+            auto c = std::make_unique<Actor>();
+            buildActor(*kid, *c, dir, startSec, warn);
+            a.children.push_back(std::move(c));
+        }
+        return;
+    }
     if (const std::string* f = n.attr("File")) {
         if (a.isText) {
             a.font = *f;
             for (const auto& at : n.attrs) {
-                const std::string& k = at.first;
-                if (k.size() > 7 && k.compare(k.size() - 7, 7, "Command") == 0)
-                    a.commands.push_back({k, at.second});
+                appendLegacyCommand(a, at.first, at.second);
             }
-            for (const auto& kid : n.kids) {
+            for (const XmlNode* kid : orderedXmlChildren(n)) {
                 auto c = std::make_unique<Actor>();
-                buildActor(kid, *c, dir, startSec, warn);
+                buildActor(*kid, *c, dir, startSec, warn);
                 a.children.push_back(std::move(c));
             }
             return;
         }
         std::string p = *f;
+        // Resolve an extensionless AutoActor before deciding what kind of
+        // actor it is. `foo` may name foo.xml or foo.sprite just as readily as
+        // an image; resolving only inside the texture branch is too late.
+        {
+            const size_t slash = p.find_last_of("/\\");
+            const std::string base = slash == std::string::npos
+                                   ? p : p.substr(slash + 1);
+            if (base.find('.') == std::string::npos) {
+                const bool absolute = p.size() > 1 && (p[0] == '/' || p[1] == ':');
+                for (const char* ext : {".xml", ".sprite", ".png", ".jpg",
+                                        ".jpeg", ".gif", ".bmp"}) {
+                    const std::string candidate = absolute ? p + ext
+                                                           : dir + "/" + p + ext;
+                    FILE* fp = fopen(candidate.c_str(), "rb");
+                    if (fp) { fclose(fp); p += ext; break; }
+                }
+            }
+        }
         // A DIRECTORY is a nested actor tree: SM loads <folder>/default.xml.
         // Resolved BEFORE the .xml/.sprite branches so the rewritten path goes
         // through the nested-tree path rather than the texture loader.
@@ -760,13 +1029,11 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
             // itself, which the texture loader cannot decode -- so finish the
             // node here rather than letting the generic assignment run.
             for (const auto& at : n.attrs) {
-                const std::string& k = at.first;
-                if (k.size() > 7 && k.compare(k.size() - 7, 7, "Command") == 0)
-                    a.commands.push_back({k, at.second});
+                appendLegacyCommand(a, at.first, at.second);
             }
-            for (const auto& kid : n.kids) {
+            for (const XmlNode* kid : orderedXmlChildren(n)) {
                 auto c = std::make_unique<Actor>();
-                buildActor(kid, *c, dir, startSec, warn);
+                buildActor(*kid, *c, dir, startSec, warn);
                 a.children.push_back(std::move(c));
             }
             return;
@@ -787,11 +1054,11 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
                     const size_t sl = sub.find_last_of("/\\");
                     const std::string sdir = sl == std::string::npos ? dir
                                                                      : sub.substr(0, sl);
-                    for (const auto& kid : sroot.kids) {
-                        auto c = std::make_unique<Actor>();
-                        buildActor(kid, *c, sdir, startSec, warn);
-                        a.children.push_back(std::move(c));
-                    }
+                    const std::string outerName = a.name;
+                    const std::string outerVar = a.var;
+                    buildActor(sroot, a, sdir, startSec, warn);
+                    if (!outerName.empty()) a.name = outerName;
+                    if (!outerVar.empty()) a.var = outerVar;
                 } else if (warn) {
                     warn->push_back("cannot parse " + sub);
                 }
@@ -800,13 +1067,11 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
             }
             // Fall through to the child loop; no texture for this node.
             for (const auto& at : n.attrs) {
-                const std::string& k = at.first;
-                if (k.size() > 7 && k.compare(k.size() - 7, 7, "Command") == 0)
-                    a.commands.push_back({k, at.second});
+                appendLegacyCommand(a, at.first, at.second);
             }
-            for (const auto& kid : n.kids) {
+            for (const XmlNode* kid : orderedXmlChildren(n)) {
                 auto c = std::make_unique<Actor>();
-                buildActor(kid, *c, dir, startSec, warn);
+                buildActor(*kid, *c, dir, startSec, warn);
                 a.children.push_back(std::move(c));
             }
             return;
@@ -820,10 +1085,6 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
         const std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
         if (base.find('.') == std::string::npos) {
             bool found = false;
-            for (const char* ext : {".png", ".jpg", ".jpeg", ".gif", ".bmp"}) {
-                FILE* fp = fopen((dir + "/" + p + ext).c_str(), "rb");
-                if (fp) { fclose(fp); p += ext; found = true; break; }
-            }
             // Still nothing: SM matches a texture name against a file whose
             // stem STARTS with it, which is how a sheet keeps its dimensions
             // in the filename -- "walk" resolves to "walk 2x1.png". Scan the
@@ -850,25 +1111,21 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
             }
         }
         a.file = (p.size() > 1 && (p[0] == '/' || p[1] == ':')) ? p : dir + "/" + p;
-        // A texture that does not open leaves tex.id 0, and an untextured
-        // quad draws SOLID WHITE. That is indistinguishable from an actor the
-        // chart meant to be white, so say so here rather than leaving a white
-        // rectangle on screen with no explanation.
+        // Report the unresolved source even though draw uses _missing.png: the
+        // fallback makes the problem visible but the path says what to repair.
         if (warn) {
             FILE* probe = fopen(a.file.c_str(), "rb");
             if (probe) fclose(probe);
             else warn->push_back("missing texture " + a.file +
-                                 " (will draw as a white quad)");
+                                 " (using _missing.png)");
         }
     }
     for (const auto& at : n.attrs) {
-        const std::string& k = at.first;
-        if (k.size() > 7 && k.compare(k.size() - 7, 7, "Command") == 0)
-            a.commands.push_back({k, at.second});
+        appendLegacyCommand(a, at.first, at.second);
     }
-    for (const auto& kid : n.kids) {
+    for (const XmlNode* kid : orderedXmlChildren(n)) {
         auto c = std::make_unique<Actor>();
-        buildActor(kid, *c, dir, startSec, warn);
+        buildActor(*kid, *c, dir, startSec, warn);
         a.children.push_back(std::move(c));
     }
 }
@@ -876,19 +1133,25 @@ void buildActor(const XmlNode& n, Actor& a, const std::string& dir,
 void compileActorLua(Actor& a, LuaHost& lua, std::map<std::string, int>& cache,
                       std::vector<std::string>* warn) {
     for (ActorCommand& c : a.commands) {
-        if (!isLuaCommand(c.text)) continue;
-        const auto found = cache.find(c.text);
+        const std::string source = isLuaCommand(c.text)
+                                 ? c.text : legacyCommandAsLua(c.text);
+        const auto found = cache.find(source);
         if (found != cache.end()) {
             c.luaRef = found->second;
             continue;
         }
         std::string err;
         const std::string where = (a.name.empty() ? a.type : a.name) + "." + c.name;
-        c.luaRef = lua.compileChunk(c.text, where, err);
-        if (c.luaRef >= 0) cache.emplace(c.text, c.luaRef);
+        c.luaRef = lua.compileChunk(source, where, err);
+        if (c.luaRef >= 0) cache.emplace(source, c.luaRef);
         else if (warn) warn->push_back(where + ": " + err);
     }
     for (auto& child : a.children) compileActorLua(*child, lua, cache, warn);
+}
+
+void installXmlVars(Actor& a, LuaHost& lua) {
+    if (!a.var.empty()) lua.setActorGlobal(a.var, a);
+    for (auto& child : a.children) installXmlVars(*child, lua);
 }
 
 int absIndex(lua_State* L, int idx) {
@@ -982,7 +1245,12 @@ bool buildLuaActor(lua_State* L, int table, Actor& a, LuaHost& lua,
         if (luaStringField(L, table, "Texture", value))
             node.attrs.push_back({"File", value});
     }
+    if (luaStringField(L, table, "Vert", value)) node.attrs.push_back({"Vert", value});
+    if (luaStringField(L, table, "Frag", value)) node.attrs.push_back({"Frag", value});
+    else if (luaStringField(L, table, "Shader", value))
+        node.attrs.push_back({"Shader", value});
     buildActor(node, a, dir, startSec, warn);
+    if (cls == "ActorFrameTexture") a.aftCapturePrevious = false;
     luaNumberField(L, table, "FOV", a.fov);
 
     // Lua Sprite Frames={{Frame=n,Delay=s},...} is the table form of a
@@ -1060,7 +1328,9 @@ bool buildLuaActor(lua_State* L, int table, Actor& a, LuaHost& lua,
 
 void scheduleActor(Actor& a, double startSec, LuaHost& lua,
                    std::vector<std::string>* warn) {
-    // InitCommand runs first and instantly; OnCommand starts from that state.
+    // Legacy XML initializes a containing ActorFrame before its children.
+    // more_afts.xml publishes its AFT factory from the root InitCommand and
+    // calls it from the child AFT InitCommands.
     ActorState st;
     a.base = st;
     a.segs.clear();
@@ -1203,8 +1473,7 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
     screen_.onBase = ActorState{};
     screen_.segs.clear();
     screen_.effect = Effect{};
-    const float virtW = dispH_ > 0 ? 480.0f * float(dispW_) / float(dispH_)
-                                  : 640.0f;
+    const float virtW = logicalScreenWidth(dispW_, dispH_);
     for (int pn = 0; pn < 2; ++pn) {
         Actor& player = plrProxy_[pn];
         ActorState initial;
@@ -1268,6 +1537,7 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
         lua_pop(L, 1);
         canonicalSource_ = true;
     } else {
+        lua_->setLegacyXml(true);
         std::string path;
         for (const char* nm : {"/default.xml", "/Default.xml"}) {
             FILE* f = fopen((dir + nm).c_str(), "rb");
@@ -1289,6 +1559,7 @@ bool ActorTree::load(const std::string& dir, double startSec, std::string& err) 
         std::map<std::string, int> cache;
         compileActorLua(*root_, *lua_, cache, &warn);
     }
+    installXmlVars(*root_, *lua_);
     scheduleActor(*root_, startSec, *lua_, &warn);
     // Second pass: see the note on scheduleActorOn.
     scheduleActorOn(*root_, startSec, *lua_, &warn);
@@ -1375,8 +1646,17 @@ int ActorTree::drainLuaMods(ModDoc& doc, int resolution) {
 
 bool ActorTree::playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                            float& mx, float& my, float& mz) const {
-    return canonicalSource_ && lua_ &&
-           lua_->playerMods(pn - 1, beat, mods, fx, mx, my, mz);
+    return lua_ && lua_->playerMods(pn - 1, beat, mods, fx, mx, my, mz);
+}
+
+bool ActorTree::playerModSnapshot(int pn, PlayerModSnapshot& out) const {
+    return lua_ && lua_->playerModSnapshot(pn - 1, out);
+}
+
+void ActorTree::collectPlayerModChanges(std::vector<PlayerModChange>& out) const {
+    if (!lua_) return;
+    const auto& changes = lua_->playerModChanges();
+    out.insert(out.end(), changes.begin(), changes.end());
 }
 
 bool ActorTree::playerState(int pn, double sec, double beat,
@@ -1388,7 +1668,7 @@ bool ActorTree::playerState(int pn, double sec, double beat,
 }
 
 int ActorTree::livePlayerCount() const {
-    return canonicalSource_ && lua_ ? lua_->livePlayerCount() : 0;
+    return lua_ ? lua_->livePlayerCount() : 0;
 }
 
 void ActorTree::broadcast(const std::string& msg, double sec) {
@@ -1430,6 +1710,224 @@ namespace {
 // case; ActorTree::draw sets this immediately before walking and there is one
 // draw at a time, so the narrower plumbing is not worth the noise.
 static std::map<std::string, ActorTree::NamedTex>* g_namedTex = nullptr;
+
+const char* ACTOR_SHADER_VS_120 = R"glsl(#version 120
+attribute vec2 aPos;
+attribute vec2 aUV;
+attribute vec4 aCol;
+varying vec3 position;
+varying vec3 normal;
+varying vec4 color;
+varying vec2 textureCoord;
+varying vec2 imageCoord;
+uniform float uDepth;
+uniform float uInvertY;
+uniform vec2 uVirtHalf;
+uniform vec2 textureSize;
+uniform vec2 imageSize;
+void main() {
+    position = vec3(aPos, 0.0);
+    normal = vec3(0.0, 0.0, 1.0);
+    color = aCol;
+    textureCoord = aUV;
+    imageCoord = textureCoord * textureSize / max(imageSize, vec2(1.0));
+    gl_Position = vec4(aPos.x / uVirtHalf.x - 1.0,
+                       (1.0 - aPos.y / uVirtHalf.y) * uInvertY,
+                       uDepth, 1.0);
+}
+)glsl";
+
+const char* ACTOR_SHADER_FS_120 = R"glsl(#version 120
+varying vec4 color;
+varying vec2 textureCoord;
+uniform sampler2D sampler0;
+void main() { gl_FragColor = texture2D(sampler0, textureCoord) * color; }
+)glsl";
+
+std::string readActorShader(const std::string& path) {
+    FILE* file = fopen(path.c_str(), "rb");
+    if (!file) return {};
+    std::string source;
+    char buffer[16384];
+    size_t count = 0;
+    while ((count = fread(buffer, 1, sizeof buffer, file)) > 0)
+        source.append(buffer, count);
+    fclose(file);
+    if (source.find("#version") == std::string::npos)
+        source = "#version 120\n" + source;
+    return source;
+}
+
+void replaceAll(std::string& source, const std::string& from,
+                const std::string& to) {
+    size_t at = 0;
+    while ((at = source.find(from, at)) != std::string::npos) {
+        source.replace(at, from.size(), to);
+        at += to.size();
+    }
+}
+
+std::string adaptLegacyActorVertex(std::string source) {
+    if (source.find("gl_Vertex") == std::string::npos &&
+        source.find("gl_ModelViewProjectionMatrix") == std::string::npos)
+        return source;
+
+    const std::string declarations = R"glsl(
+attribute vec2 aPos;
+attribute vec2 aUV;
+attribute vec4 aCol;
+attribute vec2 aLocal;
+uniform vec3 ncCenter;
+uniform vec3 ncZoom;
+uniform vec3 ncRot0;
+uniform vec3 ncRot1;
+uniform vec3 ncRot2;
+uniform float ncSkewX;
+uniform float ncCameraDist;
+uniform vec2 ncVanish;
+uniform vec2 uVirtHalf;
+uniform float uDepth;
+uniform float uInvertY;
+vec4 ncProject(vec4 vertex) {
+    vec3 p = vertex.xyz * ncZoom;
+    p.x += ncSkewX * p.y;
+    float px = ncCenter.x + dot(ncRot0, p);
+    float py = ncCenter.y + dot(ncRot1, p);
+    float pz = ncCenter.z + dot(ncRot2, p);
+    if (ncCameraDist > 0.0) {
+        float denom = ncCameraDist - pz;
+        float scale = abs(denom) > 0.00001 ? ncCameraDist / denom : 1.0;
+        px = ncVanish.x + (px - ncVanish.x) * scale;
+        py = ncVanish.y + (py - ncVanish.y) * scale;
+    }
+    return vec4(px / uVirtHalf.x - 1.0,
+                (1.0 - py / uVirtHalf.y) * uInvertY,
+                -pz / 1000.0 + uDepth, 1.0);
+}
+)glsl";
+    const size_t versionEnd = source.find('\n');
+    source.insert(versionEnd == std::string::npos ? 0 : versionEnd + 1,
+                  declarations);
+    replaceAll(source, "gl_ModelViewProjectionMatrix * vec4( vert, 1.0 )",
+               "ncProject(vec4(vert, 1.0))");
+    replaceAll(source, "gl_TextureMatrix[ 0 ] * gl_MultiTexCoord0",
+               "vec4(aUV, 0.0, 1.0)");
+    replaceAll(source, "gl_NormalMatrix", "mat3(1.0)");
+    replaceAll(source, "gl_Normal", "vec3(0.0, 0.0, 1.0)");
+    replaceAll(source, "gl_Vertex", "vec4(aPos, aLocal.x, 1.0)");
+    replaceAll(source, "gl_Color", "aCol");
+    return source;
+}
+
+GLuint compileActorShaderStage(GLenum type, const std::string& source,
+                               const std::string& label) {
+    GLuint shader = glCreateShader(type);
+    const char* text = source.c_str();
+    glShaderSource(shader, 1, &text, nullptr);
+    glCompileShader(shader);
+    GLint ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[4096] = {};
+        glGetShaderInfoLog(shader, sizeof log, nullptr, log);
+        fprintf(stderr, "actor shader %s failed:\n%s\n", label.c_str(), log);
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+GLuint ensureActorShader(Actor& actor) {
+    if (actor.shaderProgram || actor.shaderTried) return actor.shaderProgram;
+    actor.shaderTried = true;
+    if (actor.shaderVert.empty() && actor.shaderFrag.empty()) return 0;
+
+    std::string vertex = actor.shaderVert.empty()
+                       ? std::string(ACTOR_SHADER_VS_120)
+                       : readActorShader(actor.shaderVert);
+    if (!actor.shaderVert.empty()) vertex = adaptLegacyActorVertex(std::move(vertex));
+    std::string fragment = actor.shaderFrag.empty()
+                         ? std::string(ACTOR_SHADER_FS_120)
+                         : readActorShader(actor.shaderFrag);
+    if (vertex.empty() || fragment.empty()) {
+        fprintf(stderr, "actor shader missing: %s%s%s\n",
+                actor.shaderVert.c_str(),
+                (!actor.shaderVert.empty() && !actor.shaderFrag.empty()) ? " / " : "",
+                actor.shaderFrag.c_str());
+        return 0;
+    }
+    GLuint vs = compileActorShaderStage(GL_VERTEX_SHADER, vertex,
+                                        actor.shaderVert.empty() ? "default vertex"
+                                                                 : actor.shaderVert);
+    GLuint fs = compileActorShaderStage(GL_FRAGMENT_SHADER, fragment,
+                                        actor.shaderFrag.empty() ? "default fragment"
+                                                                 : actor.shaderFrag);
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return 0;
+    }
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "aPos");
+    glBindAttribLocation(program, 1, "aUV");
+    glBindAttribLocation(program, 2, "aCol");
+    glBindAttribLocation(program, 3, "aLocal");
+    glLinkProgram(program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint ok = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[4096] = {};
+        glGetProgramInfoLog(program, sizeof log, nullptr, log);
+        fprintf(stderr, "actor shader link failed (%s / %s):\n%s\n",
+                actor.shaderVert.empty() ? "default" : actor.shaderVert.c_str(),
+                actor.shaderFrag.empty() ? "default" : actor.shaderFrag.c_str(), log);
+        glDeleteProgram(program);
+        return 0;
+    }
+    actor.shaderProgram = program;
+    return program;
+}
+
+void ensureActorTexture(Actor& actor, const Tex& missing) {
+    if (!actor.texLoaded && actor.textureTarget) {
+        Actor& source = *actor.textureTarget;
+        const GLuint id = source.aftTex ? source.aftTex : source.tex.id;
+        const int width = source.aftTex ? source.aftW : source.tex.w;
+        const int height = source.aftTex ? source.aftH : source.tex.h;
+        if (id) {
+            actor.tex = {id, width, height};
+            actor.texLoaded = true;
+        }
+    }
+    if (!actor.texLoaded && !actor.file.empty() && actor.file[0] == '@') {
+        if (g_namedTex) {
+            auto it = g_namedTex->find(actor.file.substr(1));
+            if (it != g_namedTex->end()) {
+                actor.tex.id = it->second.id;
+                actor.tex.w = it->second.w;
+                actor.tex.h = it->second.h;
+                actor.sheetCols = actor.sheetRows = 1;
+                actor.textureFromTarget = true;
+                actor.texLoaded = true;
+            }
+        }
+    } else if (!actor.texLoaded && !actor.file.empty()) {
+        FILE* file = fopen(actor.file.c_str(), "rb");
+        if (file) {
+            fclose(file);
+            actor.tex = gl_loadTex(actor.file, false, false);
+        }
+        if (!actor.tex.id && missing.id) {
+            actor.tex = missing;
+            actor.sheetCols = actor.sheetRows = 1;
+        }
+        actor.texLoaded = true;
+    }
+}
 
 void rotateActor(float& x, float& y, float& z,
                  float rotX, float rotY, float rotZ) {
@@ -1483,6 +1981,26 @@ ActorState composeState(const ActorState& local, const ActorState& parent,
 }
 
 void drawActor(Renderer& R, Actor& a, double sec, double beat,
+               const ActorState& parent, bool forceVisible);
+
+void drawActorChildren(Renderer& R, Actor& parentActor, double sec, double beat,
+                       const ActorState& parentState) {
+    if (!parentActor.drawByZPosition) {
+        for (auto& child : parentActor.children)
+            drawActor(R, *child, sec, beat, parentState, false);
+        return;
+    }
+    std::vector<Actor*> children;
+    children.reserve(parentActor.children.size());
+    for (auto& child : parentActor.children) children.push_back(child.get());
+    std::stable_sort(children.begin(), children.end(), [sec](Actor* left, Actor* right) {
+        return evalActor(*left, sec).z < evalActor(*right, sec).z;
+    });
+    for (Actor* child : children)
+        drawActor(R, *child, sec, beat, parentState, false);
+}
+
+void drawActor(Renderer& R, Actor& a, double sec, double beat,
                const ActorState& parent, bool forceVisible = false) {
     ActorState st = evalActor(a, sec);
     applyEffect(a, st, sec, beat);
@@ -1513,13 +2031,25 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         w.vanishY = a.vanishSet ? a.vanishY : SCREEN_H * 0.5f;
     }
 
-    // ActorFrameTexture::DrawPrimitives binds its own render target, traverses
-    // its children there, then restores the caller's target and viewport.
+    // NotITG's XML AFT is a framebuffer snapshot at this draw-order point.
+    // SM5's Lua ActorFrameTexture instead binds its target and traverses its
+    // children. Keeping the two source forms distinct makes both contracts
+    // available without guessing from whether a particular AFT has children.
     if (a.isAft) {
         if (!a.aftFbo) return;
         GLint previousFbo = 0, viewport[4] = {};
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFbo);
         glGetIntegerv(GL_VIEWPORT, viewport);
+        if (a.aftCapturePrevious) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, GLuint(previousFbo));
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, a.aftFbo);
+            glBlitFramebuffer(viewport[0], viewport[1],
+                              viewport[0] + viewport[2], viewport[1] + viewport[3],
+                              0, 0, a.aftW, a.aftH,
+                              GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFbo));
+            return;
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, a.aftFbo);
         glViewport(0, 0, a.aftW, a.aftH);
         if (!a.aftPreserve) {
@@ -1530,12 +2060,20 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
                     (a.aftDepth ? GL_DEPTH_BUFFER_BIT : 0));
         }
         // RageTextureRenderTarget::BeginRenderingTo resets the world and camera
-        // before ActorFrameTexture traverses its children. Keep the inherited
-        // colour, but never leak the AFT actor's spatial transform into them.
+        // before ActorFrameTexture traverses its children, and its GL target
+        // inverts Y while reversing front-face winding. Keep inherited colour,
+        // but never leak the AFT actor's spatial transform into its children.
         ActorState targetRoot;
         targetRoot.r = w.r; targetRoot.g = w.g;
         targetRoot.b = w.b; targetRoot.a = w.a;
-        for (auto& c : a.children) drawActor(R, *c, sec, beat, targetRoot);
+        GLint previousFrontFace = GL_CCW;
+        glGetIntegerv(GL_FRONT_FACE, &previousFrontFace);
+        const bool previousYInverted = R.actorTargetYInverted();
+        R.setActorTargetYInverted(true);
+        glFrontFace(GL_CW);
+        drawActorChildren(R, a, sec, beat, targetRoot);
+        glFrontFace(GLenum(previousFrontFace));
+        R.setActorTargetYInverted(previousYInverted);
         glBindFramebuffer(GL_FRAMEBUFFER, GLuint(previousFbo));
         glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         return;
@@ -1550,7 +2088,7 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
 
     if (a.playerField > 0) {
         R.drawActorPlayerSource(a.playerField,
-            w.x, w.y, w.z, w.zoomX, w.zoomY,
+            w.x, w.y, w.z, w.zoomX, w.zoomY, w.zoomZ,
             w.rotX, w.rotY, w.rotZ, w.skewX,
             w.projFov, w.vanishX, w.vanishY,
             w.r, w.g, w.b, w.a);
@@ -1565,39 +2103,15 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
                         st.blend, st.zWrite, st.zTest, st.clearZ);
     }
     else if (a.type != "ActorFrame") {
-        if (!a.texLoaded && !a.file.empty() && a.file[0] == '@') {
-            // Published by an AFT's SetTextureName. Resolved every frame until
-            // it exists, because the AFT that creates it may be built after
-            // the sprite that references it.
-            if (g_namedTex) {
-                auto it = g_namedTex->find(a.file.substr(1));
-                if (it != g_namedTex->end()) {
-                    a.tex.id = it->second.id;
-                    // Natural size = the AFT's real allocation, so the
-                    // chart's basezoom(virt/real) scales it back to
-                    // exactly virtual-screen size.
-                    a.tex.w = it->second.w;
-                    a.tex.h = it->second.h;
-                    a.sheetCols = a.sheetRows = 1;
-                    a.textureFromTarget = true;
-                    a.texLoaded = true;
-                }
-            }
-        }
-        else if (!a.texLoaded && !a.file.empty()) {
-            FILE* f = fopen(a.file.c_str(), "rb");
-            if (f) { fclose(f); a.tex = gl_loadTex(a.file, false, /*flipY=*/false); }
-            a.texLoaded = true;
-        }
-        // A Sprite whose texture never resolved must draw NOTHING. The
-        // untextured white quad is Quad's contract, not a fallback: a missing
-        // file or an AFT name that has not been published yet would otherwise
-        // paint a white rectangle exactly where the intended art belongs (the
-        // load-time warning already says which file). Quad and CODE still
-        // draw untextured -- that is what they are for.
+        // Published AFT names may not exist until an earlier sibling creates
+        // them; ordinary files are loaded on first use.
+        ensureActorTexture(a, R.actorMissingTexture());
+        // An unresolved file uses _missing.png. A named AFT that has not been
+        // published yet still draws nothing and is retried on the next frame.
+        // Quad and CODE remain untextured -- that is what they are for.
         if (!a.tex.id && a.type != "Quad" && a.type != "quad" &&
             a.type != "CODE") {
-            for (auto& c : a.children) drawActor(R, *c, sec, beat, w);
+            drawActorChildren(R, a, sec, beat, w);
             return;
         }
         if (a.tex.id && a.textureFilterDirty) {
@@ -1605,6 +2119,9 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
             const GLint filter = a.textureFiltering ? GL_LINEAR : GL_NEAREST;
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+            const GLint wrap = a.textureWrapping ? GL_REPEAT : GL_CLAMP_TO_EDGE;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
             a.textureFilterDirty = false;
         }
         // Natural size is ONE CELL, not the whole sheet: an unzoomed .sprite
@@ -1620,27 +2137,122 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         float sh = (w.sizeY > 0) ? w.sizeY
                                  : float(a.tex.h ? a.tex.h / rows : 1);
         sw *= w.zoomX; sh *= w.zoomY;
-        float ox = 0, oy = 0;
-        if (st.horizAlign < 0) ox = sw * 0.5f;
-        else if (st.horizAlign > 0) ox = -sw * 0.5f;
-        if (st.vertAlign < 0) oy = sh * 0.5f;
-        else if (st.vertAlign > 0) oy = -sh * 0.5f;
+        float ox = -st.horizAlign * sw * 0.5f;
+        float oy = -st.vertAlign * sh * 0.5f;
         float su0, sv0, su1, sv1;
         spriteUV(a, sec, su0, sv0, su1, sv1);
         if (a.customTexRect) {
             su0 = a.texRect[0]; sv0 = a.texRect[1];
             su1 = a.texRect[2]; sv1 = a.texRect[3];
         }
-        if (a.textureFromTarget) std::swap(sv0, sv1);
-        R.drawActorQuad3D(w.x, w.y, w.z, ox, oy, sw, sh,
-                          w.rotX, w.rotY, w.rotZ, w.skewX,
-                          w.projFov, w.vanishX, w.vanishY,
-                          a.fadeLeft, a.fadeRight, a.fadeTop, a.fadeBottom,
-                          w.r, w.g, w.b, w.a,
-                          a.tex.id, st.blend, st.zWrite, st.zTest, st.clearZ,
-                          su0, sv0, su1, sv1);
+        const double texElapsed = std::max(0.0, sec - a.texCoordVelocityStart);
+        float texOffsetX = a.texCoordBaseX + float(texElapsed) * a.texCoordVelX;
+        float texOffsetY = a.texCoordBaseY + float(texElapsed) * a.texCoordVelY;
+        float fadeLeft = a.fadeLeft, fadeRight = a.fadeRight;
+        float fadeTop = a.fadeTop, fadeBottom = a.fadeBottom;
+        if (a.textureWrapping) {
+            texOffsetX -= floorf(texOffsetX);
+            texOffsetY -= floorf(texOffsetY);
+        }
+        su0 += texOffsetX; su1 += texOffsetX;
+        sv0 += texOffsetY; sv1 += texOffsetY;
+        const bool haveCrop = st.cropLeft != 0.0f || st.cropRight != 0.0f ||
+                              st.cropTop != 0.0f || st.cropBottom != 0.0f;
+        if (haveCrop) {
+            if (st.cropLeft + st.cropRight >= 1.0f ||
+                st.cropTop + st.cropBottom >= 1.0f) {
+                drawActorChildren(R, a, sec, beat, w);
+                return;
+            }
+            const auto clampCrop = [](float value) {
+                return std::max(0.0f, std::min(1.0f, value));
+            };
+            const float leftCrop = clampCrop(st.cropLeft);
+            const float rightCrop = clampCrop(st.cropRight);
+            const float topCrop = clampCrop(st.cropTop);
+            const float bottomCrop = clampCrop(st.cropBottom);
+
+            const float left = ox - sw * 0.5f;
+            const float right = ox + sw * 0.5f;
+            const float top = oy - sh * 0.5f;
+            const float bottom = oy + sh * 0.5f;
+            const float croppedLeft = left + (right - left) * leftCrop;
+            const float croppedRight = right + (left - right) * rightCrop;
+            const float croppedTop = top + (bottom - top) * topCrop;
+            const float croppedBottom = bottom + (top - bottom) * bottomCrop;
+            ox = (croppedLeft + croppedRight) * 0.5f;
+            oy = (croppedTop + croppedBottom) * 0.5f;
+            sw = croppedRight - croppedLeft;
+            sh = croppedBottom - croppedTop;
+
+            const float du = su1 - su0;
+            const float dv = sv1 - sv0;
+            su0 += du * leftCrop;
+            su1 -= du * rightCrop;
+            sv0 += dv * topCrop;
+            sv1 -= dv * bottomCrop;
+
+        }
+        // RageTextureRenderTarget is exposed in GL orientation. Legacy charts
+        // apply negative basezoomy themselves when they want it upright.
+        // Automatically swapping the UVs here flips those AFTs twice.
+        GLuint customProgram = ensureActorShader(a);
+        std::vector<ActorShaderBinding> shaderBindings;
+        if (customProgram) {
+            shaderBindings.reserve(a.shaderUniforms.size());
+            for (const auto& uniform : a.shaderUniforms) {
+                ActorShaderBinding binding;
+                binding.name = uniform.name;
+                binding.components = uniform.components;
+                for (int i = 0; i < 4; ++i) binding.value[i] = uniform.value[i];
+                if (uniform.texture) {
+                    ensureActorTexture(*uniform.texture, R.actorMissingTexture());
+                    binding.texture = uniform.texture->aftTex
+                                    ? uniform.texture->aftTex
+                                    : uniform.texture->tex.id;
+                }
+                shaderBindings.push_back(std::move(binding));
+            }
+        }
+        const bool polygon = a.type == "Polygon" && !a.polygonVertices.empty();
+        if (polygon) {
+            R.drawActorQuad3D(w.x, w.y, w.z, 0, 0, w.zoomX, w.zoomY,
+                              w.rotX, w.rotY, w.rotZ, w.skewX,
+                              w.projFov, w.vanishX, w.vanishY,
+                              0, 0, 0, 0, 0, 0, 0, 0,
+                              w.r, w.g, w.b, w.a,
+                              a.tex.id, st.blend, st.zWrite, st.zTest, st.clearZ,
+                              0, 0, 1, 1, customProgram,
+                              customProgram ? &shaderBindings : nullptr,
+                              a.tex.w, a.tex.h, false, &a.polygonVertices,
+                              a.polygonTriangles, a.cullMode, w.zoomZ);
+        } else {
+            R.drawActorQuad3D(w.x, w.y, w.z, ox, oy, sw, sh,
+                              w.rotX, w.rotY, w.rotZ, w.skewX,
+                              w.projFov, w.vanishX, w.vanishY,
+                              fadeLeft, fadeRight, fadeTop, fadeBottom,
+                              st.cropLeft, st.cropRight,
+                              st.cropTop, st.cropBottom,
+                              w.r, w.g, w.b, w.a,
+                              a.tex.id, st.blend, st.zWrite, st.zTest, st.clearZ,
+                              su0, sv0, su1, sv1, customProgram,
+                              customProgram ? &shaderBindings : nullptr,
+                              a.tex.w, a.tex.h);
+            if (w.glowA > 0.0001f) {
+                R.drawActorQuad3D(w.x, w.y, w.z, ox, oy, sw, sh,
+                                  w.rotX, w.rotY, w.rotZ, w.skewX,
+                                  w.projFov, w.vanishX, w.vanishY,
+                                  fadeLeft, fadeRight, fadeTop, fadeBottom,
+                                  st.cropLeft, st.cropRight,
+                                  st.cropTop, st.cropBottom,
+                                  w.glowR, w.glowG, w.glowB, w.glowA,
+                                  a.tex.id, st.blend, st.zWrite, st.zTest, false,
+                                  su0, sv0, su1, sv1, 0, nullptr,
+                                  a.tex.w, a.tex.h, true);
+            }
+        }
     }
-    for (auto& c : a.children) drawActor(R, *c, sec, beat, w);
+    drawActorChildren(R, a, sec, beat, w);
 }
 
 }  // namespace
@@ -1697,7 +2309,7 @@ void ActorTree::runPending(double sec) {
             if (!lua_->callChunk(c->luaRef, *p.a, p.t, where, err))
                 lua_->note(where + ": " + err);
         } else if (!isLuaCommand(c->text)) {
-            scheduleChain(*p.a, c->text, p.t, p.a->onBase, 0, lua_.get());
+            scheduleChain(*p.a, c->text, p.t, evalActor(*p.a, p.t), 0, lua_.get());
         }
         dispatchPending(p.t);   // MESSAGEMAN:Broadcast from inside the body
     }
@@ -1783,53 +2395,64 @@ struct LuaPlayerOptionsRef {
 };
 
 enum ActorMethod {
-    AM_X, AM_Y, AM_Z, AM_ZOOM, AM_ZOOMTO, AM_ZOOMX, AM_ZOOMY, AM_ZOOMZ,
-    AM_VISIBLE, AM_HIDDEN, AM_DIFFUSEALPHA, AM_DIFFUSE,
+    AM_X, AM_Y, AM_Z, AM_XY, AM_XYZ, AM_ZOOM, AM_ZOOMTO, AM_ZOOMX, AM_ZOOMY, AM_ZOOMZ,
+    AM_VISIBLE, AM_HIDDEN, AM_DIFFUSEALPHA, AM_DIFFUSE, AM_GLOW,
     AM_ROTX, AM_ROTY, AM_ROTZ, AM_SKEWX,
-    AM_LINEAR, AM_ACCEL, AM_DECEL, AM_SPRING, AM_BOUNCEBEGIN, AM_BOUNCEEND,
-    AM_SLEEP, AM_FINISH, AM_STOP, AM_FILTER, AM_PLAY, AM_QUEUE,
+    AM_LINEAR, AM_ACCEL, AM_DECEL, AM_SPRING, AM_BOUNCEBEGIN, AM_BOUNCEEND, AM_TWEEN,
+    AM_SLEEP, AM_FINISH, AM_STOP, AM_FILTER, AM_CMD, AM_PLAY, AM_QUEUE,
     AM_QUEUEMESSAGE, AM_GETCHILD,
-    AM_GETX, AM_GETY, AM_GETZ, AM_GETZOOM, AM_GETROT,
+    AM_GETX, AM_GETY, AM_GETZ, AM_GETZOOM, AM_GETROT, AM_AUX, AM_GETAUX,
     AM_SETSTATE, AM_ANIMATE,
-    AM_BOB, AM_BOUNCE, AM_WAG, AM_VIBRATE, AM_STOPEFFECT,
-    AM_EFFECTMAG, AM_EFFECTPERIOD, AM_EFFECTCLOCK,
+    AM_BOB, AM_BOUNCE, AM_WAG, AM_VIBRATE, AM_STOPEFFECT, AM_GLOWSHIFT,
+    AM_EFFECTMAG, AM_EFFECTPERIOD, AM_EFFECTDELAY, AM_EFFECTCLOCK,
     // ActorFrameTexture
     AM_AFT_NAME, AM_AFT_W, AM_AFT_H, AM_AFT_CREATE, AM_AFT_GETTEX,
     AM_AFT_DEPTH, AM_AFT_ALPHA, AM_AFT_FLOAT, AM_AFT_PRESERVE,
     // plain actor methods that were reaching the unsupported path
     AM_SETTEXTURE, AM_BLEND, AM_BASEZOOMX, AM_BASEZOOMY,
     AM_ADDX, AM_ADDY, AM_ADDZ,
-    AM_GETTEXW, AM_GETTEXH, AM_CENTER, AM_HALIGN, AM_VALIGN,
-    AM_TEXRECT, AM_FADELEFT, AM_FADERIGHT, AM_FADETOP, AM_FADEBOTTOM,
+    AM_GETTEXW, AM_GETTEXH, AM_GETIMAGEW, AM_GETIMAGEH,
+    AM_SCALETOCOVER, AM_STRETCHTO,
+    AM_CENTER, AM_HALIGN, AM_VALIGN,
+    AM_TEXRECT, AM_TEXCOORDVELOCITY,
+    AM_CROPLEFT, AM_CROPRIGHT, AM_CROPTOP, AM_CROPBOTTOM,
+    AM_FADELEFT, AM_FADERIGHT, AM_FADETOP, AM_FADEBOTTOM,
     AM_FOV, AM_SPIN, AM_DIFFUSESHIFT, AM_DIFFUSEBLINK,
     AM_EFFECTCOLOR1, AM_EFFECTCOLOR2, AM_SHADOWLENGTH,
     AM_SETTARGET, AM_ADDWRAPPER, AM_GETWRAPPER, AM_VANISHPOINT,
-    AM_SETTEXT, AM_GETTEXT, AM_GETSECSINTOEFFECT
+    AM_SETTEXT, AM_GETTEXT, AM_GETSECSINTOEFFECT,
+    AM_DRAWBYZ, AM_FARDIST, AM_ZTEST, AM_ZWRITE, AM_CLEARZ, AM_TEXWRAP,
+    AM_GETSHADER, AM_UNIFORM1F, AM_UNIFORM2F, AM_UNIFORM4F, AM_UNIFORMTEX,
+    AM_DRAWMODE, AM_NUMVERTS, AM_VERTEXPOS, AM_VERTEXTEX, AM_CULLMODE,
+    AM_NUMTAPSINRANGE, AM_SETAWAKE
 };
 
 struct ActorMethodDef { const char* name; ActorMethod method; };
 const ActorMethodDef ACTOR_METHODS[] = {
-    {"x", AM_X}, {"y", AM_Y}, {"z", AM_Z},
+    {"x", AM_X}, {"y", AM_Y}, {"z", AM_Z}, {"xy", AM_XY}, {"xyz", AM_XYZ},
     {"zoom", AM_ZOOM}, {"zoomto", AM_ZOOMTO},
     {"zoomx", AM_ZOOMX}, {"zoomy", AM_ZOOMY}, {"zoomz", AM_ZOOMZ},
     {"visible", AM_VISIBLE}, {"hidden", AM_HIDDEN},
-    {"diffusealpha", AM_DIFFUSEALPHA}, {"diffuse", AM_DIFFUSE},
+    {"diffusealpha", AM_DIFFUSEALPHA}, {"diffuse", AM_DIFFUSE}, {"glow", AM_GLOW},
     {"rotationx", AM_ROTX}, {"rotationy", AM_ROTY}, {"rotationz", AM_ROTZ},
     {"skewx", AM_SKEWX},
     {"linear", AM_LINEAR}, {"accelerate", AM_ACCEL},
     {"decelerate", AM_DECEL}, {"spring", AM_SPRING},
-    {"bouncebegin", AM_BOUNCEBEGIN}, {"bounceend", AM_BOUNCEEND},
+    {"bouncebegin", AM_BOUNCEBEGIN}, {"bounceend", AM_BOUNCEEND}, {"tween", AM_TWEEN},
     {"sleep", AM_SLEEP}, {"finishtweening", AM_FINISH},
     {"stoptweening", AM_STOP}, {"SetTextureFiltering", AM_FILTER},
+    {"cmd", AM_CMD},
     {"playcommand", AM_PLAY}, {"queuecommand", AM_QUEUE},
     {"queuemessage", AM_QUEUEMESSAGE}, {"GetChild", AM_GETCHILD},
     {"GetX", AM_GETX}, {"GetY", AM_GETY}, {"GetZ", AM_GETZ},
     {"GetZoom", AM_GETZOOM}, {"getrotation", AM_GETROT},
+    {"aux", AM_AUX}, {"getaux", AM_GETAUX},
     {"setstate", AM_SETSTATE}, {"animate", AM_ANIMATE},
     {"bob", AM_BOB}, {"bounce", AM_BOUNCE}, {"wag", AM_WAG},
     {"vibrate", AM_VIBRATE}, {"stopeffect", AM_STOPEFFECT},
+    {"glowshift", AM_GLOWSHIFT},
     {"effectmagnitude", AM_EFFECTMAG}, {"effectperiod", AM_EFFECTPERIOD},
-    {"effectclock", AM_EFFECTCLOCK},
+    {"effectdelay", AM_EFFECTDELAY}, {"effectclock", AM_EFFECTCLOCK},
     {"SetTextureName", AM_AFT_NAME}, {"SetWidth", AM_AFT_W},
     {"SetHeight", AM_AFT_H}, {"Create", AM_AFT_CREATE},
     {"GetTexture", AM_AFT_GETTEX},
@@ -1839,8 +2462,14 @@ const ActorMethodDef ACTOR_METHODS[] = {
     {"basezoomx", AM_BASEZOOMX}, {"basezoomy", AM_BASEZOOMY},
     {"addx", AM_ADDX}, {"addy", AM_ADDY}, {"addz", AM_ADDZ},
     {"GetTextureWidth", AM_GETTEXW}, {"GetTextureHeight", AM_GETTEXH},
-    {"Center", AM_CENTER}, {"horizalign", AM_HALIGN}, {"vertalign", AM_VALIGN},
-    {"customtexturerect", AM_TEXRECT},
+    {"GetImageWidth", AM_GETIMAGEW}, {"GetImageHeight", AM_GETIMAGEH},
+    {"scaletocover", AM_SCALETOCOVER}, {"stretchto", AM_STRETCHTO},
+    {"Center", AM_CENTER},
+    {"halign", AM_HALIGN}, {"horizalign", AM_HALIGN},
+    {"valign", AM_VALIGN}, {"vertalign", AM_VALIGN},
+    {"customtexturerect", AM_TEXRECT}, {"texcoordvelocity", AM_TEXCOORDVELOCITY},
+    {"cropleft", AM_CROPLEFT}, {"cropright", AM_CROPRIGHT},
+    {"croptop", AM_CROPTOP}, {"cropbottom", AM_CROPBOTTOM},
     {"fadeleft", AM_FADELEFT}, {"faderight", AM_FADERIGHT},
     {"fadetop", AM_FADETOP}, {"fadebottom", AM_FADEBOTTOM},
     {"fov", AM_FOV}, {"spin", AM_SPIN},
@@ -1851,7 +2480,51 @@ const ActorMethodDef ACTOR_METHODS[] = {
     {"vanishpoint", AM_VANISHPOINT},
     {"settext", AM_SETTEXT}, {"GetText", AM_GETTEXT},
     {"GetSecsIntoEffect", AM_GETSECSINTOEFFECT},
+    {"SetDrawByZPosition", AM_DRAWBYZ}, {"SetFarDist", AM_FARDIST},
+    {"ztest", AM_ZTEST}, {"zwrite", AM_ZWRITE}, {"clearzbuffer", AM_CLEARZ},
+    {"texturewrapping", AM_TEXWRAP},
+    {"GetShader", AM_GETSHADER},
+    {"uniform1f", AM_UNIFORM1F}, {"uniform2f", AM_UNIFORM2F},
+    {"uniform4f", AM_UNIFORM4F}, {"uniformTexture", AM_UNIFORMTEX},
+    {"SetDrawMode", AM_DRAWMODE}, {"SetNumVertices", AM_NUMVERTS},
+    {"SetVertexPosition", AM_VERTEXPOS}, {"SetVertexTexCoord", AM_VERTEXTEX},
+    {"cullmode", AM_CULLMODE}, {"GetNumTapsInRange", AM_NUMTAPSINRANGE},
+    {"SetAwake", AM_SETAWAKE},
 };
+
+Ease notitgTweenEase(const char* expression, bool& known) {
+    std::string e = expression ? lower(expression) : "";
+    e.erase(std::remove_if(e.begin(), e.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }), e.end());
+    known = true;
+    if (e == "%f*%f*%f") return Ease::InCubic;
+    if (e == "1-(1-%f)*(1-%f)*(1-%f)") return Ease::OutCubic;
+    if (e.find("math.max(-math.sin") != std::string::npos) return Ease::NegativeSine6;
+    if (e.find("math.max(math.sin") != std::string::npos) return Ease::PositiveSine6;
+    if (e.find("tween_spring2") != std::string::npos) return Ease::Spring2;
+    if (e.find("ease_quadboth") != std::string::npos ||
+        e.find("tween_easeinoutquad") != std::string::npos ||
+        e.find("inoutquad") != std::string::npos) return Ease::InOutQuad;
+    if (e.find("inoutcubic") != std::string::npos) return Ease::InOutCubic;
+    if (e.find("inoutsine") != std::string::npos) return Ease::InOutSine;
+    if (e.find("inoutquint") != std::string::npos) return Ease::InOutQuint;
+    if (e.find("inoutcirc") != std::string::npos) return Ease::InOutCirc;
+    if (e.find("inexpo(%f,0,0,1)") != std::string::npos) return Ease::Sleep;
+    if (e.find("inoutexpo") != std::string::npos) return Ease::InOutExpo;
+    if (e.find("outexpo") != std::string::npos) return Ease::OutExpo;
+    if (e.find("inexpo") != std::string::npos) return Ease::InExpo;
+    if (e.find("inquad") != std::string::npos) return Ease::Accelerate;
+    if (e.find("outquad") != std::string::npos) return Ease::Decelerate;
+    if (e.find("incirc") != std::string::npos) return Ease::InCirc;
+    if (e.find("outcirc") != std::string::npos) return Ease::OutCirc;
+    if (e.find("inquart") != std::string::npos) return Ease::InQuart;
+    if (e.find("outquart") != std::string::npos) return Ease::OutQuart;
+    if (e.find("inquint") != std::string::npos) return Ease::InQuint;
+    if (e.find("linear") != std::string::npos) return Ease::Linear;
+    known = false;
+    return Ease::Linear;
+}
 
 
 // The natives the boot chunk's shims close over. Each
@@ -1887,6 +2560,25 @@ int lua_nc_gamecmd(lua_State* L) {
     const int player = int(luaL_optnumber(L, 2, 0));
     if (h && command) h->applyGameCommand(command, player);
     return 0;
+}
+int lua_nc_launchattack(lua_State* L) {
+    LuaHost* h = hostOf(L);
+    const double startSec = luaL_checknumber(L, 1);
+    const double lengthSec = luaL_checknumber(L, 2);
+    const char* mods = luaL_checkstring(L, 3);
+    const int player = int(luaL_optnumber(L, 4, 0));
+    if (lengthSec < 0.0)
+        return luaL_argerror(L, 2, "attack length must not be negative");
+    if (h && mods) h->launchAttack(startSec, lengthSec, mods, player);
+    return 0;
+}
+int lua_nc_getz(lua_State* L) {
+    LuaHost* h = hostOf(L);
+    const int player = int(luaL_optnumber(L, 1, 0));
+    const int column = int(luaL_optnumber(L, 2, 0));
+    const float yOffset = float(luaL_optnumber(L, 3, 0));
+    lua_pushnumber(L, h ? h->noteZ(player, column, yOffset) : 0.0f);
+    return 1;
 }
 int lua_nc_po(lua_State* L) {
     LuaHost* h = hostOf(L);
@@ -1927,6 +2619,11 @@ int lua_nc_dispw(lua_State* L) {
 int lua_nc_disph(lua_State* L) {
     LuaHost* h = hostOf(L);
     lua_pushnumber(L, h ? h->displayH() : 1080);
+    return 1;
+}
+int lua_nc_vendor(lua_State* L) {
+    const GLubyte* vendor = glGetString(GL_VENDOR);
+    lua_pushstring(L, vendor ? reinterpret_cast<const char*>(vendor) : "");
     return 1;
 }
 int lua_nc_trace(lua_State* L) {
@@ -2099,6 +2796,19 @@ int LuaHost::actorCall(lua_State* L) {
         return 1;
     }
 
+    auto shaderUniform = [&](const char* name) -> Actor::ShaderUniform& {
+        for (auto& uniform : actor->shaderUniforms)
+            if (uniform.name == name) return uniform;
+        actor->shaderUniforms.push_back({});
+        actor->shaderUniforms.back().name = name;
+        return actor->shaderUniforms.back();
+    };
+    auto boolean = [&](int i, bool d) {
+        if (lua_gettop(L) < i || lua_isnil(L, i)) return d;
+        return lua_isnumber(L, i) ? lua_tonumber(L, i) != 0.0
+                                  : lua_toboolean(L, i) != 0;
+    };
+
     // The AFT methods run OUTSIDE the tween scheduler: they configure and
     // allocate a render target rather than animating a property, so they must
     // work during InitCommand, before any Sched exists for this actor.
@@ -2116,14 +2826,14 @@ int LuaHost::actorCall(lua_State* L) {
         case AM_AFT_H: actor->isAft = true;
                        actor->aftH = int(lua_tonumber(L, 2));
                        lua_pushvalue(L, 1); return 1;
-        case AM_AFT_DEPTH:    actor->aftDepth    = lua_toboolean(L, 2) != 0;
-                              lua_pushvalue(L, 1); return 1;
-        case AM_AFT_ALPHA:    actor->aftAlpha    = lua_toboolean(L, 2) != 0;
-                              lua_pushvalue(L, 1); return 1;
-        case AM_AFT_FLOAT:    actor->aftFloat    = lua_toboolean(L, 2) != 0;
-                              lua_pushvalue(L, 1); return 1;
-        case AM_AFT_PRESERVE: actor->aftPreserve = lua_toboolean(L, 2) != 0;
-                              lua_pushvalue(L, 1); return 1;
+        case AM_AFT_DEPTH:    actor->aftDepth    = boolean(2, false);
+                               lua_pushvalue(L, 1); return 1;
+        case AM_AFT_ALPHA:    actor->aftAlpha    = boolean(2, false);
+                               lua_pushvalue(L, 1); return 1;
+        case AM_AFT_FLOAT:    actor->aftFloat    = boolean(2, false);
+                               lua_pushvalue(L, 1); return 1;
+        case AM_AFT_PRESERVE: actor->aftPreserve = boolean(2, false);
+                               lua_pushvalue(L, 1); return 1;
         case AM_AFT_CREATE:
             actor->isAft = true;
             host->aftCreate(*actor);
@@ -2137,20 +2847,39 @@ int LuaHost::actorCall(lua_State* L) {
             lua_pushvalue(L, 1);
             return 1;
         case AM_GETTEXW:
+        case AM_GETIMAGEW:
+            if (actor->tex.w <= 0 && actor->aftW <= 0) {
+                float w = 0, h = 0;
+                actorNaturalSize(*actor, w, h);
+                actor->tex.w = int(w * std::max(actor->sheetCols, 1));
+                actor->tex.h = int(h * std::max(actor->sheetRows, 1));
+            }
             lua_pushnumber(L, actor->aftW > 0 ? actor->aftW : actor->tex.w);
             return 1;
         case AM_GETTEXH:
+        case AM_GETIMAGEH:
+            if (actor->tex.h <= 0 && actor->aftH <= 0) {
+                float w = 0, h = 0;
+                actorNaturalSize(*actor, w, h);
+                actor->tex.w = int(w * std::max(actor->sheetCols, 1));
+                actor->tex.h = int(h * std::max(actor->sheetRows, 1));
+            }
             lua_pushnumber(L, actor->aftH > 0 ? actor->aftH : actor->tex.h);
             return 1;
         case AM_SETTEXTURE: {
             // SetTexture(aft) or SetTexture("name").
             if (lua_isstring(L, 2)) {
                 const char* nm = lua_tostring(L, 2);
-                if (nm) { actor->file = std::string("@") + nm; actor->textureFromTarget = true; }
+                if (nm) {
+                    actor->file = std::string("@") + nm;
+                    actor->textureFromTarget = true;
+                    actor->textureTarget = nullptr;
+                }
             } else {
                 Actor* src = host->toActor(L, 2);
-                if (src && !src->aftName.empty()) {
-                    actor->file = "@" + src->aftName;
+                if (src) {
+                    actor->textureTarget = src;
+                    actor->file.clear();
                     actor->textureFromTarget = true;
                 }
             }
@@ -2166,8 +2895,26 @@ int LuaHost::actorCall(lua_State* L) {
             actor->baseZoomY = float(luaL_optnumber(L, 2, 1.0));
             lua_pushvalue(L, 1);
             return 1;
+        case AM_DRAWBYZ:
+            actor->drawByZPosition = boolean(2, false);
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_FARDIST:
+            actor->farDist = float(luaL_optnumber(L, 2, 1000.0));
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_TEXWRAP:
+            actor->textureWrapping = boolean(2, false);
+            actor->textureFilterDirty = true;
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_SETAWAKE:
+            // NotClon does not put Player actors to sleep; the renderer is
+            // already demand-driven. Keep the method as the matching no-op.
+            lua_pushvalue(L, 1);
+            return 1;
         case AM_ANIMATE:
-            actor->spriteAnimate = lua_toboolean(L, 2) != 0;
+            actor->spriteAnimate = boolean(2, false);
             lua_pushvalue(L, 1);
             return 1;
         case AM_SETTARGET:
@@ -2204,8 +2951,21 @@ int LuaHost::actorCall(lua_State* L) {
             actor->customTexRect = true;
             for (int i = 0; i < 4; ++i)
                 actor->texRect[i] = float(luaL_optnumber(L, i + 2, i < 2 ? 0.0 : 1.0));
+            // Sprite::SetCustomTextureRect enables wrapping in OpenITG/SM5.
+            actor->textureWrapping = true;
+            actor->textureFilterDirty = true;
             lua_pushvalue(L, 1);
             return 1;
+        case AM_TEXCOORDVELOCITY: {
+            const double elapsed = std::max(0.0, host->sec_ - actor->texCoordVelocityStart);
+            actor->texCoordBaseX += float(elapsed) * actor->texCoordVelX;
+            actor->texCoordBaseY += float(elapsed) * actor->texCoordVelY;
+            actor->texCoordVelocityStart = host->sec_;
+            actor->texCoordVelX = float(luaL_optnumber(L, 2, 0));
+            actor->texCoordVelY = float(luaL_optnumber(L, 3, 0));
+            lua_pushvalue(L, 1);
+            return 1;
+        }
         case AM_FADELEFT:   actor->fadeLeft   = float(luaL_optnumber(L, 2, 0)); lua_pushvalue(L, 1); return 1;
         case AM_FADERIGHT:  actor->fadeRight  = float(luaL_optnumber(L, 2, 0)); lua_pushvalue(L, 1); return 1;
         case AM_FADETOP:    actor->fadeTop    = float(luaL_optnumber(L, 2, 0)); lua_pushvalue(L, 1); return 1;
@@ -2225,6 +2985,90 @@ int LuaHost::actorCall(lua_State* L) {
         case AM_GETSECSINTOEFFECT:
             lua_pushnumber(L, actor->effect.beatClock ? host->beat_ : host->sec_);
             return 1;
+        case AM_NUMTAPSINRANGE: {
+            // NotITG exposes this on Player for score bookkeeping.  Its
+            // arguments are song beats and it counts tap heads, including
+            // every column in a chord, over the half-open interval.
+            const double first = luaL_optnumber(L, 2, 0.0);
+            const double last = luaL_optnumber(L, 3, first);
+            int count = 0;
+            if (host->chart_) {
+                for (const Note& note : host->chart_->notes) {
+                    if (note.beat < first || note.beat >= last) continue;
+                    unsigned frets = unsigned(note.frets);
+                    while (frets) { count += int(frets & 1u); frets >>= 1; }
+                    if (note.open) ++count;
+                }
+            }
+            lua_pushinteger(L, count);
+            return 1;
+        }
+        case AM_GETSHADER:
+            if (actor->shaderVert.empty() && actor->shaderFrag.empty())
+                lua_pushnil(L);
+            else
+                lua_pushvalue(L, 1);
+            return 1;
+        case AM_UNIFORM1F:
+        case AM_UNIFORM2F:
+        case AM_UNIFORM4F: {
+            const char* name = luaL_checkstring(L, 2);
+            Actor::ShaderUniform& uniform = shaderUniform(name);
+            uniform.components = method == AM_UNIFORM1F ? 1 :
+                                 (method == AM_UNIFORM2F ? 2 : 4);
+            uniform.texture = nullptr;
+            for (int i = 0; i < uniform.components; ++i)
+                uniform.value[i] = float(luaL_optnumber(L, i + 3, 0.0));
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        case AM_UNIFORMTEX: {
+            const char* name = luaL_checkstring(L, 2);
+            Actor::ShaderUniform& uniform = shaderUniform(name);
+            uniform.components = 0;
+            uniform.texture = host->toActor(L, 3);
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        case AM_DRAWMODE: {
+            const char* mode = lua_tostring(L, 2);
+            actor->polygonTriangles = !mode || lower(mode) == "triangles";
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        case AM_NUMVERTS:
+            actor->polygonVertices.resize(size_t(std::max<lua_Integer>(
+                0, luaL_optinteger(L, 2, 0))));
+            lua_pushvalue(L, 1);
+            return 1;
+        case AM_VERTEXPOS: {
+            const lua_Integer index = luaL_checkinteger(L, 2);
+            if (index >= 0 && size_t(index) < actor->polygonVertices.size()) {
+                auto& vertex = actor->polygonVertices[size_t(index)];
+                vertex.x = float(luaL_optnumber(L, 3, 0));
+                vertex.y = float(luaL_optnumber(L, 4, 0));
+                vertex.z = float(luaL_optnumber(L, 5, 0));
+            }
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        case AM_VERTEXTEX: {
+            const lua_Integer index = luaL_checkinteger(L, 2);
+            if (index >= 0 && size_t(index) < actor->polygonVertices.size()) {
+                auto& vertex = actor->polygonVertices[size_t(index)];
+                vertex.u = float(luaL_optnumber(L, 3, 0));
+                vertex.v = float(luaL_optnumber(L, 4, 0));
+            }
+            lua_pushvalue(L, 1);
+            return 1;
+        }
+        case AM_CULLMODE: {
+            const char* raw = lua_tostring(L, 2);
+            const std::string mode = raw ? lower(raw) : "none";
+            actor->cullMode = mode == "back" ? 1 : (mode == "front" ? 2 : 0);
+            lua_pushvalue(L, 1);
+            return 1;
+        }
         default: break;
     }
 
@@ -2240,12 +3084,6 @@ int LuaHost::actorCall(lua_State* L) {
     auto number = [&](int i, float d = 0.0f) {
         return float(luaL_optnumber(L, i, d));
     };
-    auto boolean = [&](int i, bool d) {
-        if (lua_gettop(L) < i || lua_isnil(L, i)) return d;
-        return lua_isnumber(L, i) ? lua_tonumber(L, i) != 0.0
-                                  : lua_toboolean(L, i) != 0;
-    };
-
     switch (method) {
         case AM_SETSTATE: {
             const Actor::SpriteStateKey key{S.t, int(luaL_optinteger(L, 2, 0))};
@@ -2257,11 +3095,10 @@ int LuaHost::actorCall(lua_State* L) {
         case AM_X: emit1(S, PROP_X, number(2)); break;
         case AM_Y: emit1(S, PROP_Y, number(2)); break;
         case AM_Z: emit1(S, PROP_Z, number(2)); break;
-        case AM_ZOOM: {
-            const float z = number(2, 1.0f);
-            emit1(S, PROP_ZOOMX, z);
-            emit1(S, PROP_ZOOMY, z);
-        } break;
+        case AM_AUX: emit1(S, PROP_AUX, number(2)); break;
+        case AM_XY: emitXY(S, number(2), number(3)); break;
+        case AM_XYZ: emitXYZ(S, number(2), number(3), number(4)); break;
+        case AM_ZOOM: emitZoom(S, number(2, 1.0f)); break;
         case AM_ZOOMTO: {
             const float size[2] = {number(2), number(3)};
             emit(S, PROP_SIZE, 2, size);
@@ -2269,6 +3106,12 @@ int LuaHost::actorCall(lua_State* L) {
         case AM_ZOOMX: emit1(S, PROP_ZOOMX, number(2, 1.0f)); break;
         case AM_ZOOMY: emit1(S, PROP_ZOOMY, number(2, 1.0f)); break;
         case AM_ZOOMZ: emit1(S, PROP_ZOOMZ, number(2, 1.0f)); break;
+        case AM_SCALETOCOVER:
+            emitScaleToCover(S, number(2), number(3), number(4), number(5));
+            break;
+        case AM_STRETCHTO:
+            emitStretchTo(S, number(2), number(3), number(4), number(5));
+            break;
         case AM_ADDX: emit1(S, PROP_X, S.cur.x + number(2)); break;
         case AM_ADDY: emit1(S, PROP_Y, S.cur.y + number(2)); break;
         case AM_ADDZ: emit1(S, PROP_Z, S.cur.z + number(2)); break;
@@ -2277,19 +3120,30 @@ int LuaHost::actorCall(lua_State* L) {
             emit1(S, PROP_Y, 240.0f);
             break;
         case AM_HALIGN: {
-            const char* raw = lua_tostring(L, 2);
-            const std::string value = raw ? lower(raw) : "center";
-            emit1(S, PROP_HALIGN, value == "left" ? -1.0f :
-                                  (value == "right" ? 1.0f : 0.0f));
+            if (lua_isnumber(L, 2)) {
+                emit1(S, PROP_HALIGN, number(2, 0.5f) * 2.0f - 1.0f);
+            } else {
+                const char* raw = lua_tostring(L, 2);
+                const std::string value = raw ? lower(raw) : "center";
+                emit1(S, PROP_HALIGN, value == "left" ? -1.0f :
+                                      (value == "right" ? 1.0f : 0.0f));
+            }
         } break;
         case AM_VALIGN: {
-            const char* raw = lua_tostring(L, 2);
-            const std::string value = raw ? lower(raw) : "middle";
-            emit1(S, PROP_VALIGN, value == "top" ? -1.0f :
-                                  (value == "bottom" ? 1.0f : 0.0f));
+            if (lua_isnumber(L, 2)) {
+                emit1(S, PROP_VALIGN, number(2, 0.5f) * 2.0f - 1.0f);
+            } else {
+                const char* raw = lua_tostring(L, 2);
+                const std::string value = raw ? lower(raw) : "middle";
+                emit1(S, PROP_VALIGN, value == "top" ? -1.0f :
+                                      (value == "bottom" ? 1.0f : 0.0f));
+            }
         } break;
         case AM_VISIBLE: emit1(S, PROP_HIDDEN, boolean(2, true) ? 0.0f : 1.0f); break;
         case AM_HIDDEN: emit1(S, PROP_HIDDEN, boolean(2, true) ? 1.0f : 0.0f); break;
+        case AM_ZTEST: emit1(S, PROP_ZTEST, boolean(2, true) ? 1.0f : 0.0f); break;
+        case AM_ZWRITE: emit1(S, PROP_ZWRITE, boolean(2, true) ? 1.0f : 0.0f); break;
+        case AM_CLEARZ: emit1(S, PROP_CLEARZ, boolean(2, true) ? 1.0f : 0.0f); break;
         case AM_DIFFUSEALPHA: emit1(S, PROP_DIFFUSEALPHA, number(2, 1.0f)); break;
         case AM_DIFFUSE: {
             float colour[4] = {1, 1, 1, 1};
@@ -2304,8 +3158,17 @@ int LuaHost::actorCall(lua_State* L) {
             }
             emit(S, PROP_DIFFUSE, 4, colour);
         } break;
+        case AM_GLOW: {
+            const float colour[4] = {number(2, 1.0f), number(3, 1.0f),
+                                     number(4, 1.0f), number(5, 1.0f)};
+            emit(S, PROP_GLOWALPHA, 4, colour);
+        } break;
         case AM_ROTX: emit1(S, PROP_ROTX, number(2)); break;
         case AM_SKEWX: emit1(S, PROP_SKEWX, number(2)); break;
+        case AM_CROPLEFT: emit1(S, PROP_CROPLEFT, number(2)); break;
+        case AM_CROPRIGHT: emit1(S, PROP_CROPRIGHT, number(2)); break;
+        case AM_CROPTOP: emit1(S, PROP_CROPTOP, number(2)); break;
+        case AM_CROPBOTTOM: emit1(S, PROP_CROPBOTTOM, number(2)); break;
         case AM_ROTY: emit1(S, PROP_ROTY, number(2)); break;
         case AM_ROTZ: emit1(S, PROP_ROTZ, number(2)); break;
         case AM_LINEAR: S.dur = number(2); S.ease = Ease::Linear; break;
@@ -2314,6 +3177,14 @@ int LuaHost::actorCall(lua_State* L) {
         case AM_SPRING: S.dur = number(2); S.ease = Ease::Spring; break;
         case AM_BOUNCEBEGIN: S.dur = number(2); S.ease = Ease::BounceBegin; break;
         case AM_BOUNCEEND: S.dur = number(2); S.ease = Ease::BounceEnd; break;
+        case AM_TWEEN: {
+            S.dur = number(2);
+            const char* expression = lua_tostring(L, 3);
+            bool known = false;
+            S.ease = notitgTweenEase(expression, known);
+            if (!known && expression)
+                host->note(std::string("unsupported tween expression: ") + expression);
+        } break;
         case AM_SLEEP:
             // Sleep advances this actor's tween cursor. QueueCommand reads the
             // same cursor below; sleeps issued to other actors in this Lua
@@ -2332,6 +3203,7 @@ int LuaHost::actorCall(lua_State* L) {
         case AM_GETY: lua_pushnumber(L, S.cur.y); return 1;
         case AM_GETZ: lua_pushnumber(L, S.cur.z); return 1;
         case AM_GETZOOM: lua_pushnumber(L, S.cur.zoomX); return 1;
+        case AM_GETAUX: lua_pushnumber(L, S.cur.aux); return 1;
         case AM_GETROT:
             lua_pushnumber(L, S.cur.rotX);
             lua_pushnumber(L, S.cur.rotY);
@@ -2350,6 +3222,7 @@ int LuaHost::actorCall(lua_State* L) {
         case AM_VIBRATE: actor->effect.kind = Effect::Vibrate; break;
         case AM_DIFFUSESHIFT: actor->effect.kind = Effect::DiffuseShift; break;
         case AM_DIFFUSEBLINK: actor->effect.kind = Effect::DiffuseBlink; break;
+        case AM_GLOWSHIFT: actor->effect.kind = Effect::GlowShift; break;
         case AM_STOPEFFECT: actor->effect.kind = Effect::None; break;
         case AM_EFFECTCOLOR1:
         case AM_EFFECTCOLOR2: {
@@ -2370,15 +3243,34 @@ int LuaHost::actorCall(lua_State* L) {
             actor->effect.magZ = number(4);
             break;
         case AM_EFFECTPERIOD: actor->effect.period = number(2, 1.0f); break;
+        case AM_EFFECTDELAY: actor->effect.delay = number(2); break;
         case AM_EFFECTCLOCK: {
             const char* value = lua_tostring(L, 2);
-            actor->effect.beatClock = value && lower(value) == "bgm";
+            const std::string clock = value ? lower(value) : "timer";
+            actor->effect.beatClock = clock == "bgm" || clock == "beat";
         } break;
         case AM_FILTER: {
             const bool filter = boolean(2, true);
             if (actor->textureFiltering != filter) {
                 actor->textureFiltering = filter;
                 actor->textureFilterDirty = true;
+            }
+        } break;
+        case AM_CMD: {
+            const char* commands = luaL_checkstring(L, 2);
+            const std::string chunk = std::string("return cmd(") + commands + ")";
+            if (luaL_loadbuffer(L, chunk.c_str(), chunk.size(), "Actor.cmd") != 0 ||
+                lua_pcall(L, 0, 1, 0) != 0) {
+                host->note(std::string("Actor.cmd: ") +
+                           (lua_tostring(L, -1) ? lua_tostring(L, -1) : "compile failed"));
+                lua_pop(L, 1);
+                break;
+            }
+            lua_pushvalue(L, 1);
+            if (lua_pcall(L, 1, 0, 0) != 0) {
+                host->note(std::string("Actor.cmd: ") +
+                           (lua_tostring(L, -1) ? lua_tostring(L, -1) : "command failed"));
+                lua_pop(L, 1);
             }
         } break;
         case AM_QUEUEMESSAGE: {
@@ -2398,23 +3290,19 @@ int LuaHost::actorCall(lua_State* L) {
                 // so its time is S.t, not the sum of every actor's sleeps in
                 // the surrounding Lua function.
                 const double when = method == AM_PLAY ? host->chunkStart : S.t;
-                if (method == AM_PLAY) {
-                    // SM's ActorFrame::PlayCommand runs on self AND every
-                    // descendant; queuecommand queues on self only. The
-                    // stacked-sprite animation idiom depends on the recursion:
-                    // playcommand('Attack') on the character frame is what
-                    // reaches the AttackCommand on each grandchild sheet, and
-                    // without it no pose ever switches.
-                    struct W { static void go(ActorTree* t, double tm,
-                                              Actor& x, const char* n) {
-                        if (x.findCommandEntry(std::string(n) + "Command"))
-                            t->enqueue(tm, x, n);
-                        for (auto& c : x.children) go(t, tm, *c, n);
-                    } };
-                    W::go(host->tree_, when, *actor, name);
-                } else {
-                    host->tree_->enqueue(when, *actor, name);
-                }
+                // PlayCommand calls virtual HandleMessage immediately;
+                // QueueCommand stores a command on this actor, then calls the
+                // same PlayCommand when its zero-length tween is reached.
+                // ActorFrame::HandleMessage propagates either path to every
+                // descendant (except broadcasts). Shame's stacked pose sheets
+                // use queuecommand('Attack') on their containing ActorFrame.
+                struct W { static void go(ActorTree* t, double tm,
+                                          Actor& x, const char* n) {
+                    if (x.findCommandEntry(std::string(n) + "Command"))
+                        t->enqueue(tm, x, n);
+                    for (auto& c : x.children) go(t, tm, *c, n);
+                } };
+                W::go(host->tree_, when, *actor, name);
                 lua_pushvalue(L, 1);
                 return 1;
             }
@@ -2441,7 +3329,7 @@ int LuaHost::actorCall(lua_State* L) {
 
 namespace {
 
-int liveModId(std::string name, float& level) {
+int liveModId(std::string name, float& level, bool legacyColumnNames) {
     name = lower(name);
     if (name == "hallway" || name == "incoming") {
         level = -level;
@@ -2454,11 +3342,12 @@ int liveModId(std::string name, float& level) {
     auto column = [&](const char* prefix, int first) {
         const size_t n = strlen(prefix);
         if (name.compare(0, n, prefix) != 0 || name.size() != n + 1) return -1;
-        const int col = name[n] - '1';       // SM5 names columns 1..N
+        const int col = name[n] - (legacyColumnNames ? '0' : '1');
         return col >= 0 && col < NUM_LANES ? first + col : -1;
     };
     int id = column("movex", MOD_MOVEX0);
     if (id < 0) id = column("movey", MOD_MOVEY0);
+    if (id < 0) id = column("movez", MOD_MOVEZ0);
     if (id < 0) id = column("tiny", MOD_TINY0);
     if (id >= 0) return id;
 
@@ -2487,12 +3376,53 @@ void approach(float& value, float target, float distance) {
 void LuaHost::advancePlayerOptions(double sec) {
     if (poClock_ < 0.0) { poClock_ = sec; return; }
     if (sec <= poClock_) return;
-    const float dt = float(sec - poClock_);
-    for (int pn = 0; pn < 2; ++pn)
-        for (int id = 0; id < MOD_COUNT; ++id)
-            approach(poCurrent_[pn][id], poTarget_[pn][id],
-                     dt * fabsf(poSpeed_[pn][id]));
-    poClock_ = sec;
+
+    auto approachTo = [&](double next) {
+        const float dt = float(next - poClock_);
+        for (int pn = 0; pn < 2; ++pn)
+            for (int id = 0; id < MOD_COUNT; ++id)
+                approach(poCurrent_[pn][id], poTarget_[pn][id],
+                         dt * fabsf(poSpeed_[pn][id]));
+        poClock_ = next;
+    };
+
+    // Split a large offline step at every start/end so approach time and
+    // exported keyframes stay exact even if no rendered frame hits a boundary.
+    for (;;) {
+        double boundary = sec;
+        bool found = false;
+        for (const PlayerAttack& attack : attacks_) {
+            for (double candidate : {attack.startSec, attack.endSec}) {
+                if (candidate > poClock_ + 1e-9 && candidate <= sec &&
+                    (!found || candidate < boundary)) {
+                    boundary = candidate;
+                    found = true;
+                }
+            }
+        }
+        if (!found) break;
+
+        approachTo(boundary);
+        sec_ = boundary;
+        bool affected[2] = {false, false};
+        for (const PlayerAttack& attack : attacks_) {
+            if (fabs(attack.startSec - boundary) > 1e-9 &&
+                fabs(attack.endSec - boundary) > 1e-9)
+                continue;
+            if (attack.player == 1 || attack.player == 2)
+                affected[attack.player - 1] = true;
+            else
+                affected[0] = affected[1] = true;
+        }
+        for (int pn = 0; pn < 2; ++pn)
+            if (affected[pn]) rebuildPlayerOptionsFromAttacks(pn, boundary);
+    }
+    approachTo(sec);
+}
+
+void LuaHost::recordPlayerModChange(int pn, int id) {
+    poChanges_.push_back(PlayerModChange{
+        sec_, pn + 1, id, poTarget_[pn][id], poSpeed_[pn][id]});
 }
 
 void LuaHost::setBeat(double beat, double sec) {
@@ -2541,16 +3471,28 @@ void LuaHost::applyModString(int pn, const std::string& mods) {
                 std::string name = lower(words.back());
                 if (name == "clearall") {
                     for (int id = 0; id < MOD_COUNT; ++id) {
+                        const bool changed = poTarget_[pn][id] != modDefault(id) ||
+                                             poSpeed_[pn][id] != 1.0f;
                         poTarget_[pn][id] = modDefault(id);
                         poSpeed_[pn][id] = 1.0f;
+                        if (changed) recordPlayerModChange(pn, id);
                     }
                 } else {
-                    const int id = liveModId(name, level);
+                    const int id = liveModId(name, level, legacyColumnNames_);
                     if (id >= 0) {
+                        const bool changed = poTarget_[pn][id] != level ||
+                                             poSpeed_[pn][id] != speed;
                         poTarget_[pn][id] = level;
                         poSpeed_[pn][id] = speed;
+                        if (speed <= 0.0f) poCurrent_[pn][id] = level;
+                        if (changed) recordPlayerModChange(pn, id);
                     } else {
-                        note("PlayerOptions::FromString ignored unknown mod: " + name);
+                        const size_t pipe = name.find('|');
+                        const std::string baseName = name.substr(0, pipe);
+                        const std::string warning =
+                            "PlayerOptions::FromString ignored unknown mod: " + baseName;
+                        if (std::find(log_.begin(), log_.end(), warning) == log_.end())
+                            note(warning);
                     }
                 }
             }
@@ -2576,11 +3518,61 @@ void LuaHost::applyGameCommand(const std::string& command, int player) {
     }
 }
 
+void LuaHost::rebuildPlayerOptionsFromAttacks(int pn, double sec) {
+    if (pn < 0 || pn > 1) return;
+    sec_ = sec;
+    for (int id = 0; id < MOD_COUNT; ++id) {
+        const float target = modDefault(id);
+        const bool changed = poTarget_[pn][id] != target || poSpeed_[pn][id] != 1.0f;
+        poTarget_[pn][id] = target;
+        poSpeed_[pn][id] = 1.0f;
+        if (changed) recordPlayerModChange(pn, id);
+    }
+    for (const PlayerAttack& attack : attacks_) {
+        if (attack.player != 0 && attack.player != pn + 1) continue;
+        if (sec >= attack.startSec && sec < attack.endSec)
+            applyModString(pn, attack.mods);
+    }
+}
+
+void LuaHost::launchAttack(double startSec, double lengthSec,
+                           const std::string& mods, int player) {
+    if (lengthSec <= 0.0) return;
+    advancePlayerOptions(sec_);
+    attacks_.push_back(PlayerAttack{startSec, startSec + lengthSec, mods, player});
+    if (sec_ < startSec || sec_ >= startSec + lengthSec) return;
+    if (player == 1 || player == 2)
+        rebuildPlayerOptionsFromAttacks(player - 1, sec_);
+    else {
+        rebuildPlayerOptionsFromAttacks(0, sec_);
+        rebuildPlayerOptionsFromAttacks(1, sec_);
+    }
+}
+
 bool LuaHost::playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                          float& mx, float& my, float& mz) const {
     if (pn < 0 || pn >= requestedPlayers_) return false;
     modValuesToState(poCurrent_[pn], beat, mods, fx, mx, my, mz);
     return true;
+}
+
+bool LuaHost::playerModSnapshot(int pn, PlayerModSnapshot& out) const {
+    if (pn < 0 || pn >= requestedPlayers_) return false;
+    for (int id = 0; id < MOD_COUNT; ++id) {
+        out.target[id] = poTarget_[pn][id];
+        out.speed[id] = poSpeed_[pn][id];
+    }
+    return true;
+}
+
+float LuaHost::noteZ(int pn, int col, float yOffset) const {
+    if (pn < 0 || pn >= 2 || col < 0 || col >= NUM_LANES) return 0.0f;
+    Mods mods;
+    PostFx fx;
+    float mx = 0.0f, my = 0.0f, mz = 0.0f;
+    modValuesToState(poCurrent_[pn], float(beat_), mods, fx, mx, my, mz);
+    const float bpm = chart_ ? float(chart_->bpmAt(beat_)) : 120.0f;
+    return GetZPos(mods, col, yOffset, float(beat_), bpm);
 }
 
 int LuaHost::playerOptionsIndex(lua_State* L) {
@@ -2607,7 +3599,7 @@ int LuaHost::playerOptionsCall(lua_State* L) {
     }
 
     float sign = 1.0f;
-    const int id = liveModId(method, sign);
+    const int id = liveModId(method, sign, host->legacyColumnNames_);
     if (id < 0) {
         host->note("unsupported PlayerOptions method: " + method);
         lua_pushvalue(L, 1);
@@ -2623,8 +3615,13 @@ int LuaHost::playerOptionsCall(lua_State* L) {
     }
 
     host->advancePlayerOptions(host->sec_);
-    host->poTarget_[ref->player][id] = float(luaL_checknumber(L, 2)) * sign;
-    host->poSpeed_[ref->player][id] = float(luaL_optnumber(L, 3, 1.0));
+    const float target = float(luaL_checknumber(L, 2)) * sign;
+    const float speed = float(luaL_optnumber(L, 3, 1.0));
+    const bool changed = host->poTarget_[ref->player][id] != target ||
+                         host->poSpeed_[ref->player][id] != speed;
+    host->poTarget_[ref->player][id] = target;
+    host->poSpeed_[ref->player][id] = speed;
+    if (changed) host->recordPlayerModChange(ref->player, id);
     if (lua_gettop(L) >= 4 && lua_toboolean(L, 4)) {
         lua_pushvalue(L, 1);
         return 1;
@@ -2696,6 +3693,8 @@ bool LuaHost::open(std::string& err) {
         }
     poClock_ = -1.0;
     requestedPlayers_ = 0;
+    poChanges_.clear();
+    attacks_.clear();
     luaL_newmetatable(L_, "nc.Actor");
     lua_pushcfunction(L_, &LuaHost::actorIndex);
     lua_setfield(L_, -2, "__index");
@@ -2716,12 +3715,15 @@ bool LuaHost::open(std::string& err) {
         {"__nc_songdir", lua_nc_songdir},
         {"__nc_broadcast", lua_nc_broadcast},
         {"__nc_gamecmd", lua_nc_gamecmd},
+        {"__nc_launchattack", lua_nc_launchattack},
+        {"__nc_getz", lua_nc_getz},
         {"__nc_po", lua_nc_po},
         {"__nc_plr", lua_nc_plr},
         {"__nc_screenchild", lua_nc_screenchild},
         {"__nc_topscreen", lua_nc_topscreen},
         {"__nc_dispw", lua_nc_dispw},
         {"__nc_disph", lua_nc_disph},
+        {"__nc_vendor", lua_nc_vendor},
         {"__nc_trace", lua_nc_trace},
     };
     for (const Reg& r : natives) {
@@ -2734,19 +3736,15 @@ bool LuaHost::open(std::string& err) {
     // a no-op chain instead of a crash, which is the right failure mode for a
     // modfile that reaches for theme UI NotClon does not have.
     const char* boot =
-        // table.getn/table.setn. Stock Lua 5.1.5 ships with LUA_COMPAT_GETN
-        // OFF (third_party/lua/luaconf.h:322), so neither exists -- but every
-        // OITG-era modfile uses them, including Saitama2000's own
-        // lua/default.xml (three calls). Without these, the first script that
-        // runs dies on a nil `table.getn`. Guarded so a future Lua that has
-        // them keeps its own.
+        // Stock SM5's Lua 5.1 build has LUA_COMPAT_GETN off. Keep its ordinary
+        // length semantics for default.lua; setLegacyXml installs Lua 5.0's
+        // stored-size table API before a legacy XML chart is compiled.
         "if not table.getn then table.getn = function(t) return #t end end\n"
-        // NOT `if not table.setn`: 5.1.5 DEFINES setn and its body is
-        // `error("'setn' is obsolete")`, so the guard never fires and every
-        // caller still dies. Overwrite it unconditionally with the no-op that
-        // matches what setn did back when tables carried a stored size.
+        // Lua 5.1.5 defines setn only as an obsolete-function error.
         "SCREEN_WIDTH = 640\n"
         "SCREEN_HEIGHT = 480\n"
+        "SCREEN_LEFT = 0\n"
+        "SCREEN_TOP = 0\n"
         "SCREEN_CENTER_X = 320\n"
         "SCREEN_CENTER_Y = 240\n"
         "table.setn = function(t, n) end\n"
@@ -2804,9 +3802,14 @@ bool LuaHost::open(std::string& err) {
         "end\n"
         "left='left'; right='right'; center='center'\n"
         "SCREENMAN = { GetTopScreen=function() return __nc_topscreen() end, SystemMessage=function() end }\n"
-        "PREFSMAN = { GetPreference = function() return '' end,\n"
-        "             SetPreference = function() end }\n"
-        "DISPLAY = { GetVendor = function() return '' end,\n"
+        "local preferences = { VideoRenderers='opengl', LastSeenVideoDriver='OpenGL',\n"
+        "  GlobalOffsetSeconds=0, PercentScoreWeightMarvelous=3,\n"
+        "  JudgeWindowSecondsBoo=0.18, InputDuplication=false }\n"
+        "PREFSMAN = { GetPreference = function(self, name) return preferences[name] end,\n"
+        "             SetPreference = function(self, name, value) preferences[name]=value end }\n"
+        "EC_GRAPHICS='Graphics'; EC_SOUNDS='Sounds'\n"
+        "THEME = { GetPath = function() return '' end }\n"
+        "DISPLAY = { GetVendor = function() return __nc_vendor() end,\n"
         "            GetDisplayWidth = function() return __nc_dispw() end,\n"
         "            GetDisplayHeight = function() return __nc_disph() end }\n"
         "Trace = function(v) __nc_trace(tostring(v)) end\n"
@@ -2815,6 +3818,7 @@ bool LuaHost::open(std::string& err) {
         "local playerStats = {\n"
         "  GetActualDancePoints = function() return 0 end,\n"
         "  GetPossibleDancePoints = function() return 1 end,\n"
+        "  SetPossibleDancePoints = function() end,\n"
         "}\n"
         "local stageStats = {\n"
         "  GetPlayerStageStats = function() return playerStats end,\n"
@@ -2822,23 +3826,30 @@ bool LuaHost::open(std::string& err) {
         "local song = {\n"
         "  GetSongDir = function() return __nc_songdir() end,\n"
         "  GetDisplayFullTitle = function() return '' end,\n"
+        "  ClearLabels = function() end,\n"
+        "  AddLabel = function() end,\n"
         "}\n"
         "local songPosition = { GetMusicSeconds = function() return __nc_sec() end }\n"
         "PLAYER_1 = 1\n"
         "PLAYER_2 = 2\n"
         "STATSMAN = { GetCurStageStats = function() return stageStats end }\n"
         "GAMESTATE = {\n"
+        "  GetVersionDate = function() return '20190804' end,\n"
         "  GetPlayerState = function(self, pn) return { GetPlayerOptions=function() return __nc_po(pn) end } end,\n"
         "  GetSongBeat = function() return __nc_beat() end,\n"
         "  GetSongBeatVisible = function() return __nc_beat() end,\n"
         "  GetCurMusicSeconds = function() return __nc_sec() end,\n"
+        "  GetSongTime = function() return __nc_sec() end,\n"
+        "  GetZ = function(self, pn, col, y) return __nc_getz(pn, col, y) end,\n"
         "  GetSongPosition = function() return songPosition end,\n"
         "  GetCurrentSong = function() return song end,\n"
         "  GetPlayerStageStats = function() return playerStats end,\n"
         "  GetCurStageStats = function() return stageStats end,\n"
         "  GetCurrentSteps = function() return absorb() end,\n"
         "  IsPlayerEnabled = function() return true end,\n"
+        "  ApplyModifiers = function(self, mods, player) __nc_gamecmd('mod,'..mods, player) end,\n"
         "  ApplyGameCommand = function(self, command, player) __nc_gamecmd(command, player) end,\n"
+        "  LaunchAttack = function(self, start, length, mods, player) __nc_launchattack(start, length, mods, player) end,\n"
         "  SetShaderFlag = function() end,\n"
         "  SetShaderFlagNum = function() end,\n"
         "}\n";
@@ -2854,13 +3865,93 @@ bool LuaHost::open(std::string& err) {
     return true;
 }
 
+void LuaHost::setLegacyXml(bool legacy) {
+    legacyColumnNames_ = legacy;
+    if (!legacy || !L_) return;
+
+    // OpenITG embeds Lua 5.0. Its table.insert records a separate array size,
+    // and table.getn keeps returning that size when a chart directly nils an
+    // entry. Some legacy action readers do exactly that as they advance;
+    // Lua 5.1's # operator can otherwise truncate the queue halfway through.
+    const char* compat = R"lua(
+local sizes = setmetatable({}, {__mode='k'})
+
+table.getn = function(t)
+    local n = rawget(t, 'n')
+    if type(n) == 'number' then return n end
+    n = sizes[t]
+    if n ~= nil then return n end
+    n = 0
+    while rawget(t, n + 1) ~= nil do n = n + 1 end
+    return n
+end
+
+table.setn = function(t, n)
+    if type(rawget(t, 'n')) == 'number' then
+        rawset(t, 'n', n)
+    else
+        sizes[t] = n
+    end
+end
+
+table.insert = function(t, ...)
+    local argc = select('#', ...)
+    local n = table.getn(t) + 1
+    local pos, value
+    if argc == 1 then
+        pos, value = n, ...
+    else
+        pos, value = ...
+        if pos > n then n = pos end
+    end
+    table.setn(t, n)
+    for i = n - 1, pos, -1 do rawset(t, i + 1, rawget(t, i)) end
+    rawset(t, pos, value)
+end
+
+table.remove = function(t, pos)
+    local n = table.getn(t)
+    if n <= 0 then return nil end
+    pos = pos or n
+    table.setn(t, n - 1)
+    local value = rawget(t, pos)
+    for i = pos, n - 1 do rawset(t, i, rawget(t, i + 1)) end
+    rawset(t, n, nil)
+    return value
+end
+
+-- Legacy screen environments expose player actors as globals. Resolve them
+-- only when a chart actually reads one, so an unused P2 does not create a
+-- second playfield.
+local globalMeta = getmetatable(_G) or {}
+local previousIndex = globalMeta.__index
+globalMeta.__index = function(t, key)
+    if key == 'P1' or key == 'P2' then
+        local player = __nc_plr(tonumber(key:sub(2)))
+        rawset(t, key, player)
+        return player
+    end
+    if type(previousIndex) == 'function' then return previousIndex(t, key) end
+    if type(previousIndex) == 'table' then return previousIndex[key] end
+    return nil
+end
+setmetatable(_G, globalMeta)
+)lua";
+    if (luaL_dostring(L_, compat) != 0) {
+        note(lua_tostring(L_, -1) ? lua_tostring(L_, -1)
+                                 : "legacy table compatibility failed");
+        lua_pop(L_, 1);
+    }
+}
+
 void LuaHost::setDisplaySize(int w, int h) {
     dispW_ = w;
     dispH_ = h;
     if (!L_) return;
-    const double vw = h > 0 ? 480.0 * w / h : 640.0;
+    const double vw = logicalScreenWidth(w, h);
     struct Global { const char* name; double value; } globals[] = {
         {"SCREEN_WIDTH", vw}, {"SCREEN_HEIGHT", 480.0},
+        {"SCREEN_LEFT", 0.0}, {"SCREEN_TOP", 0.0},
         {"SCREEN_CENTER_X", vw * 0.5}, {"SCREEN_CENTER_Y", 240.0},
         {"SCREEN_RIGHT", vw}, {"SCREEN_BOTTOM", 480.0},
     };
@@ -2875,10 +3966,16 @@ void LuaHost::close() { if (L_) { lua_close(L_); L_ = nullptr; } }
 int LuaHost::compileChunk(const std::string& src, const std::string& where,
                           std::string& err) {
     if (!L_) return -1;
-    // `%function(self) ... end` -> `return function(self) ... end`
+    // `%function(self) ... end` is already a function expression. A named
+    // legacy reference such as `%setup_aft` may be published by an earlier
+    // InitCommand, so defer that lookup until this command actually runs.
     std::string body = trimws(src);
     if (body.compare(0, 1, "%") == 0) body = body.substr(1);
-    const std::string chunk = "return " + body;
+    const std::string trimmed = trimws(body);
+    const bool literalFunction = trimmed.compare(0, 8, "function") == 0;
+    const std::string chunk = literalFunction
+        ? "return " + body
+        : "return function(self,parent) return (" + body + ")(self,parent) end";
     if (luaL_loadbuffer(L_, chunk.c_str(), chunk.size(), where.c_str()) != 0 ||
         lua_pcall(L_, 0, 1, 0) != 0) {
         err = lua_tostring(L_, -1) ? lua_tostring(L_, -1) : "compile failed";
@@ -2914,7 +4011,7 @@ void ActorLayer::addFolder(const std::string& songDir, const std::string& sub,
     s.tree->setDisplaySize(dispW_, dispH_);
     // The chain-verb constants (argf's SCREEN_WIDTH etc.) must agree with the
     // Lua globals and the projection, so all three derive from one number.
-    if (dispH_ > 0) SCREEN_W = 480.0f * float(dispW_) / float(dispH_);
+    SCREEN_W = logicalScreenWidth(dispW_, dispH_);
     std::string err;
     if (!s.tree->load(s.e.dir, startSec, err)) { log_.push_back(err); return; }
     for (const std::string& entry : s.tree->log()) log_.push_back(entry);
@@ -3038,6 +4135,24 @@ bool ActorLayer::playerMods(int pn, double sec, float beat, Mods& mods,
     return false;
 }
 
+bool ActorLayer::playerModSnapshot(int pn, double sec,
+                                   PlayerModSnapshot& out) const {
+    for (const Slot& sl : trees_)
+        if (sl.tree && sl.tree->ok() && sec >= sl.e.startSec &&
+            sl.tree->playerModSnapshot(pn, out))
+            return true;
+    return false;
+}
+
+void ActorLayer::collectPlayerModChanges(std::vector<PlayerModChange>& out) const {
+    for (const Slot& sl : trees_)
+        if (sl.tree && sl.tree->ok()) sl.tree->collectPlayerModChanges(out);
+    std::stable_sort(out.begin(), out.end(),
+                     [](const PlayerModChange& a, const PlayerModChange& b) {
+                         return a.sec < b.sec;
+                     });
+}
+
 int ActorLayer::livePlayerCount() const {
     int players = 0;
     for (const Slot& sl : trees_)
@@ -3067,6 +4182,10 @@ int ActorLayer::drainLuaMods(ModDoc& doc, int resolution) {
 }
 
 void ActorLayer::pump(Renderer& R, double sec) {
+    pump(R, sec, R.actorBeat());
+}
+
+void ActorLayer::pump(Renderer& R, double sec, double beat) {
     // Every tree, not just the ones about to be drawn: the loop that drives a
     // chart lives in one tree and moves actors in all of them. Called from
     // both draw paths because a chart may be foreground-only or
@@ -3122,7 +4241,7 @@ void ActorLayer::pump(Renderer& R, double sec) {
         judgmentClock_ = sec;
     }
 
-    stepTrees(sec, R.actorBeat());
+    stepTrees(sec, beat);
 }
 
 void ActorLayer::drawBackground(Renderer& R, double sec) {

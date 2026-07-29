@@ -95,4 +95,9 @@ NotClon converts `.sm` files — chart, mods, and timing:
 build/notclon.exe --import-sm "path/to/song.sm" --dir "charts/My Song"
 ```
 
+A separate output directory receives the referenced audio, media, source `.sm`
+and complete actor folders automatically. Use `--dump-mods <file.ncmod>` after
+importing when the modfile drives song PlayerOptions from Lua/XML instead of
+`#MODS` or `#ATTACKS`.
+
 See [importing-sm.md](importing-sm.md).

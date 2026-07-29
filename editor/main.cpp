@@ -401,9 +401,9 @@ int main(int argc, char** argv) {
                     const int sa = nc::modBgSlot(kn);
                     const int sf = nc::modBgSlot(kn + ".fov");
                     if (sa >= 0) doc.entries.push_back(
-                        nc::ModEntry{0, sa, 0.0f, -1.0f, 0, true});
+                        nc::ModEntry{0, sa, 0.0f, -1.0f, 0, 0, true});
                     if (sf >= 0) doc.entries.push_back(
-                        nc::ModEntry{0, sf, 1.0f, -1.0f, 0, true});
+                        nc::ModEntry{0, sf, 1.0f, -1.0f, 0, 0, true});
                     doc.rebuild(chart);
                     status = std::string("added ") + what + " " + baseName(rel) +
                              " -- scheduled off; drive " + kn;

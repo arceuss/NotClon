@@ -57,14 +57,15 @@ struct SmImportReport {
     double lastSec = 0.0;
 
     int    modLines = 0, modEntries = 0, modIntervals = 0;
+    int    copiedAssets = 0;
     std::string fgActor;                   // #FGCHANGES folder, if any
     std::vector<std::string> warnings;     // unknown tokens, dropped rows, ...
     std::vector<std::string> stubbed;      // knobs imported but not rendered
 };
 
 // Reads `smPath`, writes `<outDir>/notes.chart` and `<outDir>/<name>.ncmod`.
-// outDir must already exist and should be the folder holding the audio, since
-// .chart carries no audio path and the editor looks for song.<ext> beside it.
+// When the output differs from the input folder, referenced media and complete
+// actor folders are copied beside them.
 SmImportReport importSm(const std::string& smPath, const std::string& outDir,
                         const SmImportOpts& opts);
 
