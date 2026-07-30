@@ -2129,13 +2129,19 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     }
     if (moonIsolated || yargLinear) alpha = 1.0f;
 
-    // Full-frame aspect regardless of the field rect: the two-player
-    // convention (established by the CH path and the accepted Moonscraper
-    // look) is full-frame proportions compressed into the half, not a
-    // per-window refit -- YARG's 16:9 reference fit on a half-width window
-    // letterboxes the track small, the "tiny second player highway".
+    // Each field keeps SINGLE-PLAYER pixel proportions, centred on its
+    // half: build the single-player camera (full-frame aspect -- YARG's
+    // 16:9 reference fit at a half aspect letterboxes the track tiny),
+    // then widen NDC x by W/vpW because the rect FBO's NDC spans only
+    // vpW pixels. For the moon this is algebraically the accepted old
+    // look (aspect vpW/H x the old NDC place squeeze); identity when
+    // vpW == W. Fields wider than their rect clip at its edge.
+    Mat4 fieldWiden = engineIdentity();
+    if (!mvpOverride && vpW != W) fieldWiden.m[0] = float(W) / float(vpW);
     Mat4 camera = mvpOverride ? *mvpOverride
-                              : engineCamera(style, float(W) / float(H));
+                              : mat_mul(fieldWiden,
+                                        engineCamera(style,
+                                                     float(W) / float(H)));
 
     float zoom = 1.0f - 0.5f * mods.mini;
     if (mods.tilt > 0.0f) zoom *= 1.0f - 0.1f * mods.tilt;
@@ -2161,7 +2167,9 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     camera = mat_mul(camera, root);
     Mat4 glowCamera = camera;
     if (style == 1 && !mvpOverride)
-        glowCamera = mat_mul(engineCamera(1,float(W)/float(H),false),root);
+        glowCamera = mat_mul(fieldWiden,
+                             mat_mul(engineCamera(1,float(W)/float(H),false),
+                                     root));
 
     static const float moonColors[6][3] = {
         {0.07450981f,1.0f,0.0f}, {1.0f,0.0f,0.0f},
