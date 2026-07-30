@@ -987,12 +987,19 @@ int main(int argc, char** argv) {
         }
 
         audio.setRate(rate);
-        // A jump, or the frame play was pressed, both need the device refilled
-        // from the new position -- and the clock only becomes valid once it is.
-        if (tick != advancedTick || (playing && !wasPlaying))
+        // A jump needs the device refilled from the new position. A plain
+        // unpause does NOT: the stream still holds the paused sample and
+        // resumes bit-perfectly, while a reseek here flushed the queue and
+        // restarted at the write-side clock -- the "unpausing lags you back"
+        // lurch. Only the first-ever play (nothing primed yet) still seeks.
+        if (tick != advancedTick ||
+            (playing && !wasPlaying && !audio.primed()))
             audio.seek(chart.tickToSec(tick));
         audio.setPlaying(playing);
-        if (playing && !wasPlaying) audio.pump();
+        // Refill every frame, playing or not: pump() is position-gated, so
+        // while paused this keeps the stream buffered at the current (or
+        // freshly sought) position for an instant, artifact-free resume.
+        audio.pump();
         wasPlaying = playing;
 
         ImGui::Render();

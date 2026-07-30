@@ -58,8 +58,15 @@ public:
     // Refill the device. Call once a frame while playing.
     void pump();
 
-    // Hard cut. Use when the user scrubs, jumps, or presses play.
+    // Hard cut. Use when the user scrubs or jumps -- NOT on a plain
+    // unpause: SDL_ResumeAudioStreamDevice continues bit-perfectly from the
+    // paused sample, while a seek here flushes the stream and restarts at
+    // the write-side clock, audibly lurching off the heard position.
     void seek(double sec);
+
+    // True once seek() has primed the stream; a plain play toggle needs no
+    // reseek after that.
+    bool primed() const { return primed_; }
 
 private:
     static const int RATE = 48000;
@@ -82,11 +89,11 @@ private:
     size_t queuedFrames() const;
     double rawTime() const;
 
-    // The device drains in chunks of a thousand-odd frames, so rawTime() moves
-    // in ~20 ms steps. At editor frame rates that reads as judder, so the gap
-    // between steps is filled in from the wall clock and the result is held
-    // monotone.
-    double lastRaw_ = -1.0, lastRawWall_ = 0.0, smooth_ = 0.0;
+    // The device drains in chunks of a thousand-odd frames, so rawTime()
+    // moves in ~21 ms steps. time() advances on the wall clock and pulls
+    // toward rawTime() proportionally, absorbing the steps.
+    double smooth_ = 0.0, lastWall_ = 0.0;
+    bool   primed_ = false;
 };
 
 }  // namespace nce

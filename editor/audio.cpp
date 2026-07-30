@@ -84,6 +84,9 @@ void Audio::close() {
     pcm_.clear();
     cursor_ = 0;
     playing_ = false;
+    primed_ = false;
+    smooth_ = 0.0;
+    lastWall_ = 0.0;
 }
 
 size_t Audio::queuedFrames() const {
@@ -105,17 +108,27 @@ double Audio::time() {
     const double raw = rawTime();
     const double wall = double(SDL_GetPerformanceCounter()) /
                         double(SDL_GetPerformanceFrequency());
-
-    if (raw != lastRaw_) {
-        lastRaw_ = raw;
-        lastRawWall_ = wall;
-        if (raw < smooth_ - 0.10) smooth_ = raw;   // a seek moved us backwards
+    // Wall-clock advance with a gentle pull toward the device reading. The
+    // old scheme re-anchored to rawTime() at every ~21 ms device chunk and
+    // rectified the mismatch with a monotone clamp, which rendered as
+    // hold-then-rush judder in the highway scroll. Here the estimate always
+    // advances by frame delta and the chunk quantisation is absorbed by the
+    // proportional term (a few ms per frame at most, well under the frame
+    // step, so motion stays forward at any playable rate).
+    double dt = wall - lastWall_;
+    lastWall_ = wall;
+    if (dt < 0.0 || dt > 0.1) dt = 0.0;  // first call, or a paused gap
+    double est = smooth_ + dt * double(speed_);
+    const double err = raw - est;
+    if (err < -0.25 || err > 0.25) {
+        est = raw;                        // a real jump: snap, don't chase
+    } else {
+        est += err * 0.10;
+        // The pull is bounded well under the frame step, but guard the
+        // corner (very low frame rate x slow playback) so the playhead
+        // never renders backwards outside a genuine jump.
+        if (est < smooth_) est = smooth_;
     }
-
-    double est = lastRaw_ + (wall - lastRawWall_) * double(speed_);
-    // If the device stalls, do not let extrapolation run away from it.
-    if (est > lastRaw_ + 0.10) est = lastRaw_ + 0.10;
-    if (est < smooth_) est = smooth_;              // never go backwards
     smooth_ = est;
     return est;
 }
@@ -147,12 +160,18 @@ void Audio::seek(double sec) {
     const size_t f = sec <= 0.0 ? 0 : size_t(sec * RATE);
     cursor_ = f > frames ? frames : f;
     writeSec_ = sec;
-    lastRaw_ = -1.0;
     smooth_ = sec;
+    lastWall_ = 0.0;  // next time() call starts from a clean dt
+    primed_ = true;
 }
 
 void Audio::pump() {
-    if (!stream_ || !playing_) return;
+    // Fills whenever the stream has a valid position, playing or not: a
+    // seek made while paused is then already buffered at the new position
+    // when the device resumes, instead of the device waking into stale or
+    // empty data -- the "unpause plays the previous bit for a split
+    // second" artifact.
+    if (!stream_ || !primed_) return;
     const size_t frames = pcm_.size() / CH;
 
     const size_t want = size_t(BUFFER_SEC * RATE);
