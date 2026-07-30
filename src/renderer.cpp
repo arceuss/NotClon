@@ -2958,14 +2958,22 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                 // BeatlineElement.cs:10-16: yScale/alpha 0.07/0.6 measure,
                 // 0.05/0.4 strong, 0.03/0.3 weak; Beatline.prefab Mesh sits
                 // at y = 0.002 over the track, scale x 2 (half-width 1).
+                // The mesh is Quad.fbx's "Dense Quad" -- 11 faces across the
+                // width -- so the per-vertex curve can bend the line along
+                // the track's arc; a 2-triangle quad interpolates the
+                // rail-to-rail chord and sags below the curled surface.
                 const float thickness = line.style == 0 ? 0.07f
                                       : line.style == 2 ? 0.03f : 0.05f;
                 const float lineAlpha = line.style == 0 ? 0.6f
                                       : line.style == 2 ? 0.3f : 0.4f;
-                ch::quadFlat(v_,-1.0f,z-thickness*0.5f,
-                             1.0f,z+thickness*0.5f,0.002f,
-                             0,0,1,1,white[0],white[1],white[2],
-                             alpha*lineAlpha);
+                for (int seg = 0; seg < 11; ++seg) {
+                    const float u0 = float(seg)/11.0f;
+                    const float u1 = float(seg+1)/11.0f;
+                    ch::quadFlat(v_,-1.0f+2.0f*u0,z-thickness*0.5f,
+                                 -1.0f+2.0f*u1,z+thickness*0.5f,0.002f,
+                                 u0,0,u1,1,white[0],white[1],white[2],
+                                 alpha*lineAlpha);
+                }
             }
         }
         if (style == 2) yargBeatLines = std::move(v_);
