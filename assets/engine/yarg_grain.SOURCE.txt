@@ -1,0 +1,10 @@
+yarg_grain.png is NOT a YARG asset. It is Unity's URP "Medium01" film grain
+texture, from:
+
+    Packages/com.unity.render-pipelines.core/Runtime/Textures/FilmGrain/Medium01.png
+    (package version 17.3.0, Unity 6000.3)
+
+Source: github.com/Unity-Technologies/Graphics, ref 6000.3/staging.
+Unity Companion License. It is loaded as the film grain lookup for the YARG
+engine style's post chain (UberPP order: bloom -> grade -> grain -> ACES),
+sampled on the alpha channel via a GL texture swizzle at upload.

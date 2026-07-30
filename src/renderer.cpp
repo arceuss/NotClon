@@ -268,6 +268,8 @@ uniform vec2 uFadeRange;
 uniform float uMaterialState;
 uniform vec3 uRandom;
 uniform float uTime;
+uniform float uWaviness;
+uniform float uGroove;
 
 float hlslMod(float x, float y) {
     return x-y*trunc(x/y);
@@ -385,6 +387,25 @@ vec3 yargSpecular(vec3 albedo, vec3 specularColor, float smoothness,
                     emission,occlusion);
 }
 
+// Unity ShaderGraph Blend node, mode 21 (VividLight): color burn below 0.5,
+// dodge above, then a final lerp by Opacity. Epsilon denominators keep the
+// shine texture's black texels from producing NaNs (Unity emits inf there;
+// the alpha-gated opacity hides it, GLSL mix would propagate it).
+vec3 vividLight(vec3 base, vec3 blend, float opacity) {
+    vec3 burn = 1.0-(1.0-base)/max(2.0*blend,vec3(1e-4));
+    vec3 dodge = base/max(1.0-2.0*(blend-0.5),vec3(1e-4));
+    // The dodge path is singular as blend -> 1 (the fret shine sits right on
+    // it); the result feeds an albedo, so keep it in range.
+    return clamp(mix(base,mix(burn,dodge,step(0.5,blend)),opacity),
+                 0.0,1.0);
+}
+
+// Gameplay/Notes/RectangularNote.shadergraph. BaseColor chain:
+// Blend_Normal(BaseMap, max(noise, MinDarkness), opacity 1)  -> the noise wins
+// Blend_Multiply(that, _Color)
+// Blend_VividLight(that, ShineMap, _Shine_Amount(0.1) * ShineMap.A)
+// Emission = _Color * SampleGradient(noise.r) * _Emission(0.1), the gradient
+// being black@0.2794 -> white@1 (SampleGradient node 63e932 over the noise).
 vec3 yargRectangularNote() {
     vec2 center = vec2(0.25,-0.06)+0.1*uRandom.yz;
     vec2 uv = vUV*vec2(1.1,1.3);
@@ -397,16 +418,13 @@ vec3 yargRectangularNote() {
     vec2 p = q+vec2(warp)+vec2(uTime*(1.0+jitter)*0.4);
     float noise = gradientNoise(p,-1.11);
     vec4 dark = max(texture(uTex3,vec2(noise)),vec4(0.15));
-    vec4 base = texture(uTex,vUV);
-    vec4 patterned = overlayBlend(base,dark);
-    vec4 colored = patterned*vec4(uColor,1.0);
+    vec3 colored = dark.rgb*uColor;
     vec4 shine = texture(uTex2,vUV);
-    vec3 baseColor = mix(colored,shine,0.1*shine.a).rgb;
+    vec3 baseColor = vividLight(colored,shine.rgb,0.1*shine.a);
     const float gradientStart = 18311.0/65535.0;
     float emissionMask = clamp((dark.r-gradientStart)/(1.0-gradientStart),
                                0.0,1.0);
-    return yargSpecular(baseColor,vec3(0.0),0.5,
-                        uColor*emissionMask*0.1,1.0);
+    return yargMetallic(baseColor,0.0,0.0,uColor*emissionMask*0.1,1.0);
 }
 
 float pow5(float x) {
@@ -528,81 +546,116 @@ void main() {
             c = vec4(moonStandard(base,0.0,0.5,vec3(0.0)),1.0);
         }
     } else if ((uKind >= 1 && uKind <= 4) || uKind == 12) { // YARG note variants
-        bool spMetal = uMaterialState > 0.5 &&
-            (((uKind >= 1 && uKind <= 3) &&
-              (vMaterial == 0 || vMaterial == 2)) ||
-             ((uKind == 4 || uKind == 12) && vMaterial == 0));
-        if (spMetal) {
-            vec3 art = uKind == 12 ? texture(uTex2,vUV).rgb
-                                   : texture(uTex,vUV).rgb;
-            vec3 gold = vec3(1.0,215.0/255.0,0.0);
+        // Material slots (ufbx probe): kinds 1-3 slot 0 = Note_Base (NoteMetal),
+        // slot 2 = Note_Color (NoteGlow); kind 2 slot 1 = NoteHOPOGlow, slot 3
+        // = NoteMiddle; kind 3 slot 1 = NoteMiddle, slot 3 = NoteTapCenter;
+        // kinds 4/12 slot 0 = Open(Hopo)Metal, slot 1 = Open(Hopo)Middle.
+        // The metal list {_Color = white, gold #FFD700 under SP; emission is
+        // DISABLED on those materials} covers slots 0+2 (4/12: slot 0).
+        bool starPower = uMaterialState > 0.5;
+        bool metalSlot = ((uKind >= 1 && uKind <= 3) &&
+                          (vMaterial == 0 || vMaterial == 2)) ||
+                         ((uKind == 4 || uKind == 12) && vMaterial == 0);
+        if (metalSlot) {
+            vec3 metalColor = starPower ? vec3(1.0,215.0/255.0,0.0)
+                                        : vec3(1.0);
+            vec3 art = (uKind == 12 ? texture(uTex2,vUV).rgb
+                                    : texture(uTex,vUV).rgb)*metalColor;
             float metallic = (uKind == 4 || uKind == 12) ? 1.0 : 0.0;
             float smoothness = (uKind == 4 || uKind == 12) ? 0.245 : 0.5;
-            c = vec4(yargMetallic(art*gold,metallic,smoothness,
+            c = vec4(yargMetallic(art,metallic,smoothness,
                                   vec3(0.0),1.0),1.0);
         } else if ((uKind == 1 && vMaterial == 1) ||
             (uKind == 2 && vMaterial == 3) ||
             (uKind == 3 && vMaterial == 1)) {
             c = vec4(yargRectangularNote(),1.0);
         } else if (uKind == 2 && vMaterial == 1) {
-            c = vec4(yargMetallic(vec3(1.0),0.0,0.5,
+            // NoteHOPOGlow: no BaseMap (white), no EmissionMap, _EMISSION with
+            // _EmissionColor (sqrt(2))^3; SetColorWithEmission does not reach it.
+            c = vec4(yargMetallic(vec3(1.0),0.0,0.0,
                                   vec3(1.4142135),1.0),1.0);
         } else if (uKind == 3 && vMaterial == 3) {
-            vec4 base = texture(uTex,vUV)*vec4(uColor,1.0);
+            // NoteTapCenter: _SHINE, ShineAmount 0.2, colored with x0
+            // multiplier -> _Color = lane/SP color, emission stays black.
+            vec3 base = texture(uTex,vUV).rgb*uColor;
             vec4 shine = texture(uTex2,vUV);
-            vec3 albedo = mix(base,shine,0.2*shine.a).rgb;
+            vec3 albedo = vividLight(base,shine.rgb,0.2*shine.a);
             c = vec4(yargMetallic(albedo,0.0,0.0,vec3(0.0),1.0),1.0);
         } else if (uKind == 4) {
             vec3 art = texture(uTex,vUV).rgb;
-            if (vMaterial == 0)
-                c = vec4(yargMetallic(art,1.0,0.245,vec3(0.0),1.0),1.0);
-            else
-                c = vec4(yargMetallic(art*uColor,0.0,0.0,
-                                      art*uColor*8.0,1.0),1.0);
-        } else if (uKind == 12) {
-            vec3 realColor = uColor+vec3(1.0);
-            if (vMaterial == 0) {
-                vec3 art = texture(uTex2,vUV).rgb;
-                c = vec4(yargMetallic(art,1.0,0.245,vec3(0.0),1.0),1.0);
-            } else {
-                vec3 art = texture(uTex,vUV).rgb;
-                vec3 emissionMap = texture(uTex2,vUV).rgb;
-                c = vec4(yargMetallic(art*realColor,0.0,0.723,
-                                      emissionMap*realColor*8.0,1.0),1.0);
-            }
+            // OpenMiddle: _EMISSION with EmissionMap = the same Note_Full.png,
+            // _Color = color, _EmissionColor = color x8.
+            c = vec4(yargMetallic(art*uColor,0.0,0.0,
+                                  art*uColor*8.0,1.0),1.0);
         } else {
+            // OpenHopoMiddle: realColor = color + (1,1,1) (Addition 1),
+            // EmissionMap = Note_Full_HOPO.png, x8.
+            vec3 realColor = uColor+vec3(1.0);
             vec3 art = texture(uTex,vUV).rgb;
-            c = vec4(yargMetallic(art,0.0,0.5,vec3(0.0),1.0),1.0);
+            vec3 emissionMap = texture(uTex2,vUV).rgb;
+            c = vec4(yargMetallic(art*realColor,0.0,0.0,
+                                  emissionMap*realColor*8.0,1.0),1.0);
         }
     } else if (uKind == 5) {          // YARG fret
         vec4 art = texture(uTex, vUV);
         if (vMaterial == 0) {
+            // RectangularFretOuter: VividLight(_Color*BaseTex,
+            //   lerp(Hue(_Color,+20 deg), white, 0.1) * ShineMap, ShineMap.A)
             vec3 base = art.rgb*uColor;
             vec4 shine = texture(uTex2,vUV);
-            vec3 shineColor = mix(hueDegrees(uColor,20.0),vec3(1.0),0.1);
-            vec3 albedo = mix(base,shineColor*shine.rgb,shine.a);
+            vec3 shineColor = mix(hueDegrees(uColor,20.0),vec3(1.0),0.1)*
+                              shine.rgb;
+            vec3 albedo = vividLight(base,shineColor,shine.a);
             c = vec4(yargMetallic(albedo,0.0,0.0,vec3(0.0),1.0),1.0);
         } else if (vMaterial == 1) {
+            // RectangularFretInner: BaseColor = lerp(MainTex, _Color, Fade),
+            // Emission = lerp(black, _Color, Fade) * 5 (the graph's inline
+            // Color node is (0,0,0,0)). Glows lane colour only while held.
             vec3 albedo = mix(art.rgb,uColor,uMaterialState);
-            c = vec4(yargMetallic(albedo,0.0,0.0,
-                                  5.0*uMaterialState*uColor,0.0),1.0);
+            vec3 emission = 5.0*uMaterialState*uColor;
+            c = vec4(yargMetallic(albedo,0.0,0.0,emission,1.0),1.0);
         } else {
+            // FretMetal: plain YargLit, emission disabled.
             c = vec4(yargMetallic(art.rgb,0.0,0.0,vec3(0.0),1.0),1.0);
         }
     } else if (uKind == 6) {          // YARG default highway material
+        // Track.shadergraph: baseUV = uv*(1,3); L2 scrolls at 0.9x, L4 at 1x;
+        // both through TimedHorizontalWavyUV (uv.x += sin(50*(uv.y+t*0.1))*A).
+        // color = lerp(lerp(L1, L2tex*L2Color, L2tex.a*L2Color.a),
+        //              L4tex*L4color, L4tex.a*L4color.a)
+        // (the lerp factors are the multiplied textures' own alpha channels),
+        // edge fade = smoothstep(0,.5,u)*smoothstep(1,.5,u) as a scalar over
+        // all channels, occlusion = FadeTex (indirect only). Solo/starpower
+        // states are never set offline.
         vec2 baseUV = vUV*vec2(1.0,3.0);
-        vec2 uv2 = baseUV+vec2(0.0,uScroll*0.9);
-        vec4 pattern = texture(uTex2,uv2);
-        vec3 base = mix(vec3(15.0/255.0),pattern.rgb*(75.0/255.0),
-                        pattern.a*(38.0/255.0));
-        vec2 uv4 = baseUV+vec2(0.0,uScroll);
-        vec4 side = texture(uTex3,uv4);
-        base = mix(base,side.rgb*(87.0/255.0),side.a);
-        float fade = texture(uTex,baseUV+vec2(0.0,-0.5)).r;
-        float edge = smoothstep(0.0,0.5,vUV.x)*
-                     (1.0-smoothstep(0.5,1.0,vUV.x));
-        vec3 albedo = base*fade*edge;
-        c = vec4(yargMetallic(albedo,0.0,0.5,vec3(0.0),1.0),1.0);
+        float u = vUV.x;
+        vec2 l2uv = baseUV+vec2(0.0,uScroll*0.9);
+        vec2 l4uv = baseUV+vec2(0.0,uScroll);
+        if (uWaviness != 0.0) {
+            l2uv.x += sin(50.0*(l2uv.y+uTime*0.1))*0.01*uWaviness;
+            l4uv.x += sin(50.0*(l4uv.y+uTime*0.1))*0.01*uWaviness;
+        }
+        vec4 l2tex = texture(uTex2,l2uv);
+        vec4 l4tex = texture(uTex3,l4uv);
+        // Groove state (ScoreMultiplier == MaxMultiplier): the layer colors
+        // lerp toward the HighwayPreset groove palette, and the wavy UV
+        // amount fades in with it.
+        vec4 l1c = mix(vec4(0.0588235,0.0588235,0.0588235,1.0),
+                       vec4(0.0,0.0352941,0.2,1.0),uGroove);
+        vec4 l2c = mix(vec4(0.29411766,0.29411766,0.29411766,0.1490196),
+                       vec4(0.1372549,0.2,0.7686275,0.1490196),uGroove);
+        vec4 l4c = mix(vec4(0.3301887,0.3301887,0.3301887,1.0),
+                       vec4(0.172549,0.2862745,0.6196078,1.0),uGroove);
+        vec3 base = mix(l1c.rgb,
+                        l2tex.rgb*l2c.rgb,
+                        l2tex.a*l2c.a);
+        base = mix(base,
+                   l4tex.rgb*l4c.rgb,
+                   l4tex.a*l4c.a);
+        float edge = smoothstep(0.0,0.5,u)*smoothstep(1.0,0.5,u);
+        float occlusion = texture(uTex,baseUV+vec2(0.0,-0.5)).r;
+        c = vec4(yargMetallic(base*edge,0.0,0.0,vec3(0.0),occlusion),
+                 1.0);
     } else if (uKind == 7) {          // YARG track trim
         vec3 albedo = texture(uTex,vUV).rgb*uColor;
         c = vec4(yargMetallic(albedo,0.0,0.0,vec3(0.0),1.0),1.0);
@@ -878,15 +931,103 @@ uniform sampler2D uLow;
 void main() {
     vec3 highMip = texture(uHigh,vUV).rgb;
     vec3 lowMip = texture(uLow,vUV).rgb;
-    oCol = vec4(mix(highMip,lowMip,0.41),1.0);
+    oCol = vec4(mix(highMip,lowMip,0.4),1.0);
 }
 )";
+
+// Gameplay/Sustain.shadergraph: two SustainWave sub-graph instances over the
+// SustainLine ribbon (u = remaining world-unit length, v = 1 -> 0 across).
+// wave = IsActive ? amp*cos(2*pi*(t*LineSpeed - posWS.y)/LineFreq)/2 : 0 with
+// LineSpeed 2, LineFreq 0.875; amp = Min + Whammy*(Max-Min) and whammy is
+// always 0 for a renderer, so amp = Min: +0.2 (SustainSecondary.png) and
+// -0.1333 (Sustain.png). squeeze = 1 - 0.6667*(1-cos(2*pi*3*t))/2.
+// alpha = (A+B).a * saturate(u); BaseColor = _Color*(A+B).rgb;
+// Emission = _EmissionColor (colour x1 waiting, x3 while hitting).
+// Open sustains use SustainLine_Full instead: BaseColor = _Color flat,
+// alpha = min(MainTex.a, 1), same emission.
+const char* YARG_SUSTAIN_FS = R"(#version 330
+uniform sampler2D uTex;
+uniform sampler2D uTex2;
+uniform float uEmissionScale;
+uniform float uOpen;
+uniform float uActive;
+uniform float uTime;
+uniform vec2 uFadeRange;
+in vec2 vUV;
+in vec4 vCol;
+in float vEngineDistance;
+out vec4 oCol;
+vec4 sustainWave(sampler2D tex, float amp, float squeeze) {
+    float wave = uActive > 0.5
+        ? amp*cos(6.2831853*(uTime*2.0 - 0.01)/0.875)*0.5 : 0.0;
+    float v = clamp(squeeze*wave + 2.0*vUV.y - 0.5, 0.0, 1.0);
+    return texture(tex, vec2(vUV.x, v));
+}
+void main() {
+    vec4 c;
+    if (uOpen > 0.5) {
+        c = vec4(vCol.rgb + vCol.rgb*uEmissionScale,
+                 min(texture(uTex, vUV).a, 1.0)*vCol.a);
+    } else {
+        float squeeze = 1.0-0.6667*(1.0-cos(6.2831853*3.0*uTime))*0.5;
+        vec4 sum = sustainWave(uTex2, 0.2, squeeze) +
+                   sustainWave(uTex, -0.1333, squeeze);
+        c = vec4(vCol.rgb*sum.rgb + vCol.rgb*uEmissionScale,
+                 sum.a*clamp(vUV.x,0.0,1.0)*vCol.a);
+    }
+    if (uFadeRange.y > uFadeRange.x)
+        c.a *= 1.0-smoothstep(uFadeRange.x,uFadeRange.y,vEngineDistance);
+    if (c.a < 0.002) discard;
+    oCol = c;
+})";
+
+// Custom/Beatline.shader + highways.hlsl: alpha = pow(1-(2u-1)^2, 0.5) *
+// BeatLine.A * Color.a -- a semicircular profile shaving the quad's side
+// edges; BaseColor = tex * Color. Transparent, straight alpha.
+const char* YARG_BEATLINE_FS = R"(#version 330
+uniform sampler2D uTex;
+uniform vec2 uFadeRange;
+in vec2 vUV;
+in vec4 vCol;
+in float vEngineDistance;
+out vec4 oCol;
+void main() {
+    vec4 texel = texture(uTex, vUV);
+    float profile = sqrt(max(1.0-(2.0*vUV.x-1.0)*(2.0*vUV.x-1.0), 0.0));
+    float a = profile*texel.a*vCol.a;
+    if (uFadeRange.y > uFadeRange.x)
+        a *= 1.0-smoothstep(uFadeRange.x,uFadeRange.y,vEngineDistance);
+    if (a < 0.002) discard;
+    oCol = vec4(texel.rgb*vCol.rgb, a);
+})";
+
+// Resources/HighwaysAlphaMask.shader: YARG's highway elements do NOT fade
+// individually. This pass re-renders every renderer (except FadeExclude
+// layers -- the sustains) with alpha = fade(z-distance from camera) into an
+// R8 target using BlendOp Max, and the uber post pass takes
+// min(highway.a, mask). fadeStart/fadeEnd are the camera-forward projections
+// of ZeroFadePosition-FadeLength / ZeroFadePosition, exactly YARG's own
+// threshold-vs-measurement mix.
+const char* YARG_MASK_FS = R"(#version 330
+uniform vec2 uFadeRange;
+in float vEngineDistance;
+out vec4 oCol;
+void main() {
+    float a = 1.0;
+    if (uFadeRange.y > uFadeRange.x)
+        a = 1.0-smoothstep(uFadeRange.x,uFadeRange.y,vEngineDistance);
+    oCol = vec4(a);
+})";
 
 const char* LINEAR_COMPOSE_FS = R"(#version 330
 in vec2 vUV;
 out vec4 oCol;
 uniform sampler2D uTex;
 uniform sampler2D uBloom;
+uniform sampler2D uMask;
+uniform sampler2D uGrain;
+uniform vec2 uGrainScale;
+uniform vec2 uGrainOffset;
 uniform float uAlpha;
 uniform float uPost;
 vec3 linearToSrgb(vec3 c) {
@@ -990,13 +1131,29 @@ vec3 acesTonemap(vec3 color) {
 
 void main() {
     vec4 c = texture(uTex,vUV);
+    vec4 m = texture(uMask,vUV);
+    // HighwaysAlphaMask composite: min(highway alpha, mask), THEN premultiply
+    // -- using the unmasked coverage here would keep the fade band at full
+    // brightness against the background.
+    float a = min(c.a, m.r)*uAlpha;
     if (c.a > 0.0) {
         vec3 color = max(c.rgb/c.a,vec3(0.0));
-        if (uPost > 0.5)
-            color = acesTonemap(color+0.3*texture(uBloom,vUV).rgb);
-        c.rgb = linearToSrgb(color)*c.a*uAlpha;
+        if (uPost > 0.5) {
+            color += 0.3*texture(uBloom,vUV).rgb;
+            // URP film grain (UberPP order: bloom -> grade -> grain -> ACES).
+            // Medium01 texture (alpha channel, via swizzle), intensity 0.25*4,
+            // response 0.792, scale = pixels/512 (1 texel = 1 screen pixel).
+            float grain = texture(uGrain,vUV*uGrainScale+uGrainOffset).w;
+            grain = (grain-0.5)*2.0;
+            float lum = dot(color,vec3(0.2126729,0.7151522,0.0721750));
+            lum = 1.0-sqrt(max(lum,0.0));
+            lum = mix(1.0,lum,0.792);
+            color += color*grain*lum;
+            color = acesTonemap(color);
+        }
+        c.rgb = linearToSrgb(color)*a;
     }
-    c.a *= uAlpha;
+    c.a = a;
     oCol = c;
 }
 )";
@@ -1400,6 +1557,45 @@ void Renderer::makeFbos() {
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr,"YARG AO framebuffer incomplete\n"); exit(1);
     }
+
+    // URP High asset renders 4x MSAA; the scene is drawn into this target and
+    // resolved into yargTex_ before the bloom chain.
+    glGenRenderbuffers(1,&yargMsaaColor_);
+    glBindRenderbuffer(GL_RENDERBUFFER,yargMsaaColor_);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER,4,GL_RGBA16F,W,H);
+    glGenRenderbuffers(1,&yargMsaaDepth_);
+    glBindRenderbuffer(GL_RENDERBUFFER,yargMsaaDepth_);
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER,4,GL_DEPTH_COMPONENT24,
+                                     W,H);
+    glGenFramebuffers(1,&yargMsaaFbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER,yargMsaaFbo_);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,
+                              GL_RENDERBUFFER,yargMsaaColor_);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER,yargMsaaDepth_);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr,"YARG MSAA framebuffer incomplete\n"); exit(1);
+    }
+
+    // HighwaysAlphaMask target: R8. Its depth attachment reuses the AO depth
+    // texture -- that texture is dead once the AO chain has run, and the mask
+    // pass clears it before drawing.
+    glGenTextures(1,&yargMaskTex_);
+    glBindTexture(GL_TEXTURE_2D,yargMaskTex_);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_R8,W,H,0,GL_RED,GL_UNSIGNED_BYTE,nullptr);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    glGenFramebuffers(1,&yargMaskFbo_);
+    glBindFramebuffer(GL_FRAMEBUFFER,yargMaskFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,
+                           yargMaskTex_,0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,
+                           yargAoDepth_,0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr,"YARG mask framebuffer incomplete\n"); exit(1);
+    }
 }
 
 void Renderer::destroyFbos() {
@@ -1414,6 +1610,12 @@ void Renderer::destroyFbos() {
         glDeleteRenderbuffers(1,&moonSceneMsaaColor_); moonSceneMsaaColor_ = 0;
     }
     if (yargDepth_) { glDeleteRenderbuffers(1,&yargDepth_); yargDepth_ = 0; }
+    if (yargMsaaColor_) {
+        glDeleteRenderbuffers(1,&yargMsaaColor_); yargMsaaColor_ = 0;
+    }
+    if (yargMsaaDepth_) {
+        glDeleteRenderbuffers(1,&yargMsaaDepth_); yargMsaaDepth_ = 0;
+    }
     if (fbo_)     { glDeleteFramebuffers(1, &fbo_);     fbo_ = 0; }
     if (postFbo_) { glDeleteFramebuffers(1, &postFbo_); postFbo_ = 0; }
     if (fxFbo_)   { glDeleteFramebuffers(1, &fxFbo_);   fxFbo_ = 0; }
@@ -1427,6 +1629,12 @@ void Renderer::destroyFbos() {
         glDeleteFramebuffers(1,&moonSceneMsaaFbo_); moonSceneMsaaFbo_ = 0;
     }
     if (yargFbo_) { glDeleteFramebuffers(1,&yargFbo_); yargFbo_ = 0; }
+    if (yargMsaaFbo_) {
+        glDeleteFramebuffers(1,&yargMsaaFbo_); yargMsaaFbo_ = 0;
+    }
+    if (yargMaskFbo_) {
+        glDeleteFramebuffers(1,&yargMaskFbo_); yargMaskFbo_ = 0;
+    }
     if (yargNormalFbo_) {
         glDeleteFramebuffers(1,&yargNormalFbo_); yargNormalFbo_ = 0;
     }
@@ -1445,6 +1653,9 @@ void Renderer::destroyFbos() {
     if (moonGlowTex_) { glDeleteTextures(1, &moonGlowTex_); moonGlowTex_ = 0; }
     if (moonSceneTex_) { glDeleteTextures(1,&moonSceneTex_); moonSceneTex_ = 0; }
     if (yargTex_) { glDeleteTextures(1,&yargTex_); yargTex_ = 0; }
+    if (yargMaskTex_) {
+        glDeleteTextures(1,&yargMaskTex_); yargMaskTex_ = 0;
+    }
     if (yargNormalTex_) {
         glDeleteTextures(1,&yargNormalTex_); yargNormalTex_ = 0;
     }
@@ -1499,8 +1710,13 @@ bool Renderer::init(int w, int h, const std::string& A) {
     texFretH_   = gl_loadTex(A + "frets/spr_newtargets_head_strip6.png", false);
     texLift_    = gl_loadTex(A + "frets/spr_targets_lift.png", false);
     texHLight_  = gl_loadTex(A + "frets/Head_Lights.png", false);
+    // YARG is a Linear-colorspace Unity project: albedo textures import with
+    // sRGBTexture 1 and Unity decodes them to linear before the BRDF. Match
+    // the .meta flag per texture -- data masks (Fade/Solo/effect trim) are 0.
+    // The CH/Moonscraper paths keep srgb=false (their lighting math already
+    // works in display space; touching it would move the pinned hashes).
     auto engineTex = [&](const char* name, bool repeat, bool flipY,
-                         bool mipmaps) {
+                         bool mipmaps, bool srgb = false) {
         std::string path = A+"engine/"+name;
         if (FILE* f = fopen(path.c_str(),"rb")) {
             fclose(f);
@@ -1509,7 +1725,7 @@ bool Renderer::init(int w, int h, const std::string& A) {
                     path.c_str());
             path = A+"_missing.png";
         }
-        return gl_loadTex(path,repeat,flipY,false,mipmaps);
+        return gl_loadTex(path,repeat,flipY,srgb,mipmaps);
     };
     texMoonHighway_  = engineTex("moon_highway.png",true,false,false);
     texMoonRail_     = engineTex("moon_rail.png",true,false,false);
@@ -1521,17 +1737,17 @@ bool Renderer::init(int w, int h, const std::string& A) {
     texMoonSustainFretted_ = engineTex("moon_sustain_fretted.png",false,false,false);
     texMoonSustainOpen_ = engineTex("moon_sustain_open.png",false,false,false);
     texMoonSpTail_ = engineTex("moon_sp_tail.png",false,false,false);
-    texYargNote_       = engineTex("yarg_note.png",false,true,true);
-    texYargNoteShine_  = engineTex("yarg_note_shine.png",false,true,true);
-    texYargNoteShader_ = engineTex("yarg_note_shader.png",false,true,true);
-    texYargOpenNote_   = engineTex("yarg_open_note.png",false,true,true);
-    texYargOpenHopo_   = engineTex("yarg_open_hopo.png",false,true,true);
-    texYargFret_       = engineTex("yarg_fret.png",false,true,true);
-    texYargFretShine_  = engineTex("yarg_fret_shine.png",false,true,true);
+    texYargNote_       = engineTex("yarg_note.png",false,true,true,true);
+    texYargNoteShine_  = engineTex("yarg_note_shine.png",false,true,true,true);
+    texYargNoteShader_ = engineTex("yarg_note_shader.png",false,true,true,true);
+    texYargOpenNote_   = engineTex("yarg_open_note.png",false,true,true,true);
+    texYargOpenHopo_   = engineTex("yarg_open_hopo.png",false,true,true,true);
+    texYargFret_       = engineTex("yarg_fret.png",false,true,true,true);
+    texYargFretShine_  = engineTex("yarg_fret_shine.png",false,true,true,true);
     texYargTrackFade_  = engineTex("yarg_track_fade.png",false,true,true);
-    texYargTrackSmall_ = engineTex("yarg_track_small.png",true,true,true);
-    texYargTrackSide_  = engineTex("yarg_track_side.png",true,true,true);
-    texYargTrackTrim_  = engineTex("yarg_track_trim.png",true,true,true);
+    texYargTrackSmall_ = engineTex("yarg_track_small.png",true,true,true,true);
+    texYargTrackSide_  = engineTex("yarg_track_side.png",true,true,true,true);
+    texYargTrackTrim_  = engineTex("yarg_track_trim.png",true,true,true,true);
     texYargSoloTrack_ = engineTex("yarg_solo_track.png",true,true,true);
     texYargSoloRail_ = engineTex("yarg_solo_rail.png",true,true,true);
     texYargSoloTransitionTrack_ =
@@ -1541,10 +1757,18 @@ bool Renderer::init(int w, int h, const std::string& A) {
     texYargSoloTransitionRailRight_ =
         engineTex("yarg_solo_transition_rail_right.png",false,true,true);
     texYargSpTrim_ = engineTex("yarg_sp_trim.png",true,true,true);
-    texYargBeatline_   = engineTex("yarg_beatline.png",false,true,true);
-    texYargSustain_    = engineTex("yarg_sustain.png",true,true,true);
-    texYargSustainSecondary_ = engineTex("yarg_sustain_secondary.png",true,true,true);
-    texYargOpenSustain_ = engineTex("yarg_open_sustain.png",true,true,true);
+    texYargBeatline_   = engineTex("yarg_beatline.png",false,true,true,true);
+    texYargSustain_    = engineTex("yarg_sustain.png",true,true,true,true);
+    texYargSustainSecondary_ = engineTex("yarg_sustain_secondary.png",true,true,true,true);
+    texYargOpenSustain_ = engineTex("yarg_open_sustain.png",true,true,true,true);
+    // URP Medium01 film grain (see yarg_grain.SOURCE.txt). The PNG is RGB;
+    // URP samples the single-channel alpha import, so swizzle A <- R.
+    texYargGrain_      = engineTex("yarg_grain.png",true,false,false);
+    glBindTexture(GL_TEXTURE_2D,texYargGrain_.id);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_R,GL_ONE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_G,GL_ONE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_B,GL_ONE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_A,GL_RED);
     actorFont_  = gl_loadTex(A + "fonts/_eurostile normal (mipmaps) 16x16.png", false);
     actorMissing_ = gl_loadTex(A + "_missing.png", false, false);
     int rawFontWidth[256];
@@ -1589,6 +1813,9 @@ bool Renderer::init(int w, int h, const std::string& A) {
                                  "yargAoEstimate");
     yargAoBlur_ = gl_program(POST_VS,YARG_AO_BLUR_FS,"yargAoBlur");
     yargAoFinal_ = gl_program(POST_VS,YARG_AO_FINAL_FS,"yargAoFinal");
+    yargSustain_ = gl_program(SCENE_VS,YARG_SUSTAIN_FS,"yargSustain");
+    yargBeatline_ = gl_program(SCENE_VS,YARG_BEATLINE_FS,"yargBeatline");
+    yargMaskMesh_ = gl_program(ENGINE_VS,YARG_MASK_FS,"yargMaskMesh");
     linearCompose_ = gl_program(POST_VS, LINEAR_COMPOSE_FS, "linearCompose");
     cover_   = gl_program(POST_VS, COVER_FS, "cover");
     locPremul_ = glGetUniformLocation(prog_, "uPremul");
@@ -1689,20 +1916,21 @@ void Renderer::drawEngineMesh(const EngineGpu& gpu, const Mat4& camera,
                 random ? random[1] : 0.0f,
                 random ? random[2] : 0.0f);
     glUniform1f(glGetUniformLocation(engine_, "uTime"),shaderTime);
+    glUniform1f(glGetUniformLocation(engine_, "uWaviness"),yargGroove_);
+    glUniform1f(glGetUniformLocation(engine_, "uGroove"),yargGroove_);
     glUniform1f(glGetUniformLocation(engine_, "uUseAo"),engineUseAo_ ? 1.0f : 0.0f);
     const bool yarg = (kind >= 1 && kind <= 7) || kind == 12;
     glUniform3f(glGetUniformLocation(engine_, "uCameraPos"),
                 0.0f, yarg ? 2.66f : -5.3f, yarg ? -4.86f : -4.52f);
     glUniform1f(glGetUniformLocation(engine_, "uCurve"), yarg ? 0.5f : 0.0f);
     if (yarg) {
-        const float pitch = 24.12f * 3.14159265f / 180.0f;
-        const float fy = -sinf(pitch), fz = cosf(pitch);
-        const float fadeStart = fabsf(2.66f*fy + (-4.86f-1.75f)*fz);
-        const float fadeEnd = fabsf(2.66f*fy + (-4.86f-3.0f)*fz);
+        // No per-element fade for YARG meshes: the HighwaysAlphaMask pass
+        // re-renders the geometry and the composite takes min(alpha, mask).
+        // The plane stays fed so vEngineDistance is valid for that pass.
         glUniform4f(glGetUniformLocation(engine_, "uFadePlane"),
                     0.0f,0.0f,1.0f,4.86f);
         glUniform2f(glGetUniformLocation(engine_, "uFadeRange"),
-                    fadeStart,fadeEnd);
+                    0.0f,0.0f);
     } else {
         // Moonscraper's highway does not run to the horizon: a background
         // quad fades everything out at a fixed world height. In its scene the
@@ -1791,6 +2019,16 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             glBindRenderbuffer(GL_RENDERBUFFER,yargDepth_);
             glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,
                                   targetW,targetH);
+            glBindRenderbuffer(GL_RENDERBUFFER,yargMsaaColor_);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER,4,GL_RGBA16F,
+                                             targetW,targetH);
+            glBindRenderbuffer(GL_RENDERBUFFER,yargMsaaDepth_);
+            glRenderbufferStorageMultisample(GL_RENDERBUFFER,4,
+                                             GL_DEPTH_COMPONENT24,
+                                             targetW,targetH);
+            glBindTexture(GL_TEXTURE_2D,yargMaskTex_);
+            glTexImage2D(GL_TEXTURE_2D,0,GL_R8,targetW,targetH,0,
+                         GL_RED,GL_UNSIGNED_BYTE,nullptr);
             for (int i = 0; i < 6; ++i) {
                 const int bloomW = std::max(1,targetW >> (i+1));
                 const int bloomH = std::max(1,targetH >> (i+1));
@@ -1822,7 +2060,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             yargW_ = targetW;
             yargH_ = targetH;
         }
-        glBindFramebuffer(GL_FRAMEBUFFER,yargFbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER,yargMsaaFbo_);
         glViewport(0,0,targetW,targetH);
         glClearColor(0,0,0,0);
         glDepthMask(GL_TRUE);
@@ -1890,6 +2128,30 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     };
     const float (*colors)[3] = style == 1 ? moonColors : yargColors;
     const float receptorAlpha = alpha*fminf(1.0f,fmaxf(0.0f,1.0f-mods.dark));
+    // YARG groove state: GrooveMode = ScoreMultiplier == MaxMultiplier (4x,
+    // i.e. combo >= 30 -- ScoreMultiplier = min(combo/10+1, MaxMultiplier),
+    // and gameplay captures show 4x as the maxed badge). The bot never
+    // misses, so this is closed-form: TrackMaterial's per-frame
+    // Lerp(state, 1, dt*5) integrates to 1-exp(-5*dt) from the moment the
+    // 30th combo lands.
+    yargGroove_ = 0.0f;
+    if (style == 2 && !o.noBot) {
+        double grooveStart = -1.0;
+        int combo = 0;
+        for (const Note& note : chart.notes) {
+            int gems = note.open ? 1 : 0;
+            for (int lane = 0; lane < 5; ++lane)
+                if (note.frets & (1 << lane)) ++gems;
+            if (gems == 0) continue;
+            combo += gems + (gems >= 2 ? 1 : 0);
+            if (combo >= 30) {
+                grooveStart = chart.beatToSec(note.beat);
+                break;
+            }
+        }
+        if (grooveStart >= 0.0 && songTime > grooveStart)
+            yargGroove_ = 1.0f-expf(-5.0f*float(songTime-grooveStart));
+    }
     const float laneStep = style == 1 ? 1.0f : 0.4f;
     // Highway is parented at y=4; the default scene's camYMax is local 11.75.
     const float moonVisibleEnd = 4.0f + 11.75f;
@@ -2009,7 +2271,8 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     auto appendEngineSustain = [&](double authoredStartSec, double endSec,
                                    int lane, float halfWidth,
                                    int widthSubdivisions, const float* color,
-                                   float a) {
+                                   float a,
+                                   std::vector<ch::Vtx>* out = nullptr) {
         double startSec = authoredStartSec;
         if (!o.noBot && songTime >= authoredStartSec) startSec = songTime;
         if (startSec >= endSec) return;
@@ -2039,8 +2302,11 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             };
         }
 
-        const float visibleStart = style == 1 ? -8.47f : -1.5f;
-        const float visibleEnd = style == 1 ? moonVisibleEnd : 32.0f;
+        // YARG spawns a TrackElement at (3+2+2)/NoteSpeed ahead of the strike
+        // (z <= 5) and removes it at z < -4 (pos = z+2). The composite mask
+        // fades everything past z ~3.4, so nothing further needs drawing.
+        const float visibleStart = style == 1 ? -8.47f : -2.0f;
+        const float visibleEnd = style == 1 ? moonVisibleEnd : 7.0f+length;
         float moonU = 0.0f;
         for (int row = 0; row+1 < rowCount; ++row) {
             EngineSustainRow r0 = rows[row], r1 = rows[row+1];
@@ -2080,6 +2346,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                 continue;
             }
             for (int width = 0; width < widthSubdivisions; ++width) {
+                std::vector<ch::Vtx>& dst = out ? *out : v_;
                 const float w0 = float(width)/float(widthSubdivisions);
                 const float w1 = float(width+1)/float(widthSubdivisions);
                 const float x00 = r0.x-halfWidth+2.0f*halfWidth*w0;
@@ -2097,7 +2364,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                      r1.u,1.0f-w0,color[0],color[1],color[2],a*r1.visible}
                 };
                 const int ix[6] = {0,1,2,0,2,3};
-                for (int index : ix) v_.push_back(q[index]);
+                for (int index : ix) dst.push_back(q[index]);
             }
         }
     };
@@ -2140,12 +2407,9 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         glUniform1f(glGetUniformLocation(yargEffect_,"uCurve"),0.5f);
         glUniform4f(glGetUniformLocation(yargEffect_,"uFadePlane"),
                     0.0f,0.0f,1.0f,4.86f);
-        const float pitch = 24.12f * 3.14159265f / 180.0f;
-        const float fy = -sinf(pitch), fz = cosf(pitch);
-        const float fadeStart = fabsf(2.66f*fy + (-4.86f-1.75f)*fz);
-        const float fadeEnd = fabsf(2.66f*fy + (-4.86f-3.0f)*fz);
+        // No per-element fade: the alpha mask owns it at composite time.
         glUniform2f(glGetUniformLocation(yargEffect_,"uFadeRange"),
-                    fadeStart,fadeEnd);
+                    0.0f,0.0f);
         glUniform3f(glGetUniformLocation(yargEffect_,"uEmission"),
                     emission[0]*fieldTint_[0],emission[1]*fieldTint_[1],
                     emission[2]*fieldTint_[2]);
@@ -2418,7 +2682,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             if (note.open) {
                 const float in = modYOffset(hitSec,2);
                 const float pos = scrollOffset(hitSec,2);
-                if (pos >= -1.5f && pos <= 34.0f) {
+                if (pos >= -2.0f && pos <= 7.0f) {
                     const float x = modX(2,in);
                     const float bump = GetYPosBump(mods,2,in,float(beat),bpm);
                     const bool hopo = note.tap ||
@@ -2435,7 +2699,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                 if (!(note.frets & (1 << lane))) continue;
                 const float in = modYOffset(hitSec,lane);
                 const float pos = scrollOffset(hitSec,lane);
-                if (pos < -1.5f || pos > 34.0f) continue;
+                if (pos < -2.0f || pos > 7.0f) continue;
                 const float x = modX(lane,in);
                 const float bump = GetYPosBump(mods,lane,in,float(beat),bpm);
                 const float noteZoom = GetZoom(mods,lane);
@@ -2520,7 +2784,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         glBindTexture(GL_TEXTURE_2D,yargAoTex_[2]);
         glDrawArrays(GL_TRIANGLES,0,3);
         glActiveTexture(GL_TEXTURE0);
-        glBindFramebuffer(GL_FRAMEBUFFER,yargFbo_);
+        glBindFramebuffer(GL_FRAMEBUFFER,yargMsaaFbo_);
         glViewport(0,0,yargW_,yargH_);
     }
 
@@ -2539,8 +2803,19 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     const float white[3] = {1,1,1};
     const float moonAmbient[3] = {0.212f,0.227f,0.259f};
     std::vector<ch::Vtx> yargBeatLines;
+    // Sustains split by live state: SustainWave animates and emission goes
+    // x3 only while the bot is holding (YARG's _IsActive), and the batch
+    // shares one uniform set, so idle and active ribbons draw separately.
     std::vector<ch::Vtx> yargFrettedSustains;
+    std::vector<ch::Vtx> yargFrettedSustainsActive;
     std::vector<ch::Vtx> yargOpenSustains;
+    std::vector<ch::Vtx> yargOpenSustainsActive;
+    // HighwaysAlphaMask: every mask-eligible mesh draw (track, trims, frets,
+    // notes) is recorded as it is issued and replayed with the fade shader
+    // into the R8 mask target. Beatline/solo quads sit at the track's own z,
+    // so their mask contribution is always a no-op; sustains are FadeExclude.
+    struct MaskDraw { const EngineGpu* gpu; Mat4 model; };
+    std::vector<MaskDraw> yargMaskDraws;
     std::vector<ch::Vtx> moonGlowOccluders;
     std::vector<ch::Vtx> moonGlowDepthBlockers;
     float moonIndicatorDt[5] = {-1,-1,-1,-1,-1};
@@ -2590,6 +2865,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                                                0.02045422f,10.86853f);
                 drawEngineMesh(yargTrackTrim_, camera, trim, 7, white, alpha,
                                texYargTrackTrim_.id);
+                yargMaskDraws.push_back({&yargTrackTrim_,trim});
             }
         }
 
@@ -2609,7 +2885,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                 drawLayer(tex, ch::BLEND_SPRITE);
             } else {
                 const float z = -2.0f + pos;
-                if (z <= -3.0f || z > 32.0f) continue;
+                if (z <= -4.0f || z > 5.0f) continue;
                 const float thickness = line.style == 0 ? 0.07f
                                       : line.style == 2 ? 0.03f : 0.05f;
                 const float lineAlpha = line.style == 0 ? 0.6f
@@ -2679,18 +2955,21 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         for (int lane = 0; lane < 5; ++lane) {
             if (!(note.frets & (1 << lane)) || note.sustain[lane] <= 0.0) continue;
             const double endSec = chart.beatToSec(note.beat + note.sustain[lane]);
+            const bool holding = !o.noBot && songTime >= hitSec &&
+                                 songTime < endSec;
             appendEngineSustain(hitSec,endSec,lane,
                                 style == 1 ? 0.5f : 0.4f,4,
                                 style == 1 ? moonSustainColors[lane]
                                            : starPower ? white : colors[lane],
-                                alpha);
+                                alpha,
+                                style == 2 ? (holding
+                                    ? &yargFrettedSustainsActive
+                                    : &yargFrettedSustains) : nullptr);
         }
     }
     if (style == 1) {
         moonGlowOccluders.insert(moonGlowOccluders.end(),v_.begin(),v_.end());
         moonFrettedSustains = std::move(v_);
-    } else {
-        yargFrettedSustains = std::move(v_);
     }
 
     sceneSetup();
@@ -2701,17 +2980,20 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             chart.phraseAt(PhraseType::StarPower,note.tick) != nullptr;
         const double hitSec = chart.beatToSec(note.beat);
         const double endSec = chart.beatToSec(note.beat + note.openSustain);
+        const bool holding = !o.noBot && songTime >= hitSec &&
+                             songTime < endSec;
         appendEngineSustain(hitSec,endSec,2,
                             style == 1 ? 2.0f : 1.0f,16,
                             style == 1 ? moonOpenSustain
                                        : starPower ? white : yargColors[5],
-                            alpha);
+                            alpha,
+                            style == 2 ? (holding
+                                ? &yargOpenSustainsActive
+                                : &yargOpenSustains) : nullptr);
     }
     if (style == 1) {
         moonGlowOccluders.insert(moonGlowOccluders.end(),v_.begin(),v_.end());
         drawLayer(texMoonSustainOpen_.id,ch::BLEND_SPRITE);
-    } else {
-        yargOpenSustains = std::move(v_);
     }
     if (style == 1) {
         v_ = std::move(moonFrettedSustains);
@@ -2761,6 +3043,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                            fretHeld[lane] ? 1.0f : 0.0f);
             drawEngineMesh(yargFret_,camera,fret,5,colors[lane],receptorAlpha,
                            texYargFret_.id,texYargFretShine_.id,0,0.0f,2);
+            yargMaskDraws.push_back({&yargFret_,fret});
         }
     }
 
@@ -2775,10 +3058,11 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             if (note.open) {
                 const float in = modYOffset(hitSec,2);
                 const float pos = scrollOffset(hitSec,2);
-                if (pos >= -1.5f && pos <= 34.0f) {
-                    float fade = fminf(1.0f,fmaxf(0.0f,(34.0f-pos)/5.0f));
-                    fade *= fmaxf(GetAlpha(mods,in,songTime),
-                                  GetGlow(mods,in,songTime));
+                if (pos >= -2.0f && pos <= 7.0f) {
+                    // The alpha-mask pass owns the z fade; per-element alpha
+                    // is the appearance mods only.
+                    const float fade = fmaxf(GetAlpha(mods,in,songTime),
+                                             GetGlow(mods,in,songTime));
                     if (fade > 0.0f) {
                         const float x = modX(2,in);
                         const float bump = GetYPosBump(mods,2,in,float(beat),bpm);
@@ -2795,6 +3079,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                                        starPower ? white : colors[5],alpha*fade,
                                        texYargOpenNote_.id,texYargOpenHopo_.id,
                                        0,0.0f,-1,starPower ? 1.0f : 0.0f);
+                        yargMaskDraws.push_back({&yargOpen_,model});
                     }
                 }
             }
@@ -2803,10 +3088,9 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                 if (!(note.frets & (1 << lane))) continue;
                 const float in = modYOffset(hitSec,lane);
                 const float pos = scrollOffset(hitSec,lane);
-                if (pos < -1.5f || pos > 34.0f) continue;
-                float fade = fminf(1.0f,fmaxf(0.0f,(34.0f-pos)/5.0f));
-                fade *= fmaxf(GetAlpha(mods,in,songTime),
-                              GetGlow(mods,in,songTime));
+                if (pos < -2.0f || pos > 7.0f) continue;
+                const float fade = fmaxf(GetAlpha(mods,in,songTime),
+                                         GetGlow(mods,in,songTime));
                 if (fade <= 0.0f) continue;
                 const float x = modX(lane,in);
                 const float bump = GetYPosBump(mods,lane,in,float(beat),bpm);
@@ -2840,23 +3124,83 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                                texYargNoteShader_.id,0.0f,-1,
                                starPower ? 1.0f : 0.0f,
                                noteRandom,songTime);
+                yargMaskDraws.push_back({&mesh,model});
             }
         }
     }
 
     if (style == 2) {
+        // Shared plumbing for the YARG transparent quad passes (beatlines
+        // 2975, solo/sweep 2979, sustains 3000): SCENE_VS + per-pass FS,
+        // straight-alpha blend, depth tested but not written. The z fade is
+        // the alpha mask's job, so uFadeRange stays (0,0) here.
+        auto setupYargQuadProg = [&](GLuint prog) {
+            glUseProgram(prog);
+            glUniformMatrix4fv(glGetUniformLocation(prog,"uMVP"),1,
+                               GL_FALSE,camera.m);
+            glUniform3f(glGetUniformLocation(prog,"uOffset"),0,0,0);
+            glUniform1f(glGetUniformLocation(prog,"uCurve"),0.5f);
+            glUniform4f(glGetUniformLocation(prog,"uFadePlane"),
+                        0.0f,0.0f,1.0f,4.86f);
+            glUniform2f(glGetUniformLocation(prog,"uFadeRange"),0.0f,0.0f);
+        };
+        auto drawYargQuads = [&](const std::vector<ch::Vtx>& verts) {
+            if (verts.empty()) return;
+            glBindVertexArray(vao_);
+            glBindBuffer(GL_ARRAY_BUFFER,vbo_);
+            glBufferData(GL_ARRAY_BUFFER,
+                         GLsizeiptr(verts.size()*sizeof(ch::Vtx)),
+                         verts.data(),GL_STREAM_DRAW);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            glDisable(GL_CULL_FACE);
+            glDrawArrays(GL_TRIANGLES,0,GLsizei(verts.size()));
+            glDepthMask(GL_TRUE);
+            glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+        };
+        auto sustainPass = [&](const std::vector<ch::Vtx>& verts, bool open,
+                               bool active) {
+            if (verts.empty()) return;
+            setupYargQuadProg(yargSustain_);
+            glUniform1i(glGetUniformLocation(yargSustain_,"uTex"),0);
+            glUniform1i(glGetUniformLocation(yargSustain_,"uTex2"),1);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D,open ? texYargOpenSustain_.id
+                                             : texYargSustain_.id);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D,texYargSustainSecondary_.id);
+            glUniform1f(glGetUniformLocation(yargSustain_,"uOpen"),
+                        open ? 1.0f : 0.0f);
+            glUniform1f(glGetUniformLocation(yargSustain_,"uActive"),
+                        active ? 1.0f : 0.0f);
+            glUniform1f(glGetUniformLocation(yargSustain_,"uEmissionScale"),
+                        active ? 3.0f : 1.0f);
+            glUniform1f(glGetUniformLocation(yargSustain_,"uTime"),songTime);
+            drawYargQuads(verts);
+            glActiveTexture(GL_TEXTURE0);
+        };
+
         if (!o.playfield && mods.hideboard == 0.0f) {
             const Mat4 track = engineModel(0.0f,-0.001f,15.0f,
                                            -0.000002f,0.7071068f,0.7071068f,
                                            0.000002f,1.01f,6.0f,1.0f);
-            glDepthMask(GL_FALSE);
-            glBlendFuncSeparate(GL_SRC_ALPHA,GL_ONE,GL_ONE,GL_ONE);
+            // Track.mat is opaque, queue 1950: depth-written, no blending.
+            glDisable(GL_BLEND);
             drawEngineMesh(yargTrack_,camera,track,6,white,alpha,
                            texYargTrackFade_.id,texYargTrackSmall_.id,
                            texYargTrackSide_.id,
                            scrollNow*noteSpeed*0.15f);
-            glDepthMask(GL_TRUE);
-            glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
+            glEnable(GL_BLEND);
+            yargMaskDraws.push_back({&yargTrack_,track});
+
+            // Beatlines (queue 2975) sit between the track and the solo
+            // overlays (2979).
+            setupYargQuadProg(yargBeatline_);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D,texYargBeatline_.id);
+            glUniform1i(glGetUniformLocation(yargBeatline_,"uTex"),0);
+            drawYargQuads(yargBeatLines);
 
             struct SoloDraw {
                 double start = 0.0, end = 0.0;
@@ -3002,21 +3346,12 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                 }
             }
         }
-        sceneSetup();
-        glDepthMask(GL_FALSE);
-        v_ = std::move(yargBeatLines);
-        drawLayer(texYargBeatline_.id,ch::BLEND_SPRITE);
-
-        glDepthMask(GL_FALSE);
-        glEnable(GL_BLEND);
-        v_ = std::move(yargOpenSustains);
-        drawLayer(texYargOpenSustain_.id,ch::BLEND_NECK);
-
-        std::vector<ch::Vtx> secondary = yargFrettedSustains;
-        v_ = std::move(yargFrettedSustains);
-        drawLayer(texYargSustain_.id,ch::BLEND_SPRITE);
-        v_ = std::move(secondary);
-        drawLayer(texYargSustainSecondary_.id,ch::BLEND_ADD);
+        // Sustains (queue 3000). Open = SustainLine_Full; fretted = the
+        // two-texture SustainWave; held ribbons animate and emit x3.
+        sustainPass(yargOpenSustains,true,false);
+        sustainPass(yargOpenSustainsActive,true,true);
+        sustainPass(yargFrettedSustains,false,false);
+        sustainPass(yargFrettedSustainsActive,false,true);
     }
 
     if (style == 1) {
@@ -3271,6 +3606,55 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     }
 
     if (yargLinear) {
+        // HighwaysAlphaMask: replay the recorded geometry with the fade
+        // shader into the R8 mask target (BlendOp Max, like YARG's pass).
+        glBindFramebuffer(GL_FRAMEBUFFER,yargMaskFbo_);
+        glViewport(0,0,yargW_,yargH_);
+        glClearColor(0,0,0,0);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_MAX);
+        glBlendFunc(GL_ONE,GL_ONE);
+        glUseProgram(yargMaskMesh_);
+        glUniformMatrix4fv(glGetUniformLocation(yargMaskMesh_,"uMVP"),1,
+                           GL_FALSE,camera.m);
+        glUniform3f(glGetUniformLocation(yargMaskMesh_,"uOffset"),0,0,0);
+        glUniform1f(glGetUniformLocation(yargMaskMesh_,"uCurve"),0.5f);
+        glUniform4f(glGetUniformLocation(yargMaskMesh_,"uFadePlane"),
+                    0.0f,0.0f,1.0f,4.86f);
+        {
+            const float pitch = 24.12f * 3.14159265f / 180.0f;
+            const float fy = -sinf(pitch), fz = cosf(pitch);
+            glUniform2f(glGetUniformLocation(yargMaskMesh_,"uFadeRange"),
+                        fabsf(2.66f*fy + (-4.86f-1.75f)*fz),
+                        fabsf(2.66f*fy + (-4.86f-3.0f)*fz));
+        }
+        for (const MaskDraw& draw : yargMaskDraws) {
+            glUniformMatrix4fv(glGetUniformLocation(yargMaskMesh_,"uModel"),1,
+                               GL_FALSE,draw.model.m);
+            const Mat4& model = draw.model;
+            const float det =
+                model.m[0]*(model.m[5]*model.m[10]-model.m[6]*model.m[9])-
+                model.m[4]*(model.m[1]*model.m[10]-model.m[2]*model.m[9])+
+                model.m[8]*(model.m[1]*model.m[6]-model.m[2]*model.m[5]);
+            glEnable(GL_CULL_FACE);
+            glCullFace(det < 0.0f ? GL_BACK : GL_FRONT);
+            glBindVertexArray(draw.gpu->vao);
+            glDrawArrays(GL_TRIANGLES,0,draw.gpu->count);
+        }
+        glDisable(GL_CULL_FACE);
+        glBlendEquation(GL_FUNC_ADD);
+
+        // Resolve the 4x MSAA scene into yargTex_ for the bloom chain.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER,yargMsaaFbo_);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER,yargFbo_);
+        glBlitFramebuffer(0,0,yargW_,yargH_,0,0,yargW_,yargH_,
+                          GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER,yargFbo_);
+
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         glDisable(GL_CULL_FACE);
@@ -3339,15 +3723,30 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         glUseProgram(linearCompose_);
         glUniform1i(glGetUniformLocation(linearCompose_,"uTex"),0);
         glUniform1i(glGetUniformLocation(linearCompose_,"uBloom"),1);
+        glUniform1i(glGetUniformLocation(linearCompose_,"uMask"),2);
+        glUniform1i(glGetUniformLocation(linearCompose_,"uGrain"),3);
         glUniform1f(glGetUniformLocation(linearCompose_,"uAlpha"),compositeAlpha);
         glUniform1f(glGetUniformLocation(linearCompose_,"uPost"),
                     o.noPost ? 0.0f : 1.0f);
+        // URP randomises the grain offset per frame; a renderer needs it
+        // deterministic per beat, so hash a 1/240-beat counter instead.
+        const unsigned grainTick = unsigned(floor(beat*240.0));
+        glUniform2f(glGetUniformLocation(linearCompose_,"uGrainScale"),
+                    float(yargW_)/512.0f,float(yargH_)/512.0f);
+        glUniform2f(glGetUniformLocation(linearCompose_,"uGrainOffset"),
+                    grainTick*0.61803399f-floorf(grainTick*0.61803399f),
+                    grainTick*0.75487767f-floorf(grainTick*0.75487767f));
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D,yargTex_);
         glActiveTexture(GL_TEXTURE0+1);
         glBindTexture(GL_TEXTURE_2D,yargBloomMips_ == 1
                                    ? yargBloomDownTex_[0]
                                    : yargBloomUpTex_[0]);
+        glActiveTexture(GL_TEXTURE0+2);
+        glBindTexture(GL_TEXTURE_2D,yargMaskTex_);
+        glActiveTexture(GL_TEXTURE0+3);
+        glBindTexture(GL_TEXTURE_2D,texYargGrain_.id);
+        glActiveTexture(GL_TEXTURE0);
         glDrawArrays(GL_TRIANGLES,0,3);
     }
 

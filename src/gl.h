@@ -33,6 +33,13 @@ typedef ptrdiff_t GLintptr;
 #define GL_DEPTH_COMPONENT32F             0x8CAC
 #define GL_FRAMEBUFFER_COMPLETE           0x8CD5
 #define GL_TEXTURE0                       0x84C0
+#define GL_TEXTURE1                       0x84C1
+#define GL_TEXTURE_SWIZZLE_R              0x8E42
+#define GL_TEXTURE_SWIZZLE_G              0x8E43
+#define GL_TEXTURE_SWIZZLE_B              0x8E44
+#define GL_TEXTURE_SWIZZLE_A              0x8E45
+#define GL_FUNC_ADD                       0x8006
+#define GL_MAX                            0x8008
 #define GL_ACTIVE_UNIFORMS                0x8B86
 // Uniform types, for setting a knob at its declared type and for spotting the
 // extra sampler2Ds a shader chain binds buffers to.
@@ -94,7 +101,8 @@ typedef ptrdiff_t GLintptr;
     X(PFNGLDELETEPROGRAMPROC,            glDeleteProgram) \
     X(PFNGLBINDATTRIBLOCATIONPROC,       glBindAttribLocation) \
     X(PFNGLGETACTIVEUNIFORMPROC,         glGetActiveUniform) \
-    X(PFNGLBLENDFUNCSEPARATEPROC,        glBlendFuncSeparate)
+    X(PFNGLBLENDFUNCSEPARATEPROC,        glBlendFuncSeparate) \
+    X(PFNGLBLENDEQUATIONPROC,            glBlendEquation)
 
 typedef GLuint (APIENTRY *PFNGLCREATESHADERPROC)(GLenum);
 typedef void   (APIENTRY *PFNGLSHADERSOURCEPROC)(GLuint, GLsizei, const GLchar* const*, const GLint*);
@@ -142,6 +150,7 @@ typedef void   (APIENTRY *PFNGLDELETEPROGRAMPROC)(GLuint);
 typedef void   (APIENTRY *PFNGLBINDATTRIBLOCATIONPROC)(GLuint, GLuint, const GLchar*);
 typedef void   (APIENTRY *PFNGLGETACTIVEUNIFORMPROC)(GLuint, GLuint, GLsizei, GLsizei*, GLint*, GLenum*, GLchar*);
 typedef void   (APIENTRY *PFNGLBLENDFUNCSEPARATEPROC)(GLenum, GLenum, GLenum, GLenum);
+typedef void   (APIENTRY *PFNGLBLENDEQUATIONPROC)(GLenum);
 
 #define X(type, name) extern type name;
 NC_GL_FUNCS

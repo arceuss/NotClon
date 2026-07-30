@@ -362,6 +362,9 @@ private:
     GLuint yargBloomDownV_ = 0, yargBloomUp_ = 0;
     GLuint yargNormalProg_ = 0, yargAoEstimate_ = 0;
     GLuint yargAoBlur_ = 0, yargAoFinal_ = 0;
+    GLuint yargSustain_ = 0, yargBeatline_ = 0;
+    GLuint yargMaskMesh_ = 0;
+    float yargGroove_ = 0.0f;
     GLuint linearCompose_ = 0;
     bool engineUseAo_ = true;
     GLuint avao_ = 0, avbo_ = 0;
@@ -395,6 +398,8 @@ private:
     GLuint moonBlurFbo_[2] = {}, moonBlurTex_[2] = {};
     int moonGlowW_ = 0, moonGlowH_ = 0;
     GLuint yargFbo_ = 0, yargTex_ = 0, yargDepth_ = 0;
+    GLuint yargMsaaFbo_ = 0, yargMsaaColor_ = 0, yargMsaaDepth_ = 0;
+    GLuint yargMaskFbo_ = 0, yargMaskTex_ = 0;
     GLuint yargNormalFbo_ = 0, yargNormalTex_ = 0, yargAoDepth_ = 0;
     GLuint yargAoFbo_[4] = {}, yargAoTex_[4] = {};
     GLuint yargBloomDownFbo_[6] = {}, yargBloomDownTex_[6] = {};
@@ -434,6 +439,7 @@ private:
     Tex texYargSpTrim_;
     Tex texYargBeatline_, texYargSustain_, texYargSustainSecondary_;
     Tex texYargOpenSustain_;
+    Tex texYargGrain_;
     Tex actorFont_, actorMissing_;
     int actorFontWidth_[256] = {};
     int actorFontAdvance_[256] = {};

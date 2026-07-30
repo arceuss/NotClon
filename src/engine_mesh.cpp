@@ -77,14 +77,17 @@ Vec3 transformedNormal(const ufbx_matrix& matrix, ufbx_vec3 value,
 
 ufbx_matrix relativeGeometryTransform(const ufbx_node* node,
                                       ufbx_real unitScale) {
+    (void)unitScale;
     const ufbx_node* root = node;
     while (root->parent && !root->parent->is_root) root = root->parent;
     const ufbx_matrix inverseRoot = ufbx_matrix_invert(&root->node_to_world);
     ufbx_matrix matrix = ufbx_matrix_mul(&inverseRoot,
                                          &node->geometry_to_world);
-    matrix.m03 *= unitScale;
-    matrix.m13 *= unitScale;
-    matrix.m23 *= unitScale;
+    // NO unit scaling of the translation: vertices stay in raw file units
+    // (the callers' instance scales carry the x0.01 file-scale fold), so a
+    // child node's translation must stay in file units too. Scaling it here
+    // shrank the fret colour shell's +0.302 offset to 0.003 and let the base
+    // plate swallow the key caps. Single-node meshes are identity either way.
     return matrix;
 }
 
