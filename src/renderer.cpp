@@ -2955,6 +2955,9 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             } else {
                 const float z = -2.0f + pos;
                 if (z <= -4.0f || z > 5.0f) continue;
+                // BeatlineElement.cs:10-16: yScale/alpha 0.07/0.6 measure,
+                // 0.05/0.4 strong, 0.03/0.3 weak; Beatline.prefab Mesh sits
+                // at y = 0.002 over the track, scale x 2 (half-width 1).
                 const float thickness = line.style == 0 ? 0.07f
                                       : line.style == 2 ? 0.03f : 0.05f;
                 const float lineAlpha = line.style == 0 ? 0.6f
@@ -3312,12 +3315,20 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             const Mat4 track = engineModel(0.0f,-0.001f,15.0f,
                                            -0.000002f,0.7071068f,0.7071068f,
                                            0.000002f,1.01f,6.0f,1.0f);
-            // Track.mat is opaque, queue 1950: depth-written, no blending.
+            // Track.shadergraph is SurfaceType TRANSPARENT with
+            // ZWriteControl Auto -> depth writes OFF (the old "opaque,
+            // depth-written" reading was wrong -- pixels matched over the
+            // black clear, but the phantom track depth z-killed every
+            // coplanar transparent layer above it, most visibly the
+            // beatlines 0.002 up). Keep the colour path as-is; just do not
+            // write depth, like YARG.
             glDisable(GL_BLEND);
+            glDepthMask(GL_FALSE);
             drawEngineMesh(yargTrack_,camera,track,6,white,alpha,
                            texYargTrackFade_.id,texYargTrackSmall_.id,
                            texYargTrackSide_.id,
                            scrollNow*noteSpeed*0.15f);
+            glDepthMask(GL_TRUE);
             glEnable(GL_BLEND);
             yargMaskDraws.push_back({&yargTrack_,track});
 
