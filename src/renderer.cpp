@@ -2140,6 +2140,13 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     } else {
         root = mat_mul(engineRotateZ(wag),
                        mat_mul(engineRotateX(30.0f * mods.tilt), root));
+        // CH pivots the field mods (mini zoom, tilt, wag) about the STRIKE
+        // LINE; the YARG world's origin sits 2 units past it (strike z=-2),
+        // so an origin pivot makes mini slide the strikeline toward
+        // mid-track -- the "mini percentage feels off vs CH" symptom.
+        // Conjugate by the strike translation; identity when mods are 0.
+        root = mat_mul(engineTranslate(0.0f, 0.0f, -2.0f),
+                       mat_mul(root, engineTranslate(0.0f, 0.0f, 2.0f)));
         root = mat_mul(engineTranslate(o.px + mx, o.py + my, o.pz + mz), root);
     }
     camera = mat_mul(camera, root);
@@ -3616,6 +3623,12 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                 }
             }
             sceneSetup();
+            // Unity particles ZTest LEqual without writing: the ring's
+            // below-track half and anything behind frets/notes culls
+            // against the scene depth, which is most of why the ring is
+            // near-imperceptible in real YARG.
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LEQUAL);
             glDepthMask(GL_FALSE);
             v_ = std::move(ringQuads);
             drawLayer(texYargFretHitRing_.id,ch::BLEND_ADD);
@@ -3623,6 +3636,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             drawLayer(texYargFretHitRing_.id,ch::BLEND_SPRITE);
             v_ = std::move(flashQuads);
             drawLayer(texYargFretHitFlash_.id,ch::BLEND_ADD);
+            glDisable(GL_DEPTH_TEST);
             glDepthMask(GL_TRUE);
         }
     }
