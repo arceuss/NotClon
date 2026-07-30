@@ -135,6 +135,30 @@ bool EngineMesh::loadFbx(const std::string& path) {
         }
         if (mesh->faces.count != 0)
             localMaterialCount = std::max(localMaterialCount, 1);
+        // Unity's FBX importer creates submeshes in the order materials are
+        // FIRST USED by a face, not in the node's material-connection order
+        // (which is what ufbx's face_material indexes). Remap so a vertex's
+        // material index always means "Unity submesh index" -- the index the
+        // theme prefab's m_Materials array is written against. The two orders
+        // coincide for every engine FBX except the three Rectangular note
+        // meshes; the fret matching under BOTH orders is what let the
+        // connection-order assumption survive as long as it did.
+        std::vector<int> unitySlot(size_t(localMaterialCount), -1);
+        {
+            int next = 0;
+            for (size_t faceIndex = 0; faceIndex < mesh->faces.count;
+                 ++faceIndex) {
+                const uint32_t fm =
+                    faceIndex < mesh->face_material.count
+                        ? mesh->face_material.data[faceIndex]
+                        : 0;
+                const uint32_t slot = fm == UFBX_NO_INDEX ? 0 : fm;
+                if (slot < unitySlot.size() && unitySlot[slot] < 0)
+                    unitySlot[slot] = next++;
+            }
+            for (int& s : unitySlot)
+                if (s < 0) s = next++; // unused slots keep a stable tail
+        }
 
         const ufbx_matrix geometryMatrix = relativeGeometryTransform(
             node, scene->settings.unit_meters);
@@ -147,10 +171,15 @@ bool EngineMesh::loadFbx(const std::string& path) {
             const ufbx_face face = mesh->faces.data[faceIndex];
             const uint32_t triangleCount = ufbx_triangulate_face(
                 triangleIndices.data(), triangleIndices.size(), mesh, face);
-            const uint32_t material = faceIndex < mesh->face_material.count
-                                          ? mesh->face_material.data[faceIndex]
-                                          : 0;
-            const int outputMaterial = materialBase + int(material);
+            const uint32_t faceMaterial =
+                faceIndex < mesh->face_material.count
+                    ? mesh->face_material.data[faceIndex]
+                    : 0;
+            // Faces with no material assignment come back as UFBX_NO_INDEX;
+            // Unity assigns them to submesh 0.
+            const uint32_t material =
+                faceMaterial == UFBX_NO_INDEX ? 0 : faceMaterial;
+            const int outputMaterial = materialBase + unitySlot[material];
 
             for (uint32_t triangle = 0; triangle < triangleCount; ++triangle) {
                 const uint32_t* indices = &triangleIndices[triangle * 3];

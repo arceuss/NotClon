@@ -365,6 +365,9 @@ private:
     GLuint yargSustain_ = 0, yargBeatline_ = 0;
     GLuint yargMaskMesh_ = 0;
     float yargGroove_ = 0.0f;
+    int hitLightCount_ = 0;
+    float hitLightPos_[15] = {};
+    float hitLightColor_[15] = {};
     GLuint linearCompose_ = 0;
     bool engineUseAo_ = true;
     GLuint avao_ = 0, avbo_ = 0;
@@ -439,6 +442,7 @@ private:
     Tex texYargSpTrim_;
     Tex texYargBeatline_, texYargSustain_, texYargSustainSecondary_;
     Tex texYargOpenSustain_;
+    Tex texYargFretHitFlash_, texYargFretHitRing_;
     Tex texYargGrain_;
     Tex actorFont_, actorMissing_;
     int actorFontWidth_[256] = {};

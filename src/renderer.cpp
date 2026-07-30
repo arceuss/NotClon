@@ -270,6 +270,9 @@ uniform vec3 uRandom;
 uniform float uTime;
 uniform float uWaviness;
 uniform float uGroove;
+uniform int uHitLightCount;
+uniform vec3 uHitLightPos[5];
+uniform vec3 uHitLightColor[5];
 
 float hlslMod(float x, float y) {
     return x-y*trunc(x/y);
@@ -356,6 +359,30 @@ vec3 yargBrdf(vec3 diffuseColor, vec3 specularColor, float smoothness,
     vec3 lightColor = vec3(1.8204746,1.8001208,2.0);
     vec3 radiance = lightColor*max(dot(N,L),0.0);
     vec3 direct = (diffuseColor+specularColor*specularTerm)*radiance;
+    // YARG fret hit light (EffectLight mode Normal): one URP point light
+    // per recently hit fret. The light's culling mask (87) excludes the
+    // layer-7 track and trims, so kinds 6/7 skip the loop. Attenuation is
+    // URP RealtimeLights.hlsl DistanceAttenuation: 1/d^2 windowed by
+    // (1-(d^2/r^2)^2)^2 with range 0.3. Zero lights = untouched output.
+    if (uKind != 6 && uKind != 7) {
+        for (int i = 0; i < uHitLightCount; ++i) {
+            vec3 toLight = uHitLightPos[i]-vWorld;
+            float distSqr = max(dot(toLight,toLight),1e-6);
+            vec3 Lp = toLight*inversesqrt(distSqr);
+            float factor = distSqr*(1.0/0.09);
+            float window = clamp(1.0-factor*factor,0.0,1.0);
+            window *= window;
+            vec3 Hp = normalize(Lp+V);
+            float NoHp = clamp(dot(N,Hp),0.0,1.0);
+            float LoHp = clamp(dot(Lp,Hp),0.0,1.0);
+            float dp = NoHp*NoHp*(roughness2-1.0)+1.00001;
+            float specP = roughness2/
+                (dp*dp*max(0.1,LoHp*LoHp)*normalizationTerm);
+            vec3 radP = uHitLightColor[i]*(window/distSqr)*
+                        max(dot(N,Lp),0.0);
+            direct += (diffuseColor+specularColor*specP)*radP;
+        }
+    }
     float NoV = clamp(dot(N,V),0.0,1.0);
     float fresnel = pow(1.0-NoV,4.0);
     float reflectivity = max(specularColor.r,
@@ -546,12 +573,20 @@ void main() {
             c = vec4(moonStandard(base,0.0,0.5,vec3(0.0)),1.0);
         }
     } else if ((uKind >= 1 && uKind <= 4) || uKind == 12) { // YARG note variants
-        // Material slots (ufbx probe): kinds 1-3 slot 0 = Note_Base (NoteMetal),
-        // slot 2 = Note_Color (NoteGlow); kind 2 slot 1 = NoteHOPOGlow, slot 3
-        // = NoteMiddle; kind 3 slot 1 = NoteMiddle, slot 3 = NoteTapCenter;
-        // kinds 4/12 slot 0 = Open(Hopo)Metal, slot 1 = Open(Hopo)Middle.
-        // The metal list {_Color = white, gold #FFD700 under SP; emission is
-        // DISABLED on those materials} covers slots 0+2 (4/12: slot 0).
+        // vMaterial is the UNITY SUBMESH index: the loader permutes ufbx
+        // slots into face first-use order, which is how Unity's importer
+        // numbers submeshes (engine_mesh.cpp). RectangularTheme.prefab
+        // m_Materials, in that order:
+        //   NormalNote [NoteMetal, NoteMiddle, NoteGlow]
+        //   HOPONote   [NoteMetal, NoteHOPOGlow, NoteGlow, NoteMiddle]
+        //   TapNote    [NoteMetal, NoteMiddle, NoteGlow, NoteTapCenter]
+        // so submesh 0 = Note_Sides (the big wrap), 2 = Note_Base, and the
+        // lane-coloured NoteMiddle lands on the Note_Color top pad.
+        // NoteGlow.mat is visually identical to NoteMetal.mat (white,
+        // metallic 0, smoothness 0.5, _EMISSION_DISABLED), so one metal
+        // branch covers submeshes 0+2; the runtime SetColorWithEmission
+        // colours only the NoteMiddle slot {white under SP, gold metal}.
+        // Kinds 4/12: slot 0 = Open(Hopo)Metal, slot 1 = Open(Hopo)Middle.
         bool starPower = uMaterialState > 0.5;
         bool metalSlot = ((uKind >= 1 && uKind <= 3) &&
                           (vMaterial == 0 || vMaterial == 2)) ||
@@ -1761,6 +1796,8 @@ bool Renderer::init(int w, int h, const std::string& A) {
     texYargSustain_    = engineTex("yarg_sustain.png",true,true,true,true);
     texYargSustainSecondary_ = engineTex("yarg_sustain_secondary.png",true,true,true,true);
     texYargOpenSustain_ = engineTex("yarg_open_sustain.png",true,true,true,true);
+    texYargFretHitFlash_ = engineTex("yarg_fret_hit_flash.png",false,true,true,true);
+    texYargFretHitRing_ = engineTex("yarg_fret_hit_ring.png",false,true,true,true);
     // URP Medium01 film grain (see yarg_grain.SOURCE.txt). The PNG is RGB;
     // URP samples the single-channel alpha import, so swizzle A <- R.
     texYargGrain_      = engineTex("yarg_grain.png",true,false,false);
@@ -1911,6 +1948,15 @@ void Renderer::drawEngineMesh(const EngineGpu& gpu, const Mat4& camera,
     glUniform1i(glGetUniformLocation(engine_, "uKind"), kind);
     glUniform1i(glGetUniformLocation(engine_, "uMaterialFilter"), materialFilter);
     glUniform1f(glGetUniformLocation(engine_, "uMaterialState"),materialState);
+    // YARG fret hit lights (drawEngine refreshes the members every frame;
+    // count is 0 outside the YARG style, keeping every other path's output
+    // untouched).
+    glUniform1i(glGetUniformLocation(engine_, "uHitLightCount"),
+                hitLightCount_);
+    glUniform3fv(glGetUniformLocation(engine_, "uHitLightPos"), 5,
+                 hitLightPos_);
+    glUniform3fv(glGetUniformLocation(engine_, "uHitLightColor"), 5,
+                 hitLightColor_);
     glUniform3f(glGetUniformLocation(engine_, "uRandom"),
                 random ? random[0] : 0.0f,
                 random ? random[1] : 0.0f,
@@ -2128,16 +2174,16 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     };
     const float (*colors)[3] = style == 1 ? moonColors : yargColors;
     const float receptorAlpha = alpha*fminf(1.0f,fmaxf(0.0f,1.0f-mods.dark));
-    // YARG groove state: GrooveMode = ScoreMultiplier == MaxMultiplier (4x,
-    // i.e. combo >= 30 -- ScoreMultiplier = min(combo/10+1, MaxMultiplier),
-    // and gameplay captures show 4x as the maxed badge). The bot never
-    // misses, so this is closed-form: TrackMaterial's per-frame
-    // Lerp(state, 1, dt*5) integrates to 1-exp(-5*dt) from the moment the
-    // 30th combo lands.
+    // YARG gameplay state, closed-form of songTime (the renderer seeks).
+    // Only the groove survives: the overdrive bar, combo meter and sunburst
+    // are deliberately hidden (user decision -- only the SP phrase display
+    // renders), and the groove keeps only the track colour change. Groove =
+    // ScoreMultiplier == MaxMultiplier (4x = combo 30; chords count gems+1),
+    // TrackMaterial lerps it in at dt*5 -> 1-exp(-5*dt).
     yargGroove_ = 0.0f;
     if (style == 2 && !o.noBot) {
-        double grooveStart = -1.0;
         int combo = 0;
+        double tGroove = -1.0;
         for (const Note& note : chart.notes) {
             int gems = note.open ? 1 : 0;
             for (int lane = 0; lane < 5; ++lane)
@@ -2145,12 +2191,12 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             if (gems == 0) continue;
             combo += gems + (gems >= 2 ? 1 : 0);
             if (combo >= 30) {
-                grooveStart = chart.beatToSec(note.beat);
+                tGroove = chart.beatToSec(note.beat);
                 break;
             }
         }
-        if (grooveStart >= 0.0 && songTime > grooveStart)
-            yargGroove_ = 1.0f-expf(-5.0f*float(songTime-grooveStart));
+        if (tGroove >= 0.0 && songTime > tGroove)
+            yargGroove_ = 1.0f-expf(-5.0f*float(songTime-tGroove));
     }
     const float laneStep = style == 1 ? 1.0f : 0.4f;
     // Highway is parented at y=4; the default scene's camYMax is local 11.75.
@@ -3000,6 +3046,37 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         drawLayer(texMoonSustainFretted_.id,ch::BLEND_SPRITE);
     }
 
+    // YARG fret hit light: EffectLight mode Normal holds full intensity for
+    // _fadeOutRate = 100 ms then hard-cuts (EffectLight.cs:53-70,96-101).
+    // Point Light: intensity 4, range 0.3, offset (0,0.220,-0.0046) from the
+    // fret root (Light local (0,0.147,-0.0156) under Hit Effects
+    // (0,0.073,0.011)); color = the fret's particle colour. Uploaded (and
+    // zeroed) every frame so an editor style switch cannot leak stale
+    // lights into the Moonscraper path.
+    {
+        int lightCount = 0;
+        float lightPos[15] = {};
+        float lightColor[15] = {};
+        if (style != 1 && !o.noBot) {
+            for (int lane = 0; lane < 5; ++lane) {
+                const double dt = lastHit(lane,songTime);
+                if (dt < 0.0 || dt >= 0.1) continue;
+                const float yOff = modYOffset(songTime,lane);
+                const float pos = scrollOffset(songTime,lane);
+                const float bump = GetYPosBump(mods,lane,yOff,float(beat),
+                                               bpm)*laneStep/64.0f;
+                lightPos[lightCount*3+0] = modX(lane,yOff);
+                lightPos[lightCount*3+1] = bump+0.220f;
+                lightPos[lightCount*3+2] = -2.0046f+pos;
+                for (int c = 0; c < 3; ++c)
+                    lightColor[lightCount*3+c] = colors[lane][c]*4.0f;
+                ++lightCount;
+            }
+        }
+        hitLightCount_ = lightCount;
+        std::memcpy(hitLightPos_,lightPos,sizeof(lightPos));
+        std::memcpy(hitLightColor_,lightColor,sizeof(lightColor));
+    }
     // YARG's rectangular fret hierarchy is a pair of nested source transforms.
     if (style != 1) {
         bool fretHeld[5] = {};
@@ -3202,6 +3279,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
             glUniform1i(glGetUniformLocation(yargBeatline_,"uTex"),0);
             drawYargQuads(yargBeatLines);
 
+
             struct SoloDraw {
                 double start = 0.0, end = 0.0;
                 bool startCap = true, endCap = true;
@@ -3352,6 +3430,115 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         sustainPass(yargOpenSustainsActive,true,true);
         sustainPass(yargFrettedSustains,false,false);
         sustainPass(yargFrettedSustainsActive,false,true);
+
+        // Fret hit effects (EffectGroup under the fret at local
+        // (0,0.073,0.011)): the flipbook flash (2x10 grid, random row per
+        // hit, both frames over its life via the eased frameOverTime curve),
+        // the 200-dot expanding ring, and the point light uploaded above.
+        // Smoke, sparkles and shards are not ported.
+        if (!o.noBot) {
+            std::vector<ch::Vtx> flashQuads;
+            std::vector<ch::Vtx> ringQuads;
+            const float camUp[3] = {0.0f,0.9126300f,0.4087821f};
+            auto addBillboard = [&](std::vector<ch::Vtx>& out,float cx,
+                                    float cy,float cz,float hx,float hy,
+                                    float u0,float v0,float u1,float v1,
+                                    const float* color,float a) {
+                ch::Vtx q[4] = {
+                    {cx-hx,cy-camUp[1]*hy,cz-camUp[2]*hy,u0,v0,
+                     color[0],color[1],color[2],a},
+                    {cx+hx,cy-camUp[1]*hy,cz-camUp[2]*hy,u1,v0,
+                     color[0],color[1],color[2],a},
+                    {cx+hx,cy+camUp[1]*hy,cz+camUp[2]*hy,u1,v1,
+                     color[0],color[1],color[2],a},
+                    {cx-hx,cy+camUp[1]*hy,cz+camUp[2]*hy,u0,v1,
+                     color[0],color[1],color[2],a}
+                };
+                const int ix[6] = {0,1,2,0,2,3};
+                for (int i : ix) out.push_back(q[i]);
+            };
+            for (const Note& note : chart.notes) {
+                const double hitSec = chart.beatToSec(note.beat);
+                if (hitSec > songTime) break;
+                const float dt = float(songTime-hitSec);
+                if (dt >= 0.5f) continue;
+                int lanes[6], laneCount = 0;
+                if (note.open) lanes[laneCount++] = 5;
+                for (int lane = 0; lane < 5; ++lane)
+                    if (note.frets & (1 << lane)) lanes[laneCount++] = lane;
+                for (int li = 0; li < laneCount; ++li) {
+                    const int lane = lanes[li];
+                    // Open notes query the mods at column 2 (the ArrowEffects
+                    // port has five columns) and tint from colors[5].
+                    const int modCol = lane == 5 ? 2 : lane;
+                    const float in = modYOffset(songTime,modCol);
+                    const float x = modX(modCol,in);
+                    const float bump = GetYPosBump(mods,modCol,in,float(beat),
+                                                   bpm)*laneStep/64.0f;
+                    const float* color = lane == 5 ? colors[5]
+                                                   : colors[lane];
+                    unsigned seed = unsigned(note.tick)*747796405u ^
+                                    unsigned(lane+1)*2891336453u;
+                    if (seed == 0) seed = 1;
+                    // Flash: child at (0.001,0.249,-0.077) under Hit
+                    // Effects; startSize 0.7x0.6, lifetime random 0.3-0.4 s
+                    // at simulationSpeed 2, colorOverLifetime alpha
+                    // 0.706 -> 0 linear, SrcAlpha-additive.
+                    const float life = (0.3f+0.1f*(yargRandomSigned(seed)*
+                                                   0.5f+0.5f))*0.5f;
+                    // Row is drawn from the stream unconditionally so the
+                    // ring's dot angles below stay fixed after the flash
+                    // window closes.
+                    const int row = int((yargRandomSigned(seed)*0.5f+
+                                         0.5f)*9.999f);
+                    const float fdt = dt-0.01f;
+                    if (fdt >= 0.0f && fdt < life) {
+                        const float progress = fdt/life;
+                        const int frame = progress > 0.5f ? 1 : 0;
+                        const float u0 = frame*0.5f, u1 = u0+0.5f;
+                        const float v1 = 1.0f-row*0.1f, v0 = v1-0.1f;
+                        addBillboard(flashQuads,x,0.322f+bump,-2.066f,
+                                     0.35f,0.30f,u0,v0,u1,v1,color,
+                                     0.706f*(1.0f-progress));
+                    }
+                    // Ring: 200-particle burst, cone angle 90 / radius ~0 =
+                    // a flat radial spray in the emitter's local XY plane
+                    // (vertical, facing down-track). Ring child at
+                    // (0,-0.031,0) with scale (0.2418,0.2418,0.1313);
+                    // startSpeed 4 local -> 0.967 u/s world, startLifetime
+                    // 0.5 s at simulationSpeed 1, startSize 0.05 local
+                    // (~0.012 world) scaled by the eased sizeOverLifetime
+                    // 0 -> 1 curve, alpha 0.294 x (1-t) colorOverLifetime.
+                    if (dt < 0.5f) {
+                        const float t = dt/0.5f;
+                        const float radius = 0.967f*dt;
+                        const float grow = 1.0f-(1.0f-t)*(1.0f-t);
+                        const float dotHalf = 0.006f*grow;
+                        const float dotAlpha = 0.294f*(1.0f-t);
+                        for (int k = 0; k < 200; ++k) {
+                            unsigned dotSeed = seed ^ (unsigned(k)*
+                                                       0x9E3779B9u);
+                            const float ang = 6.2831853f*
+                                (yargRandomSigned(dotSeed)*0.5f+0.5f);
+                            addBillboard(ringQuads,
+                                         x+cosf(ang)*radius,
+                                         0.042f+bump+sinf(ang)*radius,
+                                         -1.989f,
+                                         dotHalf,dotHalf,
+                                         0.0f,0.0f,1.0f,1.0f,
+                                         color,dotAlpha);
+                        }
+                    }
+                }
+            }
+            sceneSetup();
+            glDepthMask(GL_FALSE);
+            v_ = std::move(ringQuads);
+            drawLayer(texYargFretHitRing_.id,ch::BLEND_ADD);
+            v_ = std::move(flashQuads);
+            drawLayer(texYargFretHitFlash_.id,ch::BLEND_ADD);
+            glDepthMask(GL_TRUE);
+        }
     }
 
     if (style == 1) {
