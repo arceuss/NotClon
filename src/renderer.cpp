@@ -2038,7 +2038,16 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     const float compositeAlpha = alpha * fieldAlpha;
     if (moonIsolated || yargLinear) fieldTint_[3] = 1.0f;
     if (moonIsolated) {
-        const int targetW = std::max(1,engineTargetViewport[2]);
+        // Each field is its own engine WINDOW: the scene FBO takes the
+        // field's rect and the camera fits that rect's aspect, exactly a
+        // real Moonscraper/YARG window that size. The old model rendered
+        // full-frame with an NDC place squeeze -- YARG's 16:9 reference
+        // fit then shrank the scene AGAIN, the "tiny second-player
+        // highway". Engine fields hard-clip at their rect; charts that
+        // push fields through each other drive the actor-proxy
+        // mvpOverride path, which keeps its own target.
+        const int targetW = std::max(1, mvpOverride
+                                     ? engineTargetViewport[2] : vpW);
         const int targetH = std::max(1,engineTargetViewport[3]);
         if (targetW != moonSceneW_ || targetH != moonSceneH_) {
             glBindTexture(GL_TEXTURE_2D,moonSceneTex_);
@@ -2061,7 +2070,8 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     }
     if (yargLinear) {
-        const int targetW = std::max(1,engineTargetViewport[2]);
+        const int targetW = std::max(1, mvpOverride
+                                     ? engineTargetViewport[2] : vpW);
         const int targetH = std::max(1,engineTargetViewport[3]);
         if (targetW != yargW_ || targetH != yargH_) {
             glBindTexture(GL_TEXTURE_2D,yargTex_);
@@ -2119,14 +2129,13 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     }
     if (moonIsolated || yargLinear) alpha = 1.0f;
 
+    // Full-frame aspect regardless of the field rect: the two-player
+    // convention (established by the CH path and the accepted Moonscraper
+    // look) is full-frame proportions compressed into the half, not a
+    // per-window refit -- YARG's 16:9 reference fit on a half-width window
+    // letterboxes the track small, the "tiny second player highway".
     Mat4 camera = mvpOverride ? *mvpOverride
-                              : engineCamera(style, float(vpW) / float(H));
-    if (!mvpOverride && (vpX != 0 || vpW != W)) {
-        Mat4 place = engineIdentity();
-        place.m[0] = float(vpW) / float(W);
-        place.m[12] = float(2 * vpX + vpW) / float(W) - 1.0f;
-        camera = mat_mul(place, camera);
-    }
+                              : engineCamera(style, float(W) / float(H));
 
     float zoom = 1.0f - 0.5f * mods.mini;
     if (mods.tilt > 0.0f) zoom *= 1.0f - 0.1f * mods.tilt;
@@ -2152,7 +2161,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
     camera = mat_mul(camera, root);
     Mat4 glowCamera = camera;
     if (style == 1 && !mvpOverride)
-        glowCamera = mat_mul(engineCamera(1,float(vpW)/float(H),false),root);
+        glowCamera = mat_mul(engineCamera(1,float(W)/float(H),false),root);
 
     static const float moonColors[6][3] = {
         {0.07450981f,1.0f,0.0f}, {1.0f,0.0f,0.0f},
@@ -3707,7 +3716,9 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                           GL_COLOR_BUFFER_BIT,GL_NEAREST);
         if (!o.noPost) {
         const bool embedded = mvpOverride != nullptr;
-        const int glowDstX = embedded ? 0 : vpX+int(0.122f*float(vpW));
+        // The scene FBO is the field's own rect now, so the active-3D-rect
+        // band is relative to it -- no vpX offset.
+        const int glowDstX = embedded ? 0 : int(0.122f*float(vpW));
         const int glowDstY = 0;
         const int glowDstW = std::max(1,embedded ? engineTargetViewport[2]
                                                 : int(0.78f*float(vpW)));
@@ -3894,8 +3905,13 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
 
     if (moonIsolated) {
         glBindFramebuffer(GL_FRAMEBUFFER,GLuint(engineTargetFbo));
-        glViewport(engineTargetViewport[0],engineTargetViewport[1],
-                   engineTargetViewport[2],engineTargetViewport[3]);
+        // Composite into the field's rect only: the scene FBO is rect-sized
+        // and its opaque black belongs to this field's window, not the
+        // other player's half.
+        glViewport(engineTargetViewport[0]+(mvpOverride ? 0 : vpX),
+                   engineTargetViewport[1],
+                   mvpOverride ? engineTargetViewport[2] : vpW,
+                   engineTargetViewport[3]);
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         glDisable(GL_CULL_FACE);
@@ -4022,8 +4038,10 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         }
 
         glBindFramebuffer(GL_FRAMEBUFFER,GLuint(engineTargetFbo));
-        glViewport(engineTargetViewport[0],engineTargetViewport[1],
-                   engineTargetViewport[2],engineTargetViewport[3]);
+        glViewport(engineTargetViewport[0]+(mvpOverride ? 0 : vpX),
+                   engineTargetViewport[1],
+                   mvpOverride ? engineTargetViewport[2] : vpW,
+                   engineTargetViewport[3]);
         glEnable(GL_BLEND);
         glBlendFunc(GL_ONE,GL_ONE_MINUS_SRC_ALPHA);
         glUseProgram(linearCompose_);
