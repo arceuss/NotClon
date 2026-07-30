@@ -451,7 +451,9 @@ vec3 yargRectangularNote() {
     const float gradientStart = 18311.0/65535.0;
     float emissionMask = clamp((dark.r-gradientStart)/(1.0-gradientStart),
                                0.0,1.0);
-    return yargMetallic(baseColor,0.0,0.0,uColor*emissionMask*0.1,1.0);
+    // Smoothness block is unconnected in the graph -> ShaderGraph's inline
+    // default 0.5 (the material's _Smoothness override is never referenced).
+    return yargMetallic(baseColor,0.0,0.5,uColor*emissionMask*0.1,1.0);
 }
 
 float pow5(float x) {
@@ -592,7 +594,8 @@ void main() {
                           (vMaterial == 0 || vMaterial == 2)) ||
                          ((uKind == 4 || uKind == 12) && vMaterial == 0);
         if (metalSlot) {
-            vec3 metalColor = starPower ? vec3(1.0,215.0/255.0,0.0)
+            // SP gold #FFD700, srgbToLinear'd like every Color property.
+            vec3 metalColor = starPower ? vec3(1.0,0.6795425,0.0)
                                         : vec3(1.0);
             vec3 art = (uKind == 12 ? texture(uTex2,vUV).rgb
                                     : texture(uTex,vUV).rgb)*metalColor;
@@ -624,8 +627,10 @@ void main() {
                                   art*uColor*8.0,1.0),1.0);
         } else {
             // OpenHopoMiddle: realColor = color + (1,1,1) (Addition 1),
-            // EmissionMap = Note_Full_HOPO.png, x8.
-            vec3 realColor = uColor+vec3(1.0);
+            // EmissionMap = Note_Full_HOPO.png, x8. uColor already carries
+            // srgbToLinear(srgb + 1) -- NoteGroup.cs:82 adds BEFORE Unity's
+            // colorspace conversion at SetColor time.
+            vec3 realColor = uColor;
             vec3 art = texture(uTex,vUV).rgb;
             vec3 emissionMap = texture(uTex2,vUV).rgb;
             c = vec4(yargMetallic(art*realColor,0.0,0.0,
@@ -2164,14 +2169,25 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         {1.0f,0.7241379f,0.0f}
     };
     static const float moonOpenSustain[3] = {0.9915822f,0.3897059f,1.0f};
+    // ColorProfile.Defaults.cs lane colors are authored in sRGB; YARG is a
+    // Linear project, and Unity converts Color properties sRGB->linear when
+    // uploading (same reason the albedo textures load GL_SRGB8_ALPHA8).
+    // These are srgbToLinear(hex/255): green #79D304, red #FF1D23, yellow
+    // #FFE900, blue #00BFFF, orange #FF8400, open purple #C800FF.
     static const float yargColors[6][3] = {
-        {121.0f/255.0f,211.0f/255.0f,4.0f/255.0f},
-        {1.0f,29.0f/255.0f,35.0f/255.0f},
-        {1.0f,233.0f/255.0f,0.0f},
-        {0.0f,191.0f/255.0f,1.0f},
-        {1.0f,132.0f/255.0f,0.0f},
-        {200.0f/255.0f,0.0f,1.0f}
+        {0.1912017f,0.6514056f,0.0012141f},
+        {1.0f,0.0122865f,0.0168074f},
+        {1.0f,0.8148466f,0.0f},
+        {0.0f,0.5209956f,1.0f},
+        {1.0f,0.23074f,0.0f},
+        {0.5775804f,0.0f,1.0f}
     };
+    // Open-HOPO middles: NoteGroup.cs:82 does color + (1,1,1) in sRGB space
+    // BEFORE Unity's SetColor sRGB->linear conversion, so the sum converts
+    // as a whole: srgbToLinear(purple/white + 1).
+    static const float yargOpenHopoColor[3] = {3.7963657f,1.0f,4.9538458f};
+    static const float yargOpenHopoSp[3] = {4.9538458f,4.9538458f,
+                                            4.9538458f};
     const float (*colors)[3] = style == 1 ? moonColors : yargColors;
     const float receptorAlpha = alpha*fminf(1.0f,fmaxf(0.0f,1.0f-mods.dark));
     // YARG gameplay state, closed-form of songTime (the renderer seeks).
@@ -3113,9 +3129,32 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                                                0.0000020f,0.19734741f,
                                                0.10530957f,0.0801998f);
             const Mat4 fret = mat_mul(fretRoot,mat_mul(fretParent,fretMesh));
-            drawEngineMesh(yargFret_,camera,fret,5,colors[lane],receptorAlpha,
+            // FretHit.anim pops the colour shell (mesh 0 = materials 0/1)
+            // +0.38 raw units along the FBX node's local z over 133 ms
+            // (keys 0 -> peak at 66.7 ms -> 0, auto tangents = a smoothstep
+            // hump). FretSustained.anim is the same hump at 0.06 amplitude
+            // with m_LoopTime 1, looping while the Sustain bool holds. The
+            // base plate (material 2) never moves.
+            float popZ = 0.0f;
+            if (!o.noBot) {
+                const float dt = float(lastHit(lane,songTime));
+                auto hump = [](float t) {
+                    float u = t/0.06666667f;
+                    if (u < 0.0f || u >= 2.0f) return 0.0f;
+                    u = u < 1.0f ? u : 2.0f-u;
+                    return u*u*(3.0f-2.0f*u);
+                };
+                if (dt >= 0.0f && dt < 0.13333334f)
+                    popZ = 0.38f*hump(dt);
+                else if (fretHeld[lane] && dt >= 0.0f)
+                    popZ = 0.06f*hump(fmodf(dt,0.13333334f));
+            }
+            const Mat4 shell = popZ != 0.0f
+                ? mat_mul(fret,engineTranslate(0.0f,0.0f,popZ))
+                : fret;
+            drawEngineMesh(yargFret_,camera,shell,5,colors[lane],receptorAlpha,
                            texYargFret_.id,texYargFretShine_.id,0,0.0f,0);
-            drawEngineMesh(yargFret_,camera,fret,5,colors[lane],receptorAlpha,
+            drawEngineMesh(yargFret_,camera,shell,5,colors[lane],receptorAlpha,
                            texYargFret_.id,texYargFretShine_.id,0,0.0f,1,
                            fretHeld[lane] ? 1.0f : 0.0f);
             drawEngineMesh(yargFret_,camera,fret,5,colors[lane],receptorAlpha,
@@ -3153,7 +3192,11 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                                     engineScale(0.07593973f,0.087584f,0.05f)));
                         drawEngineMesh(yargOpen_,camera,model,
                                        openHopo ? 12 : 4,
-                                       starPower ? white : colors[5],alpha*fade,
+                                       openHopo
+                                           ? (starPower ? yargOpenHopoSp
+                                                        : yargOpenHopoColor)
+                                           : (starPower ? white : colors[5]),
+                                       alpha*fade,
                                        texYargOpenNote_.id,texYargOpenHopo_.id,
                                        0,0.0f,-1,starPower ? 1.0f : 0.0f);
                         yargMaskDraws.push_back({&yargOpen_,model});
@@ -3439,6 +3482,7 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         if (!o.noBot) {
             std::vector<ch::Vtx> flashQuads;
             std::vector<ch::Vtx> ringQuads;
+            std::vector<ch::Vtx> sparkQuads;
             const float camUp[3] = {0.0f,0.9126300f,0.4087821f};
             auto addBillboard = [&](std::vector<ch::Vtx>& out,float cx,
                                     float cy,float cz,float hx,float hy,
@@ -3529,12 +3573,54 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                                          color,dotAlpha);
                         }
                     }
+                    // Sparkles: rateOverTime 228.21 over duration 0.3 at
+                    // simulationSpeed 2 -> ~68 particles across a real
+                    // 0.15 s window, each living 0.15 s real. Emitter under
+                    // Hit Effects at (0,-0.073,0.022) (track level, z fret
+                    // +0.033), tilted -56.6 deg about X, so local +z rises
+                    // at (0,0.834,0.551) and local +y at (0,0.551,-0.834);
+                    // velocityOverLifetime z rand 0..1.5, y rand 0..0.1
+                    // (x2 for the sim speed). White (allowColoring 0),
+                    // straight alpha (ParticleTransparent), startSize rand
+                    // 0..0.025, size holds then shrinks to 0 over the last
+                    // half, alpha fades to 0.0176. Spawn spread = shape
+                    // radius 0.3 x transform scale.x 0.437.
+                    if (dt < 0.3f) {
+                        for (int k = 0; k < 68; ++k) {
+                            unsigned ss = seed ^ (unsigned(k+1)*
+                                                  0x85EBCA6Bu);
+                            const float birth = (yargRandomSigned(ss)*0.5f+
+                                                 0.5f)*0.15f;
+                            const float age = dt-birth;
+                            if (age < 0.0f || age >= 0.15f) continue;
+                            const float t = age/0.15f;
+                            const float vz = (yargRandomSigned(ss)*0.5f+
+                                              0.5f)*3.0f;
+                            const float vy = (yargRandomSigned(ss)*0.5f+
+                                              0.5f)*0.2f;
+                            const float sx = x+yargRandomSigned(ss)*0.131f;
+                            const float half = (yargRandomSigned(ss)*0.5f+
+                                                0.5f)*0.0125f;
+                            const float shrink = t < 0.5f
+                                ? 1.0f : 1.0f-(t-0.5f)*2.0f;
+                            const float sparkAlpha = 1.0f-0.98235f*t;
+                            addBillboard(sparkQuads,
+                                         sx,
+                                         bump+(vz*0.834f+vy*0.551f)*age,
+                                         -1.967f+(vz*0.551f-vy*0.834f)*age,
+                                         half*shrink,half*shrink,
+                                         0.0f,0.0f,1.0f,1.0f,
+                                         white,sparkAlpha);
+                        }
+                    }
                 }
             }
             sceneSetup();
             glDepthMask(GL_FALSE);
             v_ = std::move(ringQuads);
             drawLayer(texYargFretHitRing_.id,ch::BLEND_ADD);
+            v_ = std::move(sparkQuads);
+            drawLayer(texYargFretHitRing_.id,ch::BLEND_SPRITE);
             v_ = std::move(flashQuads);
             drawLayer(texYargFretHitFlash_.id,ch::BLEND_ADD);
             glDepthMask(GL_TRUE);
