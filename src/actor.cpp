@@ -1655,6 +1655,10 @@ bool ActorTree::playerMods(int pn, float beat, Mods& mods, PostFx& fx,
     return lua_ && lua_->playerMods(pn - 1, beat, mods, fx, mx, my, mz);
 }
 
+bool ActorTree::overlayPlayerValues(int pn, float* values) const {
+    return lua_ && lua_->overlayPlayerValues(pn - 1, values);
+}
+
 bool ActorTree::playerModSnapshot(int pn, PlayerModSnapshot& out) const {
     return lua_ && lua_->playerModSnapshot(pn - 1, out);
 }
@@ -3491,6 +3495,7 @@ void LuaHost::advancePlayerOptions(double sec) {
 }
 
 void LuaHost::recordPlayerModChange(int pn, int id) {
+    poTouched_[pn][id] = true;
     poChanges_.push_back(PlayerModChange{
         sec_, pn + 1, id, poTarget_[pn][id], poSpeed_[pn][id]});
 }
@@ -3623,6 +3628,16 @@ bool LuaHost::playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                          float& mx, float& my, float& mz) const {
     if (pn < 0 || pn >= requestedPlayers_) return false;
     modValuesToState(poCurrent_[pn], beat, mods, fx, mx, my, mz);
+    return true;
+}
+
+bool LuaHost::overlayPlayerValues(int pn, float* values) const {
+    if (pn < 0 || pn >= requestedPlayers_) return false;
+    // Only knobs Lua has ever written shadow the document; a virgin knob's
+    // reset-to-default in rebuildPlayerOptionsFromAttacks never records a
+    // change, so it stays with the .ncmod.
+    for (int id = 0; id < MOD_COUNT; ++id)
+        if (poTouched_[pn][id]) values[id] = poCurrent_[pn][id];
     return true;
 }
 
@@ -3760,6 +3775,7 @@ bool LuaHost::open(std::string& err) {
             poCurrent_[pn][id] = modDefault(id);
             poTarget_[pn][id] = modDefault(id);
             poSpeed_[pn][id] = 1.0f;
+            poTouched_[pn][id] = false;
         }
     poClock_ = -1.0;
     requestedPlayers_ = 0;
@@ -4206,6 +4222,14 @@ bool ActorLayer::playerMods(int pn, double sec, float beat, Mods& mods,
     for (const Slot& sl : trees_)
         if (sl.tree && sl.tree->ok() && sec >= sl.e.startSec &&
             sl.tree->playerMods(pn, beat, mods, fx, mx, my, mz))
+            return true;
+    return false;
+}
+
+bool ActorLayer::overlayPlayerValues(int pn, double sec, float* values) const {
+    for (const Slot& sl : trees_)
+        if (sl.tree && sl.tree->ok() && sec >= sl.e.startSec &&
+            sl.tree->overlayPlayerValues(pn, values))
             return true;
     return false;
 }

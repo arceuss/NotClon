@@ -5116,14 +5116,31 @@ Renderer::FieldEval Renderer::evalField(const Chart& chart, double beat,
     // The strike line in screen UV, for shaders that want to protect or
     // target the playfield. Filled by the background block below and reused
     // by the --fxshader pass; the 0.5,0.5 default is screen centre.
-    const bool livePlayerOptions = actors_ &&
-        actors_->playerMods(plr, fieldSec_, float(beat), mods, fx, mx, my, mz);
-    if (!livePlayerOptions && doc) {
-        doc->evalAt(chart, beat * chart.resolution, mods, fx, mx, my, mz,
-                      bg_ ? bgKnobs : nullptr);
-        bgDriven = doc->bgUsedMask();
+    // OITG composition, not a switch: the .ncmod is the offline stand-in
+    // for m_StoredPlayerOptions (the base the engine rebuilds from,
+    // GameState.cpp:1350), and the Lua runtime's live PlayerOptions overlay
+    // ONLY the knobs Lua has actually written. The old either/or here made
+    // any Lua modfile disregard the whole document -- an ncmod's
+    // moonscraper/yarg style knob silently fell back to CH. Once Lua
+    // touches a knob it shadows the doc for that knob from then on
+    // (including "no X" = Lua-owned zero), matching live-state semantics.
+    {
+        float v[MOD_SLOTS];
+        if (doc) {
+            doc->evalAt(chart, beat * chart.resolution, v);
+            if (bg_) memcpy(bgKnobs, v + MOD_BG_BASE,
+                            MAX_BG_UNIFORMS * sizeof(float));
+            bgDriven = doc->bgUsedMask();
+        } else {
+            for (int i = 0; i < MOD_SLOTS; ++i) v[i] = modDefault(i);
+        }
+        const bool livePlayerOptions = actors_ &&
+            actors_->overlayPlayerValues(plr, fieldSec_, v);
+        if (doc || livePlayerOptions)
+            modValuesToState(v, float(beat), mods, fx, mx, my, mz);
+        else
+            modchartAt(beat, mods, fx);
     }
-    else if (!livePlayerOptions) modchartAt(beat, mods, fx);
     if (o.noMods) { mods = Mods{}; mx = my = mz = 0; bgDriven = 0; }
 
     // `piu` is a transition, not a switch. The pad slides in from the top of

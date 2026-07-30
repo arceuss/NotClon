@@ -304,6 +304,10 @@ public:
     // player; a drained legacy table remains only a seek/layout fallback.
     bool playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                     float& mx, float& my, float& mz) const;
+    // Touched-knob overlay: writes only the knobs Lua has ever set into the
+    // caller's MOD_SLOTS value array (the .ncmod evaluation), leaving the
+    // document's values everywhere else. Same gating as playerMods.
+    bool overlayPlayerValues(int pn, float* values) const;
     bool playerModSnapshot(int pn, PlayerModSnapshot& out) const;
     void collectPlayerModChanges(std::vector<PlayerModChange>& out) const;
     bool playerState(int pn, double sec, double beat, ActorState& out) const;
@@ -413,6 +417,7 @@ public:
     void  setLegacyXml(bool legacy);
     bool  playerMods(int pn, float beat, Mods& mods, PostFx& fx,
                      float& mx, float& my, float& mz) const;
+    bool  overlayPlayerValues(int pn, float* values) const;
     bool  playerModSnapshot(int pn, PlayerModSnapshot& out) const;
     const std::vector<PlayerModChange>& playerModChanges() const {
         return poChanges_;
@@ -460,6 +465,7 @@ private:
     float poCurrent_[2][MOD_COUNT] = {};
     float poTarget_[2][MOD_COUNT] = {};
     float poSpeed_[2][MOD_COUNT] = {};
+    bool  poTouched_[2][MOD_COUNT] = {};
     double poClock_ = -1.0;
     int requestedPlayers_ = 0;
     bool legacyColumnNames_ = false;
@@ -506,6 +512,7 @@ public:
     bool drawPlayer(Renderer& R, int pn, double sec, double beat);
     bool playerMods(int pn, double sec, float beat, Mods& mods, PostFx& fx,
                     float& mx, float& my, float& mz) const;
+    bool overlayPlayerValues(int pn, double sec, float* values) const;
     bool playerModSnapshot(int pn, double sec, PlayerModSnapshot& out) const;
     void collectPlayerModChanges(std::vector<PlayerModChange>& out) const;
     int livePlayerCount() const;
