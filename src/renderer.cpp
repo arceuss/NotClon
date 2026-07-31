@@ -6,6 +6,7 @@
 #include "renderer.h"
 #include "actor.h"
 #include "background.h"
+#include "gh3_tables.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -203,6 +204,99 @@ void main() {
     vec4 c = texture(uTex, vUV) * vCol;
     if (c.a < 0.002) discard;
     c.rgb *= c.a;                      // premultiplied, as every sprite here is
+    oCol = c;
+}
+)";
+
+// GH3 highway sprites. The vertex shader is PIU_VS plus one varying: the
+// vscreen y, which the fragment shaders need because GH3's highway fade
+// (gHighwayEndFade..gHighwayStartFade, 305..335 in the 1P vscreen) is
+// PER-PIXEL -- smoothstep((y-end)/(start-end)) in the game's shaders. Folding
+// it into vertex alpha is only right when the geometry is tessellated finely
+// (the whammy strip); on a single tall quad like a sidebar or lane string it
+// bleeds the 30px band down the sprite's whole length, which reads as the
+// element "fading too early".
+const char* GH3_SPRITE_VS = R"(#version 330
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec2 aUV;
+layout(location=2) in vec4 aCol;
+out vec2 vUV; out vec4 vCol; out float vScrY;
+uniform mat4 uMVP;
+void main() {
+    vUV = aUV; vCol = aCol; vScrY = aPos.y;
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)";
+
+const char* GH3_SPRITE_FS = R"(#version 330
+in vec2 vUV; in vec4 vCol; in float vScrY;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform vec2 uFade;    // (endY, startY) of the fade-in band; equal = disabled
+void main() {
+    vec4 c = texture(uTex, vUV) * vCol;
+    // The highway fade-in band (gHighwayEndFade..gHighwayStartFade,
+    // 305..335): gems and fretbars materialise softly over the first 30px
+    // below the horizon instead of popping in. Sidebars and strings do NOT
+    // take it -- the real capture shows the sidebar at full brightness at
+    // y=305, so their material templates lack the fade params; their tips
+    // die by their own art alone.
+    if (uFade.y > uFade.x) {
+        float t = clamp((vScrY - uFade.x) / (uFade.y - uFade.x), 0.0, 1.0);
+        c.a *= t * t * (3.0 - 2.0 * t);
+    }
+    if (c.a < 0.002) discard;
+    c.rgb *= c.a;                      // premultiplied, as every sprite here is
+    oCol = c;
+}
+)";
+
+// GH3's whammy (sustain) tail. Ported from the game's own compiled D3D9
+// shaders -- the `WhammyBar` technique of material WhammyBar_UI in
+// DATA/FXFILES/MaterialLibrary.bin.xen, shader indices 683/684 (solid) and
+// 685/686 (glow). See devdocs/spec/gh3-shaders.md for the disassembly.
+//
+// The geometry is built in screen space on the CPU here, so the parts of
+// GH3's vertex shader that place the strip (the lane centreline and the
+// smoothstep highway fade) are folded into the vertices; what genuinely
+// needs a shader is the per-pixel work below, which is why CH's ribbons
+// never needed one.
+const char* GH3_WHAMMY_FS = R"(#version 330
+in vec2 vUV; in vec4 vCol; in float vScrY;
+out vec4 oCol;
+uniform sampler2D uTex;
+uniform vec2 uEdge;      // PS c1.xy: (alpha scale, profile slope)
+uniform int uGlow;
+void main() {
+    vec4 t = texture(uTex, vUV);
+    vec4 c;
+    if (uGlow == 0) {
+        // PS 684. U runs ACROSS the ribbon, so the tile's bottom row is the
+        // tube's cross-section shading; V is 1 down the body and ramps only
+        // over the rounded tip. Material colour and vertex colour are white,
+        // so every colour comes from the texture.
+        c = vec4(t.rgb * vCol.rgb, t.a * vCol.a);
+    } else {
+        // PS 686. A triangular cross-strip profile smoothstepped over
+        // 1/(1+slope) of the width -- with slope -0.3 that saturates across
+        // the middle 70% and falls off over the outer 15% each side. RGB is
+        // ONE fixed texel of the same sheet (0.9, 0.9), not the tile, which
+        // is what makes the glow a flat lane-coloured bloom.
+        float prof = 1.0 - abs(2.0 * vUV.x - 1.0);
+        float g = clamp(prof / (1.0 + uEdge.y), 0.0, 1.0);
+        float edge = g * g * (3.0 - 2.0 * g);
+        // PS 686 applies the vertex colour twice, to both rgb and alpha.
+        c = vec4(texture(uTex, vec2(0.9)).rgb * vCol.rgb * vCol.rgb,
+                 edge * vUV.y * t.a * vCol.a * vCol.a * uEdge.x);
+    }
+    // The highway fade, per pixel like the game's own shaders. The glow pass
+    // multiplies (vcol.a * fade) into alpha twice, so the band squares there.
+    float ft = clamp((vScrY - 305.0) / 30.0, 0.0, 1.0);
+    float fade = ft * ft * (3.0 - 2.0 * ft);
+    c.a *= (uGlow == 0) ? fade : fade * fade;
+    if (c.a < 0.002) discard;
+    // Premultiplying folds GH3's SRC_ALPHA,ONE additive glow into ONE,ONE.
+    c.rgb *= c.a;
     oCol = c;
 }
 )";
@@ -1811,6 +1905,63 @@ bool Renderer::init(int w, int h, const std::string& A) {
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_G,GL_ONE);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_B,GL_ONE);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_SWIZZLE_A,GL_RED);
+    // GH3 board sprites (see gh3.SOURCE.txt). Plain display-space 2D art like
+    // the CH/Moonscraper sets: no srgb, no flip, no mipmaps.
+    texGh3Fretbar_[0] = engineTex("gh3_fretbar_small.png",false,false,false);
+    texGh3Fretbar_[1] = engineTex("gh3_fretbar_medium.png",false,false,false);
+    texGh3Fretbar_[2] = engineTex("gh3_fretbar_large.png",false,false,false);
+    texGh3String_     = engineTex("gh3_string.png",false,false,false);
+    texGh3Sidebar_    = engineTex("gh3_sidebar.png",false,false,false);
+    {
+        const char* gcol[5] = {"green","red","yellow","blue","orange"};
+        for (int i = 0; i < 5; ++i) {
+            const std::string c = gcol[i];
+            texGh3NowbarMid_[i] =
+                engineTex(("gh3_nowbar_mid_"+c+".png").c_str(),false,false,false);
+            texGh3NowbarLip_[i] =
+                engineTex(("gh3_nowbar_lip_"+c+".png").c_str(),false,false,false);
+            texGh3NowbarHead_[i] =
+                engineTex(("gh3_nowbar_head_"+c+".png").c_str(),false,false,false);
+            texGh3NowbarDown_[i] =
+                engineTex(("gh3_nowbar_down_"+c+".png").c_str(),false,false,false);
+            texGh3NowbarHeadLit_[i] =
+                engineTex(("gh3_nowbar_head_"+c+"_lit.png").c_str(),false,false,false);
+            texGh3Gem_[i] =
+                engineTex(("gh3_gem_"+c+".png").c_str(),false,false,false);
+            texGh3GemHammer_[i] =
+                engineTex(("gh3_gem_"+c+"_hammer.png").c_str(),false,false,false);
+            texGh3Star_[i] =
+                engineTex(("gh3_star_"+c+".png").c_str(),false,false,false);
+            texGh3StarHammer_[i] =
+                engineTex(("gh3_star_"+c+"_hammer.png").c_str(),false,false,false);
+            texGh3Tap_[i] =
+                engineTex(("gh3_tap_"+c+".png").c_str(),false,false,false);
+            texGh3TapSp_[i] =
+                engineTex(("gh3_tap_sp_"+c+".png").c_str(),false,false,false);
+            // Clamp, not repeat: the native tail maps ONE tile -- cap at the
+            // far tip, body clamped to the tile's opaque bottom edge.
+            texGh3Whammy_[i] =
+                engineTex(("gh3_whammy_"+c+".png").c_str(),false,false,false);
+        }
+        texGh3NowbarNeck_ = engineTex("gh3_nowbar_neck.png",false,false,false);
+        texGh3Open_       = engineTex("gh3_open_strum.png",false,false,false);
+        texGh3OpenHopo_   = engineTex("gh3_open_hopo.png",false,false,false);
+        texGh3OpenSp_     = engineTex("gh3_open_strum_sp.png",false,false,false);
+        texGh3OpenHopoSp_ = engineTex("gh3_open_hopo_sp.png",false,false,false);
+        texGh3WhammySp_   = engineTex("gh3_whammy_sp.png",false,false,false);
+        texGh3WhammyDead_ = engineTex("gh3_whammy_dead.png",false,false,false);
+        texGh3OpenSus_    = engineTex("gh3_open_sustain.png",false,false,false);
+        texGh3OpenSusDead_= engineTex("gh3_open_sustain_dead.png",false,false,false);
+    }
+    {   // 1x1 white: vertex colour becomes the fill (GH3's black highway).
+        unsigned char white[4] = {255, 255, 255, 255};
+        glGenTextures(1, &texWhite_.id);
+        glBindTexture(GL_TEXTURE_2D, texWhite_.id);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, white);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
     actorFont_  = gl_loadTex(A + "fonts/_eurostile normal (mipmaps) 16x16.png", false);
     actorMissing_ = gl_loadTex(A + "_missing.png", false, false);
     int rawFontWidth[256];
@@ -1838,6 +1989,8 @@ bool Renderer::init(int w, int h, const std::string& A) {
     susGlow_ = gl_program(SCENE_VS, SUSTAIN_GLOW_FS, "sustainGlow");
     actor_   = gl_program(ACTOR_VS, ACTOR_FS, "actor");
     piu_     = gl_program(PIU_VS, PIU_FS, "piu");
+    gh3Sprite_ = gl_program(GH3_SPRITE_VS, GH3_SPRITE_FS, "gh3sprite");
+    gh3Whammy_ = gl_program(GH3_SPRITE_VS, GH3_WHAMMY_FS, "gh3whammy");
     engine_  = gl_program(ENGINE_VS, ENGINE_FS, "engine");
     engineGlow_ = gl_program(ENGINE_VS, ENGINE_GLOW_FS, "engineGlow");
     yargEffect_ = gl_program(SCENE_VS,YARG_EFFECT_FS,"yargEffect");
@@ -4214,6 +4367,40 @@ static Mat4 piuFieldLocal(const Mods& mods, double beat, float centerX) {
     return mat_mul(effect, local);
 }
 
+// The GH3 field's whole-field transform: tilt/wag/mini exactly as
+// piuFieldLocal does them, but conjugated about the strike line's centre
+// (640, 655) in the vscreen -- the point the player watches -- and with the
+// re-translation folded in because the GH3 projection carries no placement
+// step of its own.
+static Mat4 gh3FieldLocal(const Mods& mods, double beat) {
+    const float tilt = -30.0f * mods.tilt * 3.14159265f / 180.0f;
+    const float wag = mods.wag * 21.0f * sinf(float(beat) * 3.14159265f) *
+                      3.14159265f / 180.0f;
+    float zoom = 1.0f - 0.5f * mods.mini;
+    if (mods.tilt > 0.0f)      zoom *= 1.0f - 0.1f * mods.tilt;
+    else if (mods.tilt < 0.0f) zoom *= 1.0f + 0.1f * mods.tilt;
+
+    const float cx = cosf(tilt), sx = sinf(tilt);
+    const float cz = cosf(wag),  sz = sinf(wag);
+    Mat4 effect{};
+    effect.m[0]  = zoom *  cz;
+    effect.m[1]  = zoom *  sz * cx;
+    effect.m[2]  = zoom * -sz * sx;
+    effect.m[4]  = zoom * -sz;
+    effect.m[5]  = zoom *  cz * cx;
+    effect.m[6]  = zoom * -cz * sx;
+    effect.m[9]  = zoom *  sx;
+    effect.m[10] = zoom *  cx;
+    effect.m[15] = 1.0f;
+
+    Mat4 fwd{}, back{};
+    fwd.m[0] = fwd.m[5] = fwd.m[10] = fwd.m[15] = 1.0f;
+    fwd.m[12] = -640.0f; fwd.m[13] = -655.0f;
+    back.m[0] = back.m[5] = back.m[10] = back.m[15] = 1.0f;
+    back.m[12] = 640.0f; back.m[13] = 655.0f;
+    return mat_mul(back, mat_mul(effect, fwd));
+}
+
 // The PIU playfield.
 //
 // NOT the CH highway wearing pump sprites: pump has no neck, no sidebars, no
@@ -4567,6 +4754,706 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
     for (int i = 0; i < 3; ++i) { v_ = vTapGlow[i]; drawPiuLayer(texPiuTap_[i].id, ch::BLEND_ADD); }
     v_ = vFlash; drawPiuLayer(texPiuFlash_.id, ch::BLEND_ADD);
     for (int i = 0; i < 3; ++i) { v_ = vExpl[i];  drawPiuLayer(texPiuTap_[i].id, ch::BLEND_ADD); }
+}
+
+void Renderer::drawGh3Layer(GLuint tex, int blend, bool fade) {
+    if (v_.empty()) return;
+    applyFieldTint();
+    glUseProgram(gh3Sprite_);
+    glBlendFunc(blend == ch::BLEND_ADD ? GL_ONE : GL_ONE,
+                blend == ch::BLEND_ADD ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform2f(glGetUniformLocation(gh3Sprite_, "uFade"),
+                fade ? 305.0f : 0.0f, fade ? 335.0f : 0.0f);
+    glUniform1i(glGetUniformLocation(gh3Sprite_, "uTex"), 0);
+    glUniformMatrix4fv(glGetUniformLocation(gh3Sprite_, "uMVP"), 1, GL_FALSE,
+                       gh3Mvp_.m);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(v_.size() * sizeof(ch::Vtx)),
+                 v_.data(), GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, GLsizei(v_.size()));
+    v_.clear();
+    glUseProgram(prog_);
+}
+
+// The whammy tail's two passes. Both draw the same strip; the glow is the
+// wider, softer one and is additive (GH3 sets SRC_ALPHA/ONE, which the
+// premultiplying shader turns into ONE/ONE).
+void Renderer::drawGh3Whammy(GLuint tex, bool glow) {
+    if (v_.empty()) return;
+    applyFieldTint();
+    glUseProgram(gh3Whammy_);
+    glBlendFunc(GL_ONE, glow ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(gh3Whammy_, "uTex"), 0);
+    glUniform1i(glGetUniformLocation(gh3Whammy_, "uGlow"), glow ? 1 : 0);
+    // PS c1.xy, from the glow pass's re-upload: alpha scale and profile slope.
+    glUniform2f(glGetUniformLocation(gh3Whammy_, "uEdge"),
+                glow ? 0.85f : 1.0f, glow ? -0.3f : 0.0f);
+    glUniformMatrix4fv(glGetUniformLocation(gh3Whammy_, "uMVP"), 1, GL_FALSE,
+                       gh3Mvp_.m);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(v_.size() * sizeof(ch::Vtx)),
+                 v_.data(), GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, GLsizei(v_.size()));
+    v_.clear();
+    glUseProgram(prog_);
+}
+
+// GH3's highway. Neversoft drew the whole field as 2D screen elements in a
+// 1280x720 vscreen (y down, highway centred on x = 640): gems, frets and
+// whammy tails are sprites over a highway quad that never moves -- its scroll
+// is a texture V velocity -- and perspective is not projected but tabled: a
+// pow() recurrence turns two coefficients into 1153 row heights, and a gem's
+// time-until-strikeline picks a row. Ground truth is devtools/gh3refs
+// (guitar_tweaks.q for every constant, highway_2d.q generate_pos_table for the
+// tables, guitar_highway.q setup_highway for element placement); the port spec
+// with the .q quotes is devdocs/spec/gh3-highway.md. Single-player constant
+// set throughout -- GH3's own 2-player highway is a different tuning, not a
+// viewport squeeze.
+void Renderer::drawGh3(const Chart& chart, double beat, const RenderOpts& o,
+                       const Mods& mods, float songTime, float scrollNow,
+                       float noteSpeed, float bpm, const Mat4& mvp) {
+    (void)beat; (void)songTime;
+    const float gh3T = mods.gh3 < 0.0f ? 0.0f : (mods.gh3 > 1.0f ? 1.0f : mods.gh3);
+    if (gh3T <= 0.0f) return;
+    gh3Mvp_ = mvp;
+
+    // guitar_tweaks.q, *1 suffix. Derived values follow generate_pos_table:
+    // the tweak-file gem_end_scale is dead there, and so is fretbar's -- both
+    // are recomputed as start * (1 + widthOffsetFactor).
+    const float PLAYLINE = 655.0f, HEIGHT = 350.0f, TOPW = 160.0f;
+    const float WOFF = 2.2f;
+    const float STRING_SX = 0.65000004f, STRING_SY = 0.8f;
+    const float SIDEBAR_XOFF = 4.0f, SIDEBAR_SX = 0.3f, SIDEBAR_SY = 1.0f;
+    const float START_Y = PLAYLINE - HEIGHT;                    // 305
+    const float BOTW = TOPW * (1.0f + WOFF);                    // 512
+    const float FRETBAR_S0 = 0.15f;
+    const float FRETBAR_S1 = FRETBAR_S0 * (1.0f + WOFF);        // 0.48
+
+    // The row table, generate_pos_table verbatim (spec section 4): rnd[0] = 1,
+    // rnd[i] = pow(rnd[i-1] * fact, exp), normalised so the first 1024 sum to
+    // 1, then rowY[i] = startY + HEIGHT * sum(rnd[0..i-1]). Row 1024 is the
+    // strikeline exactly; 1025..1152 are the overshoot below it. float, not
+    // double: the recurrence compounds 1151 times and GH3 ran it in single
+    // precision. Constants are fixed, so built once.
+    static float rowY[1153];
+    static bool rowsBuilt = false;
+    if (!rowsBuilt) {
+        rowsBuilt = true;
+        const int idx = int(HEIGHT) - 162;      // clamp(350-162, 0, 510) = 188
+        const float fact = gh3::HEIGHT_PERSP_FACT[idx];
+        const float expo = gh3::HEIGHT_PERSP_EXP[idx];
+        static float rnd[1152];
+        rnd[0] = 1.0f;
+        for (int i = 1; i < 1152; ++i) rnd[i] = powf(rnd[i-1] * fact, expo);
+        float sum = 0.0f;
+        for (int i = 0; i < 1024; ++i) sum += rnd[i];
+        const float norm = 1.0f / sum;
+        for (int i = 0; i < 1152; ++i) rnd[i] *= norm;
+        rowY[0] = START_Y;
+        for (int i = 1; i <= 1152; ++i) rowY[i] = rowY[i-1] + HEIGHT * rnd[i-1];
+    }
+
+    // Time axis. GH3's native pacing (expert scroll_time 2.5s minus
+    // destroy_time 1.0s = 1.5s top-to-strikeline) is deliberately NOT the
+    // mapping -- the same call Moonscraper's 1.7 factor makes: the field
+    // shows CH's visible window, NOTE_CULL_FAR / noteSpeed (0.787s at
+    // default speed), so the chart pours at the same perceived rate as the
+    // CH field at any speed, and hyperspeed translates exactly (noteSpeed
+    // already carries the scrollspeed knob upstream). GH3's own 1.5s pace
+    // is available as --speed 5.25.
+    const float window = ch::NOTE_CULL_FAR / fmaxf(noteSpeed, 0.01f);
+    const bool hasStops = !chart.stops.empty();
+    auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
+    auto yAtRow = [&](float rowF) {
+        rowF = fminf(1152.0f, fmaxf(0.0f, rowF));
+        const int r = int(rowF) >= 1152 ? 1151 : int(rowF);
+        return rowY[r] + (rowY[r+1] - rowY[r]) * (rowF - float(r));
+    };
+    // Lane geometry, spec section 4 step 4: straight edges, x linear in the
+    // geometric fraction g = (y - startY) / HEIGHT (g runs past 1 below the
+    // strikeline and the lerp extrapolates, which is exactly what straight
+    // edges mean). Fade plane: alpha 0 at the highway top (y = 305), 1 at
+    // 305 + highway_fade.
+    auto geoAt  = [&](float y) { return (y - START_Y) / HEIGHT; };
+    auto edgeL  = [&](float g) { return (640.0f - TOPW*0.5f) +
+                                        ((640.0f - BOTW*0.5f) - (640.0f - TOPW*0.5f)) * g; };
+    auto edgeR  = [&](float g) { return (640.0f + TOPW*0.5f) +
+                                        ((640.0f + BOTW*0.5f) - (640.0f + TOPW*0.5f)) * g; };
+    // The highway fade lives in the fragment shaders (GH3_SPRITE_FS /
+    // GH3_WHAMMY_FS), per pixel, exactly like the game's own -- putting it in
+    // vertex alpha bled the 30px band down the full length of tall sprites
+    // like the sidebars and strings.
+    auto push = [&](std::vector<ch::Vtx>& out, float x, float y, float u, float v,
+                    float r, float g, float b, float a) {
+        ch::Vtx t; t.x = x; t.y = y; t.z = 0.0f; t.u = u; t.v = v;
+        t.r = r; t.g = g; t.b = b; t.a = a;
+        out.push_back(t);
+    };
+
+    const bool board = !o.playfield && mods.hideboard == 0.0f;
+
+    if (board) {
+        // ---- highway quad: flat black over the venue/background (GH3's
+        // fretboard art is venue geometry; black is the chosen stand-in, so
+        // the m_velocityV texture scroll has nothing to show). Straight edges
+        // + flat fill would be one trapezoid, but the fade band at the top
+        // wants vertex alpha along the rows, so it stays a short strip.
+        for (int row = 0; row < 1152; row += 16) {
+            const int r1 = row + 16;
+            const float y0 = rowY[row],          y1 = rowY[r1];
+            const float g0 = geoAt(y0),          g1 = geoAt(y1);
+            const float a0 = gh3T,               a1 = gh3T;
+            push(v_, edgeL(g0), y0, 0.0f, 0.0f, 0,0,0, a0);
+            push(v_, edgeR(g0), y0, 1.0f, 0.0f, 0,0,0, a0);
+            push(v_, edgeR(g1), y1, 1.0f, 1.0f, 0,0,0, a1);
+            push(v_, edgeL(g0), y0, 0.0f, 0.0f, 0,0,0, a0);
+            push(v_, edgeR(g1), y1, 1.0f, 1.0f, 0,0,0, a1);
+            push(v_, edgeL(g1), y1, 0.0f, 1.0f, 0,0,0, a1);
+        }
+        drawGh3Layer(texWhite_.id, ch::BLEND_SPRITE, true);
+
+        // ---- fretbars. chart.beatlines already carries GH3's classes
+        // (0 MEASURE -> thick, 1 -> medium, 2 WEAK -> thin), and GH3 adds thin
+        // bars on the 8th-note midpoints when the BPM allows
+        // (thin_fretbar_8note_params: up to 180). 1024x16 texture scaled
+        // fretbar_start_scale -> 0.48 along the highway.
+        std::vector<ch::Vtx> vBar[3];
+        auto fretbar = [&](double sec, int weight) {
+            // No fret_offset_tweak here: the checksum is unreferenced in the
+            // binary, and gems and fretbars share ONE lead time
+            // (guitar_gems.q:346,349). Shifting fretbars alone slides them
+            // ~10 px against the gems near the strike line.
+            const float dt = float(ssec(sec) - scrollNow);
+            const float rowF = (1.0f - dt / window) * 1024.0f;
+            if (rowF < 0.0f || rowF > 1152.0f) return;
+            const float y = yAtRow(rowF);
+            const float g = geoAt(y);
+            const float s = FRETBAR_S0 + (FRETBAR_S1 - FRETBAR_S0) * g;
+            const float hw = 1024.0f * s * 0.5f, hh = 16.0f * s * 0.5f;
+            const float a = gh3T;
+            push(vBar[weight], 640.0f - hw, y - hh, 0,0, 1,1,1, a);
+            push(vBar[weight], 640.0f + hw, y - hh, 1,0, 1,1,1, a);
+            push(vBar[weight], 640.0f + hw, y + hh, 1,1, 1,1,1, a);
+            push(vBar[weight], 640.0f - hw, y - hh, 0,0, 1,1,1, a);
+            push(vBar[weight], 640.0f + hw, y + hh, 1,1, 1,1,1, a);
+            push(vBar[weight], 640.0f - hw, y + hh, 0,1, 1,1,1, a);
+        };
+        const auto& bl = chart.beatlines;
+        for (size_t i = 0; i < bl.size(); ++i) {
+            fretbar(bl[i].sec, bl[i].style == 0 ? 2 : (bl[i].style == 1 ? 1 : 0));
+            if (i + 1 < bl.size() && bpm <= 180.0f)
+                fretbar((bl[i].sec + bl[i+1].sec) * 0.5, 0);
+        }
+        for (int w = 0; w < 3; ++w) {
+            v_ = vBar[w];
+            drawGh3Layer(texGh3Fretbar_[w].id, ch::BLEND_SPRITE, true);
+        }
+
+        // ---- lane strings and sidebars: rotated sprites anchored
+        // centre-bottom (setup_highway), lying along the straight lanes/edges.
+        // Their pixel size is constant -- only the anchor and angle carry the
+        // perspective -- and the top ends die in the fade band.
+        auto rotSprite = [&](float ax, float ay, float dx, float dy,
+                             float len, float hw, bool mirrorU,
+                             float cr, float cg, float cb, float ca) {
+            const float dl = sqrtf(dx*dx + dy*dy);
+            const float nx = dx / dl, ny = dy / dl;
+            const float px = -ny, py = nx;
+            const float tx = ax + nx * len, ty = ay + ny * len;
+            const float u0 = mirrorU ? 1.0f : 0.0f, u1 = mirrorU ? 0.0f : 1.0f;
+            const float aB = ca, aT = ca;
+            push(v_, ax - px*hw, ay - py*hw, u0, 1.0f, cr, cg, cb, aB);
+            push(v_, ax + px*hw, ay + py*hw, u1, 1.0f, cr, cg, cb, aB);
+            push(v_, tx + px*hw, ty + py*hw, u1, 0.0f, cr, cg, cb, aT);
+            push(v_, ax - px*hw, ay - py*hw, u0, 1.0f, cr, cg, cb, aB);
+            push(v_, tx + px*hw, ty + py*hw, u1, 0.0f, cr, cg, cb, aT);
+            push(v_, tx - px*hw, ty - py*hw, u0, 0.0f, cr, cg, cb, aT);
+        };
+        for (int lane = 0; lane < 5; ++lane) {
+            const float gts = TOPW / 5.0f, gbs = BOTW / 5.0f;
+            const float sx = (640.0f - TOPW*0.5f) + gts*0.5f + gts*float(lane);
+            const float ex = (640.0f - BOTW*0.5f) + gbs*0.5f + gbs*float(lane);
+            const float c = 200.0f / 255.0f;
+            rotSprite(ex, PLAYLINE, sx - ex, -HEIGHT, 512.0f * STRING_SY,
+                      32.0f * STRING_SX * 0.5f, false, c, c, c, c * gh3T);
+        }
+        drawGh3Layer(texGh3String_.id, ch::BLEND_SPRITE);
+
+        // Sidebar anchor: 25% past the bottom edge along the left-edge
+        // direction, pulled left by sidebar_x_offset; the right side mirrors
+        // about x = 640 with a negated x scale (spec section 4 step 7). The
+        // sprite is then rotated by sidebar_angle = Atan2(x = highway_height,
+        // y = stx - sbx), so its direction runs over the highway's HEIGHT --
+        // not over the extended anchor drop, which leans it ~5 deg too
+        // shallow and lifts the bars off the highway edge.
+        const float stx = 640.0f - TOPW*0.5f, sbx = 640.0f - BOTW*0.5f;
+        const float sbAx = (sbx + (sbx - stx)*0.25f) - SIDEBAR_XOFF;
+        const float sbAy = PLAYLINE + HEIGHT*0.25f;
+        // The sidebar pulse. GuitarEvent_Fretbar calls set_sidebar_flash and
+        // then flips a global `beat_flip`, so the sidebars alternate between
+        // the two endpoints of a colour PAIR on every fretbar -- and it is a
+        // hard switch (SetScreenElementProps), not a tween. Which pair is
+        // chosen depends on state: starpower / dying (crowd below
+        // crowd_poor_medium * highway_flash_dying) / starready
+        // (star_power >= 50) / normal. Offline there is no meter, no crowd
+        // and no SP, so it is always `normal`: [255 255 255] on one beat and
+        // [192 255 255] on the next. beat_flip starts at 0 and is flipped
+        // AFTER the colour is applied, so the first fretbar shows endpoint 0.
+        int barsFired = 0;
+        for (const auto& b : chart.beatlines) {
+            if (b.sec > songTime) break;
+            ++barsFired;
+        }
+        const float sbR = (barsFired > 0 && (barsFired & 1) == 0)
+                              ? 192.0f / 255.0f : 1.0f;
+        rotSprite(sbAx, sbAy, stx - sbx, -HEIGHT,
+                  512.0f * SIDEBAR_SY, 32.0f * SIDEBAR_SX * 0.5f, false,
+                  sbR, 1, 1, gh3T);
+        rotSprite((640.0f - sbAx) + 640.0f, sbAy, -(stx - sbx), -HEIGHT,
+                  512.0f * SIDEBAR_SY, 32.0f * SIDEBAR_SX * 0.5f, true,
+                  sbR, 1, 1, gh3T);
+        drawGh3Layer(texGh3Sidebar_.id, ch::BLEND_SPRITE);
+    }
+
+    // ---- fret state, hoisted above the tails: GH3's z-order interleaves
+    // them (dead tails 3.1, nowbar 3.6-3.9, live tails 4.0, gems 4.1,
+    // pressed buttons raised to 4.6-4.9 by guitar_net.q's press anim).
+    // setup_highway composites each button from mid/neck/head/lip, scale
+    // 0.8, bottoms on the playline. Press mechanics are guitar_net.q's
+    // mirror of the native logic: a hit pops the HEAD up button_up_pixels
+    // and it sinks back linearly over button_sink_time, the shared neck
+    // stretches (pixels + neck_lip_add) / neck_sprite_size with its bottom
+    // pinned neck_lip_base above the anchor, and a held button swaps the
+    // head to the _down art (guitar_net.q:911). The _lit (L) heads have
+    // zero native references (gh3-whammy-idb.md section 3) -- loaded,
+    // unwired.
+    const float NOW_S = 0.8f;
+    const float FRET_Y = PLAYLINE;
+    bool laneSus[5] = {false, false, false, false, false};
+    if (!o.noBot)
+        for (const auto& n : chart.notes)
+            for (int lane = 0; lane < 5; ++lane)
+                if ((n.frets & (1 << lane)) && n.sustain[lane] > 0.0 &&
+                    songTime >= chart.beatToSec(n.beat) &&
+                    songTime <  chart.beatToSec(n.beat + n.sustain[lane]))
+                    laneSus[lane] = true;
+    float exL[5], pxL[5], fzL[5];
+    bool heldL[5], fretRaised[5];
+    for (int lane = 0; lane < 5; ++lane) {
+        const float gbsF = BOTW / 5.0f;
+        exL[lane] = (640.0f - BOTW*0.5f) + gbsF*0.5f + gbsF*float(lane);
+        // The receptor rule, identical to the CH fret stack: an arrow at
+        // fYOffset = 0, displaced by GetXPos (scaled into the strike line's
+        // 1.6x lane pitch), pulled together by tiny about the highway
+        // centre, and zoomed by 0.5^tiny per column.
+        exL[lane] += GetXPos(mods, lane, 0.0f, songTime, float(beat), bpm) * 1.6f;
+        if (mods.tiny != 0.0f)
+            exL[lane] = 640.0f + (exL[lane] - 640.0f) * GetTinyColScale(mods);
+        fzL[lane] = GetZoom(mods, lane);
+        pxL[lane] = 0.0f;
+        heldL[lane] = false;
+        if (!o.noBot) {
+            // The raise is NOTE-driven, not input-driven:
+            // GuitarEvent_HitNotes_CFunc slams button_up_pixels into the lane
+            // for every gem in the hit pattern, and ButtonCheckerPerFrame
+            // decays it by (button_up_pixels * dt) / button_sink_time. A
+            // sustain is the exception -- CheckNoteHoldPerFrame re-slams the
+            // full 20 every frame it runs, so a held lane never sinks.
+            const float dt = float(lastHit(lane, songTime));
+            if (laneSus[lane]) pxL[lane] = 20.0f;
+            else if (dt >= 0.0f && dt < 0.1f)
+                pxL[lane] = 20.0f * (1.0f - dt / 0.1f);
+            // "held" is the fret being fingered. The bot frets a lane to hit
+            // it, so it is held for the pop and for the whole of a sustain.
+            heldL[lane] = laneSus[lane] || pxL[lane] > 0.0f;
+        }
+        // The whole button jumps z 3.6-3.9 -> 4.6-4.9 while raised, which is
+        // what puts a popped fret in front of the gems.
+        fretRaised[lane] = pxL[lane] > 0.0f;
+    }
+    auto fretSprite = [&](GLuint tex, float cx, float yBot, float w, float h) {
+        const float hw = w * 0.5f;
+        push(v_, cx-hw, yBot-h, 0,0, 1,1,1, gh3T);
+        push(v_, cx+hw, yBot-h, 1,0, 1,1,1, gh3T);
+        push(v_, cx+hw, yBot,   1,1, 1,1,1, gh3T);
+        push(v_, cx-hw, yBot-h, 0,0, 1,1,1, gh3T);
+        push(v_, cx+hw, yBot,   1,1, 1,1,1, gh3T);
+        push(v_, cx-hw, yBot,   0,1, 1,1,1, gh3T);
+        drawGh3Layer(tex, ch::BLEND_SPRITE);
+    };
+    auto drawFretLane = [&](int l) {
+        // fzL zooms the whole button about its playline anchor.
+        const float z = fzL[l];
+        const float NOW_S = 0.8f * z;
+        auto at = [&](float yBot) { return FRET_Y + (yBot - FRET_Y) * z; };
+        fretSprite(texGh3NowbarMid_[l].id, exL[l], at(FRET_Y),
+                   128.0f*NOW_S, 64.0f*NOW_S);
+        fretSprite(texGh3NowbarNeck_.id, exL[l], at(FRET_Y - 5.0f),
+                   64.0f*NOW_S, (pxL[l] + 16.0f) * z);
+        // ButtonCheckerPerFrame picks the head art three ways, and only the
+        // head element is ever re-materialled (lip/mid/neck keep whatever
+        // setup_highway gave them): not fretted -> material_head; fretted and
+        // raised -> material_head_LIT (the *L art -- this is what a popping
+        // fret shows); fretted but sunk -> material_down. That last state
+        // needs a fret held without a note under it, which an autoplay bot
+        // never does, so `_down` stays unused here rather than being wrong.
+        fretSprite((!heldL[l]        ? texGh3NowbarHead_[l]
+                    : pxL[l] > 0.0f ? texGh3NowbarHeadLit_[l]
+                                    : texGh3NowbarDown_[l]).id,
+                   exL[l], at(FRET_Y - pxL[l]), 128.0f*NOW_S, 64.0f*NOW_S);
+        fretSprite(texGh3NowbarLip_[l].id, exL[l], at(FRET_Y),
+                   128.0f*NOW_S, 64.0f*NOW_S);
+    };
+
+    // ---- whammy tails. GH3 calls the sustain trail the whammy: a triangle
+    // strip along the lane, width whammy_top_width widening with the
+    // perspective toward the player, mapped with ONE 32x32 sys_whammy2d
+    // tile. U runs ACROSS the ribbon (0 = left edge, 1 = right), so the
+    // tile's bottom row supplies the tube's cross-section shading; V is 1
+    // down the body and ramps only over the rounded far tip. No tiling and
+    // no scroll -- whammy_units_per_second is a star-power earn rate, not a
+    // render rate. The wibble is a whammy-INPUT history (128 floats, all 1.0
+    // at rest) that modulates the half-width symmetrically; NotClon's bot
+    // never whammies, so the straight constant-width ribbon is exact rather
+    // than a simplification. Ground truth: devdocs/spec/gh3-shaders.md
+    // (disassembled from the game's own MaterialLibrary) and
+    // gh3-whammy-idb.md. Dead (grey) art replaces the colour when a tail's
+    // head has gone past unhit, which only happens under --nobot here -- the
+    // bot never drops a sustain.
+    {
+        const float W0 = 10.0f, WOFFW = WOFF;
+        const float gts = TOPW / 5.0f, gbs = BOTW / 5.0f;
+        auto laneX = [&](int lane, float g) {
+            const float sx = (640.0f - TOPW*0.5f) + gts*0.5f + gts*float(lane);
+            const float ex = (640.0f - BOTW*0.5f) + gbs*0.5f + gbs*float(lane);
+            return sx + (ex - sx) * g;
+        };
+        auto rowFAt = [&](float dt) { return (1.0f - dt / window) * 1024.0f; };
+        // The ArrowEffects pipeline, CH's laneState in GH3 clothes. Mods work
+        // in SM pixels against a 64px lane pitch, so the scroll axis maps
+        // through Y_PER_UNIT exactly as the CH field does and lateral pixels
+        // scale by the highway's own lane pitch at that depth (32px at the
+        // top -> 102.4 at the strike line, i.e. x0.5 -> x1.6).
+        const float Y_PER_UNIT = ARROW_SIZE * 1.6f;
+        const float tinyColG = GetTinyColScale(mods);
+        auto pitchAt = [&](float g2) {
+            return ((TOPW / 5.0f) + ((BOTW - TOPW) / 5.0f) * g2) / 64.0f;
+        };
+        // Scroll-axis mods (beat/bumpy/wave/boost/...): SM yOffset in, modded
+        // row out.
+        auto modDepth = [&](int ml, float dtIn, float& rowFOut, float& yOffOut) {
+            const float yIn = dtIn * noteSpeed * Y_PER_UNIT;
+            yOffOut = ApplyYMods(mods, ml, yIn, float(beat));
+            float z = (yOffOut == yIn) ? dtIn * noteSpeed : yOffOut / Y_PER_UNIT;
+            z = ApplyScrollZ(mods, z, ml);
+            rowFOut = rowFAt(z / noteSpeed);
+        };
+        // Lateral mods (tornado/drunk/flip/movex/...) plus tiny's column
+        // pull-together, contracted about the highway centre.
+        auto modX = [&](float baseX, int ml, float g2, float yOff) {
+            float cx = baseX +
+                GetXPos(mods, ml, yOff, songTime, float(beat), bpm) * pitchAt(g2);
+            if (mods.tiny != 0.0f) cx = 640.0f + (cx - 640.0f) * tinyColG;
+            return cx;
+        };
+        std::vector<ch::Vtx> vWham[5], vWhamGlow[5], vWhamDead;
+        std::vector<ch::Vtx> vOpenS, vOpenSGlow, vOpenSDead;
+        auto tailStrip = [&](int lane /* -1 = open */, double tHitS, double tEndS,
+                             bool held, std::vector<ch::Vtx>& out,
+                             std::vector<ch::Vtx>* glowOut) {
+            // Near end: exactly the gem's row -- the gem (z 4.1) covers the
+            // blunt end, whose bottom lands inside the gem's 8.5% overhang
+            // below its anchor. No whammy_offset_tweak: shifting the mover
+            // -33ms pokes the tail ~20px out below the gem, the real game
+            // shows no such peek, and the claim came from the stack-drift-
+            // compromised decompile whose sibling constant fret_offset_tweak
+            // proved to be unreferenced in the binary. While held the near
+            // end pins just above the strikeline at row
+            // 1024*whammy_cutoff/1152 ("burns down from the top only").
+            // Far end: the shortened sustain end.
+            float rowA = rowFAt(float(ssec(tEndS) - scrollNow));
+            float rowB = held ? 1024.0f * 1100.0f / 1152.0f
+                              : rowFAt(float(ssec(tHitS) - scrollNow));
+            if (rowB < 0.0f || rowA > 1152.0f || rowA >= rowB) return;
+            rowA = fmaxf(rowA, 0.0f);
+            rowB = fminf(rowB, 1152.0f);
+            // One strip row per 8 highway lines, exactly as sub_601D30 walks
+            // its tables (rows = highway_lines >> 3).
+            const int segs = int((rowB - rowA) / 8.0f) + 1;
+            const int ml = lane < 0 ? 2 : lane;
+            struct Row { float y, cx, hw, v, a; };
+            std::vector<Row> rows;
+            rows.reserve(size_t(segs) + 1);
+            for (int sgi = 0; sgi <= segs; ++sgi) {
+                const float rowN = rowA + (rowB - rowA) * float(sgi) / float(segs);
+                // Mods bend the strip per row, exactly like CH's ribbons:
+                // each sample's nominal scroll time runs through the same
+                // Y-wave/scroll/X pipeline as a gem at that depth.
+                const float dtN = (1.0f - rowN / 1024.0f) * window;
+                float rowM, yOffR;
+                modDepth(ml, dtN, rowM, yOffR);
+                rowM = fminf(1152.0f, fmaxf(0.0f, rowM));
+                Row r;
+                r.y  = yAtRow(rowM);
+                const float g = geoAt(r.y);
+                // halfWidth = 0.5 * whammy_top_width * (1 + accum *
+                // whammy_width_offset), and `accum` -- the running sum of the
+                // per-row normalised distances -- IS the geometric fraction.
+                // Open tails multiply the base width by 11.8: GH3+ patches
+                // the strip renderer itself (WhammyShader_Resize at 0x603552
+                // in gemMutation.cpp) to `mulss` that factor into the width
+                // argument whenever the material is the open whammy texture.
+                r.hw = (W0 + W0 * WOFFW * g) * 0.5f * (lane < 0 ? 11.8f : 1.0f);
+                r.cx = modX(lane < 0 ? 640.0f : laneX(lane, g), ml, g, yOffR);
+                // V is 1 down the whole body; only the rounded tip ramps.
+                r.v  = fminf(1.0f, (rowN - rowA) / 32.0f);
+                r.a  = gh3T;
+                rows.push_back(r);
+            }
+            auto strip = [&](std::vector<ch::Vtx>& dst, float widthMul,
+                             const std::vector<Row>& src) {
+                for (size_t i = 1; i < src.size(); ++i) {
+                    const Row& p = src[i-1];
+                    const Row& q = src[i];
+                    const float pl = p.cx - p.hw*widthMul, pr = p.cx + p.hw*widthMul;
+                    const float ql = q.cx - q.hw*widthMul, qr = q.cx + q.hw*widthMul;
+                    push(dst, pl, p.y, 0, p.v, 1,1,1, p.a);
+                    push(dst, pr, p.y, 1, p.v, 1,1,1, p.a);
+                    push(dst, qr, q.y, 1, q.v, 1,1,1, q.a);
+                    push(dst, pl, p.y, 0, p.v, 1,1,1, p.a);
+                    push(dst, qr, q.y, 1, q.v, 1,1,1, q.a);
+                    push(dst, ql, q.y, 0, q.v, 1,1,1, q.a);
+                }
+            };
+            strip(out, 1.0f, rows);
+            // The glow is the SAME strip 3.5x wider -- VS 685 is byte-identical
+            // to 685's solid twin plus one `mul r0.x, r0.x, c1.z` with
+            // c1.z = 3.5, which scales the half-width. It is NOT a stretch
+            // along the tail. The only length change is at the far tip, where
+            // the 6 rows nearest the end are pushed out x1.4 from row 6's y
+            // before the second draw.
+            if (glowOut && held && rows.size() > 6) {
+                std::vector<Row> g = rows;
+                const float tipY = g[6].y;
+                for (int i = 0; i < 6; ++i)
+                    g[i].y = tipY + (g[i].y - tipY) * 1.4f;
+                // Opens do NOT take the 3.5x: their body is already 11.8x
+                // wide, and 3.5*11.8 puts the halo off both sides of the
+                // screen. GH3+ inherits exactly that -- gemMutation.cpp
+                // widens the body without touching the glow and leaves
+                // "TODO: scale down glowing sprite" against it -- so this
+                // follows the mod's intent rather than its known artifact.
+                strip(*glowOut, lane < 0 ? 1.0f : 3.5f, g);
+            }
+        };
+        // whammy_shorten: the tail is 0.25 beats shorter than the charted
+        // sustain, and sustains of half a beat or less get NO tail at all
+        // (SetUpSustains -- this feeds both scoring and unitLengthTime, the
+        // visual length).
+        for (const auto& n : chart.notes) {
+            const double tHit = chart.beatToSec(n.beat);
+            for (int lane = 0; lane < 5; ++lane) {
+                if (!(n.frets & (1 << lane)) || n.sustain[lane] <= 0.5) continue;
+                const double tEnd =
+                    chart.beatToSec(n.beat + n.sustain[lane] - 0.25);
+                if (songTime >= tEnd) continue;
+                const bool held = !o.noBot && songTime >= tHit;
+                const bool dead = o.noBot &&
+                    float(ssec(tHit) - scrollNow) < 0.0f;
+                tailStrip(lane, tHit, tEnd, held,
+                          dead ? vWhamDead : vWham[lane],
+                          dead ? nullptr : &vWhamGlow[lane]);
+            }
+            if (n.open && n.openSustain > 0.5) {
+                const double tEnd =
+                    chart.beatToSec(n.beat + n.openSustain - 0.25);
+                if (songTime < tEnd) {
+                    const bool held = !o.noBot && songTime >= tHit;
+                    const bool dead = o.noBot &&
+                        float(ssec(tHit) - scrollNow) < 0.0f;
+                    tailStrip(-1, tHit, tEnd, held,
+                              dead ? vOpenSDead : vOpenS,
+                              dead ? nullptr : &vOpenSGlow);
+                }
+            }
+        }
+        // GH3 z-order: dead tails (3.1) under the nowbar, live tails (4.0)
+        // over it, glow as the tails' additive second pass, gems (4.1) above,
+        // pressed buttons last (4.6-4.9, drawn after the gems below).
+        v_ = vWhamDead;  drawGh3Whammy(texGh3WhammyDead_.id,  false);
+        v_ = vOpenSDead; drawGh3Whammy(texGh3OpenSusDead_.id, false);
+        for (int l = 0; l < 5; ++l)
+            if (!fretRaised[l]) drawFretLane(l);
+        for (int l = 0; l < 5; ++l) {
+            v_ = vWham[l];
+            drawGh3Whammy(texGh3Whammy_[l].id, false);
+        }
+        v_ = vOpenS;     drawGh3Whammy(texGh3OpenSus_.id, false);
+        for (int l = 0; l < 5; ++l) {
+            v_ = vWhamGlow[l];
+            drawGh3Whammy(texGh3Whammy_[l].id, true);
+        }
+        v_ = vOpenSGlow; drawGh3Whammy(texGh3OpenSus_.id, true);
+
+        // ---- gems. EVERY FRAME of note art is 128x64: static gem and hammer
+        // art, star gems as a 4x4 flipbook, and the GH3+ taps as a 2x4
+        // flipbook in the sys_BattleGEM_* slots. Frame layout and rate are
+        // not guesses -- GH3's material graph carries a (cols, rows, fps)
+        // triple per material (devtools/gh3refs/textures/scn/*.json), and
+        // both animated sets run at 30 fps. Opens are 512x64 art, with the
+        // SP-phrase opens a 4x4 sheet of that. Scale runs gem_start_scale ->
+        // *(1 + widthOffsetFactor); 5 * 128 * 0.25 = 160 = highway_top_width
+        // and 5 * 128 * 0.8 = 512 = the bottom width, so a gem exactly fills
+        // its lane at both ends. Pivot is gem_y_just (0.83) except stars at
+        // star_y_just (0.5), drawn at gem_star_scale 1.3. The bot consumes a
+        // gem at its hit time; under --nobot they ride the overshoot rows out
+        // the bottom like GH3 misses do.
+        const float GEM_S0 = 0.25f, GEM_S1 = 0.25f * (1.0f + WOFF);
+        // Every gem shares z 4.1, so their order is decided purely by
+        // insertion: GH3 links a tie group newest-first, so the gem created
+        // FIRST ends up on top. Gems stream in chart order, which makes the
+        // NEARER gem win (free correct occlusion), and within one chord green
+        // beats red beats ... beats open. A painter's renderer reproduces
+        // that by drawing far->near and, inside an entry, open first then
+        // orange..green last. Batching by texture would destroy it -- a far
+        // star would paint over a near gem, which happens at every starpower
+        // boundary -- so quads go into ONE ordered stream and the draw only
+        // splits where the texture actually changes.
+        std::vector<ch::Vtx> gemStream;
+        std::vector<std::pair<GLuint, size_t>> gemRuns;
+        for (int i = int(chart.notes.size()) - 1; i >= 0; --i) {
+            const Note& n = chart.notes[i];
+            const double tHit = chart.beatToSec(n.beat);
+            if (!o.noBot && songTime >= tHit) continue;      // consumed
+            const float dt = float(ssec(tHit) - scrollNow);
+            // Flipbooks run on a PER-SPRITE clock: the AnimatedTexture_UI
+            // shader stamps m_creationTime when the element binds, so every
+            // animated gem starts at frame 0 as it spawns at the highway top
+            // instead of sharing one global phase.
+            const float elapsed = window - dt;
+            const int spinF = ((int(elapsed * 30.0f) % 16) + 16) % 16;
+            const int tapF  = ((int(elapsed * 30.0f) % 8) + 8) % 8;
+            const bool isSP =
+                chart.phraseAt(PhraseType::StarPower, n.tick) != nullptr;
+            const float rot = GetRotationZ(mods, float(n.beat), float(beat));
+            // Per-lane state through the mod pipeline, like CH's laneState:
+            // culls per lane (a Y-wave can carry one lane of a chord off the
+            // highway while another stays), returns the modded row and SM
+            // yOffset for everything downstream.
+            struct LaneEval { float y, g, s, cx, a, zoom; };
+            auto laneEval = [&](int ml, LaneEval& e) {
+                float rowM, yOff;
+                modDepth(ml, dt, rowM, yOff);
+                if (rowM < 0.0f || rowM > 1152.0f) return false;
+                e.y = yAtRow(rowM);
+                e.g = geoAt(e.y);
+                e.s = GEM_S0 + (GEM_S1 - GEM_S0) * e.g;
+                e.cx = modX(laneX(ml, e.g), ml, e.g, yOff);
+                e.y += GetYPosBump(mods, ml, yOff, float(beat), bpm) *
+                       pitchAt(e.g) * 0.5f;
+                e.a = gh3T * GetAlpha(mods, yOff, songTime);
+                e.zoom = GetZoom(mods, ml);
+                return e.a > 0.002f;
+            };
+            // Seating: GH3's authentic gem_y_just (0.83) hangs 91.5% of the
+            // gem above its position; CH seats notes at NOTE_PIVOT_Y = 0.16
+            // from the sprite bottom (84% above), so the gem's base straddles
+            // its chart position. CH's seating was chosen deliberately: the
+            // authentic 0.83/0.5 become 0.68/0.35 in the same (1+j)/2
+            // encoding -- identical split, 7.5% of the sprite lower.
+            auto emit = [&](GLuint tex, const LaneEval& e, float cx, float w,
+                            float h, float yJust, float u0, float v0,
+                            float u1, float v1) {
+                const float above = (yJust + 1.0f) * 0.5f * h;
+                const float th = rot * 3.14159265f / 180.0f;
+                const float c = cosf(th), sn = sinf(th);
+                auto P = [&](float lx, float ly, float u, float v) {
+                    lx *= e.zoom; ly *= e.zoom;
+                    push(gemStream, cx + lx*c - ly*sn, e.y + lx*sn + ly*c,
+                         u, v, 1,1,1, e.a);
+                };
+                const float hw = w * 0.5f;
+                P(-hw, -above, u0, v0); P(hw, -above, u1, v0);
+                P(hw, h-above, u1, v1); P(-hw, -above, u0, v0);
+                P(hw, h-above, u1, v1); P(-hw, h-above, u0, v1);
+                if (!gemRuns.empty() && gemRuns.back().first == tex)
+                    gemRuns.back().second += 6;
+                else
+                    gemRuns.push_back({tex, size_t(6)});
+            };
+            if (n.open) {
+                // An open is GH3+'s sixth lane, riding the yellow lane's
+                // geometry (and lane 2's mod evaluation, like CH's open path
+                // does). Its art is already 4x a lane gem's width, and it is
+                // ALWAYS drawn at gem_star_scale (1.3) on top of that -- 5.2x
+                // wide: a plain open via GH3+'s setGemScale detour
+                // (gemLoading.cpp:16-34), an SP open via retail's star path,
+                // which also swaps in star_y_just.
+                LaneEval e;
+                if (laneEval(2, e)) {
+                    const bool hopo = n.openType == NoteType::Hopo;
+                    const float ow = 512.0f*e.s*1.3f, oh = 64.0f*e.s*1.3f;
+                    const float cx = e.cx - laneX(2, e.g) + 640.0f;
+                    if (isSP) {
+                        const float u0 = float(spinF % 4) * 0.25f;
+                        const float v0 = float(spinF / 4) * 0.25f;
+                        emit((hopo ? texGh3OpenHopoSp_ : texGh3OpenSp_).id, e,
+                             cx, ow, oh, 0.35f, u0, v0, u0 + 0.25f, v0 + 0.25f);
+                    } else {
+                        emit((hopo ? texGh3OpenHopo_ : texGh3Open_).id, e,
+                             cx, ow, oh, 0.68f, 0, 0, 1, 1);
+                    }
+                }
+            }
+            for (int lane = 4; lane >= 0; --lane) {
+                if (!(n.frets & (1 << lane))) continue;
+                LaneEval e;
+                if (!laneEval(lane, e)) continue;
+                if (n.type == NoteType::Tap) {
+                    // Plain taps take the normal path (unscaled, gem seat),
+                    // but GH3+ routes SP taps through retail's STAR path
+                    // (makeStarTapGems, gemLoading.cpp:73-79), so those get
+                    // gem_star_scale and the star seat like a star gem.
+                    const float u0 = float(tapF % 2) * 0.5f;
+                    const float v0 = float(tapF / 2) * 0.25f;
+                    const float ts = isSP ? e.s * 1.3f : e.s;
+                    emit((isSP ? texGh3TapSp_[lane] : texGh3Tap_[lane]).id, e,
+                         e.cx, 128.0f*ts, 64.0f*ts,
+                         isSP ? 0.35f : 0.68f, u0, v0, u0 + 0.5f, v0 + 0.25f);
+                } else if (isSP) {
+                    const float u0 = float(spinF % 4) * 0.25f;
+                    const float v0 = float(spinF / 4) * 0.25f;
+                    emit((n.type == NoteType::Hopo ? texGh3StarHammer_[lane]
+                                                   : texGh3Star_[lane]).id, e,
+                         e.cx, 128.0f*e.s*1.3f, 64.0f*e.s*1.3f, 0.35f,
+                         u0, v0, u0 + 0.25f, v0 + 0.25f);
+                } else {
+                    emit((n.type == NoteType::Hopo ? texGh3GemHammer_[lane]
+                                                   : texGh3Gem_[lane]).id, e,
+                         e.cx, 128.0f*e.s, 64.0f*e.s, 0.68f, 0, 0, 1, 1);
+                }
+            }
+        }
+        {
+            size_t off = 0;
+            for (const auto& run : gemRuns) {
+                v_.assign(gemStream.begin() + off,
+                          gemStream.begin() + off + run.second);
+                drawGh3Layer(run.first, ch::BLEND_SPRITE, true);
+                off += run.second;
+            }
+        }
+
+        // Pressed buttons ride above the gems (z 4.6-4.9).
+        for (int l = 0; l < 5; ++l)
+            if (fretRaised[l]) drawFretLane(l);
+    }
 }
 
 void Renderer::drawActorQuad(float cx, float cy, float w, float h, float rotZDeg,
@@ -5294,10 +6181,15 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     const float yargT = fminf(1.0f, fmaxf(0.0f, mods.yarg));
     const int engineStyle = moonT >= yargT ? 1 : 2;
     const float engineT = mods.hide == 0.0f ? fmaxf(moonT, yargT) : 0.0f;
+    // gh3 crossfades against CH the same way the engine styles do -- the CH
+    // field fades in place and the GH3 sprite field draws over it.
+    const float gh3T = mods.hide == 0.0f
+        ? fminf(1.0f, fmaxf(0.0f, mods.gh3)) : 0.0f;
     const float originalTint[4] = {
         fieldTint_[0], fieldTint_[1], fieldTint_[2], fieldTint_[3]
     };
-    if (engineT > 0.0f) fieldTint_[3] *= 1.0f - engineT;
+    const float fieldSwapT = fmaxf(engineT, gh3T);
+    if (fieldSwapT > 0.0f) fieldTint_[3] *= 1.0f - fieldSwapT;
     Mat4& mvpEff = E.mvpEff;
     Mat4 drawMvp = mvpOverride ? *mvpOverride : mvpEff;
     if (!mvpOverride && (vpX != 0 || vpW != W)) {
@@ -5346,9 +6238,10 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // still drawn, pushed down out of frame by the incoming pad (the my offset
     // for that is applied further up, before the matrices). Only a full 100%
     // drops the highway entirely.
-    const bool piuMode = piuT > 0.0f && mods.hide == 0.0f && engineT < 1.0f;
+    const bool piuMode = piuT > 0.0f && mods.hide == 0.0f && engineT < 1.0f &&
+                         gh3T < 1.0f;
     const bool hidePlayfield = mods.hide != 0.0f || piuT >= 1.0f ||
-                               engineT >= 1.0f;
+                               engineT >= 1.0f || gh3T >= 1.0f;
 
     // Board layers. --playfield drops all four, leaving only frets and notes.
     // `hideboard` is the --playfield flag as a knob: the board goes, the notes
@@ -5481,12 +6374,31 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         const float wdx = pxToUnits(wdxPx);
         const float wdy = pxToUnits(GetYPosBump(mods, lane, 0.0f, float(beat), bpm)) * 0.5f;
         const float wdz = ApplyScrollZ(mods,0.0f,lane);
-        if (wdx != 0.0f || wdy != 0.0f || wdz != 0.0f)
+        // tiny, the receptor rule continued: an arrow at fYOffset = 0 zooms by
+        // 0.5^tiny like any other (ArrowEffects.cpp:813-818, per-column
+        // tiny0..4 included), about the fret's own anchor -- buildFret's x on
+        // the flip-lerped fret ladder, pivot y 0. The column pull-together
+        // (:561-566) then contracts the fret's offset-from-centre the same way
+        // the note path contracts cx, so a shrunk field keeps its gems on its
+        // frets. Guarded so the all-zero case never touches a vertex.
+        const float fzoom = GetZoom(mods, lane);
+        float fx = ch::FRET_X[lane];
+        if (mods.flip != 0.0f && lane != 2)
+            fx += (ch::FRET_X[4 - lane] - fx) * mods.flip;
+        const float pull = mods.tiny != 0.0f
+            ? (fx + wdx) * (GetTinyColScale(mods) - 1.0f) : 0.0f;
+        if (fzoom != 1.0f || pull != 0.0f ||
+            wdx != 0.0f || wdy != 0.0f || wdz != 0.0f)
             for (int i = 0; i < 7; ++i)
                 for (size_t j = n0[i]; j < bk[i]->size(); ++j) {
-                    (*bk[i])[j].x += wdx;
-                    (*bk[i])[j].y += wdy;
-                    (*bk[i])[j].z += wdz;
+                    ch::Vtx& vtx = (*bk[i])[j];
+                    if (fzoom != 1.0f) {
+                        vtx.x = fx + (vtx.x - fx) * fzoom;
+                        vtx.y *= fzoom;
+                    }
+                    vtx.x += wdx + pull;
+                    vtx.y += wdy;
+                    vtx.z += wdz;
                 }
         // dark. The only renderer consumer of m_fDark in the whole OITG tree
         // is ReceptorArrowRow::Update (ReceptorArrowRow.cpp:40-43): receptors
@@ -5767,6 +6679,22 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         drawEngine(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
                    engineStyle, engineT, mx, my, mz, vpX, vpW,
                    engineMvpOverride);
+    }
+
+    if (gh3T > 0.0f) {
+        for (int i = 0; i < 4; ++i) fieldTint_[i] = originalTint[i];
+        // GH3's authored space is 1280x720, y down (strike line at y=655,
+        // screen centre x=640). Map it across this player's viewport strip,
+        // the same shape as the PIU projection above.
+        Mat4 gh3Proj{};
+        gh3Proj.m[0] = 2.0f / 1280.0f * (float(vpW) / float(W));
+        gh3Proj.m[5] = -2.0f / 720.0f;
+        gh3Proj.m[10] = gh3Proj.m[15] = 1.0f;
+        gh3Proj.m[12] = -1.0f + 2.0f * float(vpX) / float(W);
+        gh3Proj.m[13] = 1.0f;
+        const Mat4 gh3DrawMvp = mat_mul(gh3Proj, gh3FieldLocal(mods, beat));
+        drawGh3(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
+                gh3DrawMvp);
     }
 
 }

@@ -1,0 +1,32 @@
+gh3_*.png provenance
+====================
+
+Extracted from Guitar Hero III: Legends of Rock (Neversoft/Activision, 2007),
+PC global.pak / global.pab, decoded from DXT1/DXT5 to PNG. The PC extraction
+(C:\Users\arceus\gh360texturetool\globalpc) is the shipped source: the earlier
+Xbox 360 dump in devtools/gh3refs/textures has endianness corruption in some
+textures, though its manifest.json (pak checksum -> name/dimensions) is still
+the reference for names and sizes.
+
+Renaming: the pak's sys_* names are kept but normalised -- pak checksums were
+case-insensitive so casing there is inconsistent.
+  sys_gem2d_<color>[_hammer]      -> gh3_gem_<color>[_hammer]      128x64
+  sys_gem2d_starpower[_hammer]    -> gh3_gem_sp[_hammer]           128x64
+  sys_star2d_<color>[_hammer]     -> gh3_star_<color>[_hammer]     512x256
+  sys_whammy2d_<color|starpower|dead> -> gh3_whammy_<color|sp|dead> 32x32
+  sys_NowBar_Button01_<color>_<Lip|Mid2|Down> -> gh3_nowbar_<lip|mid|down>_<color>
+  sys_NowBar_Head_<color>[L]      -> gh3_nowbar_head_<color>[_lit] 128x64
+  sys_nowbar_neck01               -> gh3_nowbar_neck               64x16
+  sys_fretbar_<small|Medium|large> -> gh3_fretbar_<small|medium|large> 1024x16
+  sys_string01                    -> gh3_string                    32x512
+  sys_sidebar2D                   -> gh3_sidebar                   32x512
+
+gh3_open_* and gh3_tap_* are NOT vanilla GH3 (it had no open or tap notes);
+they are the GH3+ mod's replacement textures for global_gfx, copied from
+devtools/gh3refs/"Open Note Sprites" and "Tapping Note Sprites":
+  strum/hopo[phrase]              -> gh3_open_strum|hopo[_sp]      512x64 (2048x256 for _sp)
+  sustain/deadsustain             -> gh3_open_sustain[_dead]       128x32
+  tap[sp]_<color>_<pakindex>      -> gh3_tap[_sp]_<color>          256x256
+
+Game assets, not redistributable under any open license; present for the
+gh3 engine-style renderer the way the CH highway's ripped sprites are.

@@ -89,8 +89,9 @@ struct Mods {
     // ribbons under this mode.
     float piu = 0;
     // Engine visual modes. These replace note/receptor art without changing
-    // the chart, scroll timing or ArrowEffects position pipeline.
-    float moonscraper = 0, yarg = 0;
+    // the chart, scroll timing or ArrowEffects position pipeline. gh3 is a 2D
+    // field (drawGh3), not a drawEngine style.
+    float moonscraper = 0, yarg = 0, gh3 = 0;
     float sudden = 0, hidden = 0;
     float suddenOffset = 0, hiddenOffset = 0;
     // Per-column reverse contributions (PlayerOptions.cpp:1313-1332

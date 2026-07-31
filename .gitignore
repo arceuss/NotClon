@@ -20,6 +20,7 @@ devdocs/
 devtools/
 # Session tooling, not the project.
 .claude/
+.scratch/
 tests/
 
 # Release artefacts.

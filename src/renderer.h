@@ -354,9 +354,9 @@ private:
     void destroyFbos();
     double lastHit(int lane, double now) const;
 
-    Mat4 view_{}, mvp_{}, mvp2_{}, piuMvp_{};
+    Mat4 view_{}, mvp_{}, mvp2_{}, piuMvp_{}, gh3Mvp_{};
     GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0;
-    GLuint cover_ = 0, piu_ = 0, engine_ = 0;
+    GLuint cover_ = 0, piu_ = 0, gh3Sprite_ = 0, gh3Whammy_ = 0, engine_ = 0;
     GLuint engineGlow_ = 0, yargEffect_ = 0;
     GLuint moonOccluder_ = 0, moonBlur_ = 0;
     GLuint yargBloomPrefilter_ = 0, yargBloomDownH_ = 0;
@@ -422,6 +422,27 @@ private:
     // PIU mode: three arts each, indexed by ch::PIU_ART (DownLeft/UpLeft/Center).
     Tex texPiuTap_[3], texPiuRecep_[3], texPiuHoldBody_[3], texPiuHoldCap_[3];
     Tex texPiuFlash_;
+    // GH3 board art (assets/engine/gh3_*, see gh3.SOURCE.txt). The highway
+    // surface itself is a flat black fill -- GH3's fretboard art is venue
+    // geometry, not in global.pak, and black is the chosen stand-in.
+    Tex texGh3Fretbar_[3];              // small, medium, large
+    Tex texGh3String_, texGh3Sidebar_;
+    // Nowbar pieces, lane order green..orange. down is the held-state head
+    // art; the lit heads are loaded but unused until the IDB dig pins their
+    // trigger down (script-side never touches them).
+    Tex texGh3NowbarMid_[5], texGh3NowbarLip_[5], texGh3NowbarHead_[5];
+    Tex texGh3NowbarDown_[5], texGh3NowbarHeadLit_[5];
+    Tex texGh3NowbarNeck_;
+    // Note art. Every frame is 128x64: gem/hammer single, star and
+    // star-hammer 4x4 spin flipbooks, tap 2x4 flipbooks (GH3+ battle-gem
+    // slots). Opens are 512x64 (the SP-phrase opens 4x4 sheets of it).
+    Tex texGh3Gem_[5], texGh3GemHammer_[5], texGh3Star_[5], texGh3StarHammer_[5];
+    Tex texGh3Tap_[5], texGh3TapSp_[5];
+    Tex texGh3Open_, texGh3OpenHopo_, texGh3OpenSp_, texGh3OpenHopoSp_;
+    // Whammy tails: 32x32 tiles, repeat-wrapped; open tails 128x32.
+    Tex texGh3Whammy_[5], texGh3WhammySp_, texGh3WhammyDead_;
+    Tex texGh3OpenSus_, texGh3OpenSusDead_;
+    Tex texWhite_;                      // 1x1 white, untextured fills
     Tex texFretB_, texFretH_, texLift_, texHLight_;
     struct EngineGpu {
         GLuint vao = 0, vbo = 0;
@@ -460,9 +481,16 @@ private:
     void drawSustainGlow();
     void drawGlowLayer(GLuint tex);
     void drawPiuLayer(GLuint tex, int blend);
+    void drawGh3Layer(GLuint tex, int blend, bool fade = false);
+    void drawGh3Whammy(GLuint tex, bool glow);
     // The pump playfield -- a wholly separate field, not a reskin. See the
     // comment on the definition.
     void drawPiu(const Chart& chart, double beat, const RenderOpts& o,
+                 const Mods& mods, float songTime, float scrollNow,
+                 float noteSpeed, float bpm, const Mat4& mvp);
+    // The GH3 highway -- a 2D sprite field like drawPiu, not a drawEngine
+    // style. See the comment on the definition.
+    void drawGh3(const Chart& chart, double beat, const RenderOpts& o,
                  const Mods& mods, float songTime, float scrollNow,
                  float noteSpeed, float bpm, const Mat4& mvp);
     void loadEngineMesh(EngineGpu& gpu, const std::string& path);

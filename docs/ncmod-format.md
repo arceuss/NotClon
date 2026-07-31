@@ -178,4 +178,4 @@ for `int` and `bool` uniforms too: `800` sets an `int blockSize` to `8`. A
 `--fxchain`'s passes register their knobs the same way. See
 [actors-and-lua.md](actors-and-lua.md).
 
-`piu` exists too. Try it and see.
+`piu` exists too. Try it and see. So do `moonscraper`, `yarg` and `gh3`.

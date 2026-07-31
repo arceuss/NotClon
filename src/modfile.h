@@ -78,6 +78,10 @@ enum ModId {
     // Source engine visual sets. Moonscraper uses its 3D gem plus its actual
     // sprite fret; YARG's default Rectangular theme uses 3D gems and frets.
     MOD_MOONSCRAPER, MOD_YARG,
+    // GH3's highway: a 2D sprite field like PIU, not a drawEngine style --
+    // Neversoft drew gems/frets/tails as screen elements over a static
+    // perspective quad, so it rides the drawPiu-shaped path.
+    MOD_GH3,
     // Appearance offsets. The formula already carries them (mods.h
     // GetPercentVisible, SM5 ArrowEffects.cpp:1044-1071 GetHidden/SuddenLine);
     // these are the knobs that were missing, not the maths.

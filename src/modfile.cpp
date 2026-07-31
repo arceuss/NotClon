@@ -59,6 +59,7 @@ const ModInfo MODS[] = {
     {"piu",        0.0f},
     {"moonscraper",0.0f},
     {"yarg",       0.0f},
+    {"gh3",        0.0f},
     {"suddenoffset", 0.0f},
     {"hiddenoffset", 0.0f},
     {"split",      0.0f},
@@ -380,6 +381,7 @@ void modValuesToState(const float* v, float beat, Mods& m, PostFx& fx,
     m.piu       = v[MOD_PIU];
     m.moonscraper = v[MOD_MOONSCRAPER];
     m.yarg      = v[MOD_YARG];
+    m.gh3       = v[MOD_GH3];
     m.suddenOffset = v[MOD_SUDDENOFFSET];
     m.hiddenOffset = v[MOD_HIDDENOFFSET];
     m.split     = v[MOD_SPLIT];
