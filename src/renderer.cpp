@@ -5006,12 +5006,30 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
         projection.m[11] = -1.0f;
         projection.m[12] = -cameraDistance;
         projection.m[13] = cameraDistance * invertY;
+        // Constant clip z: NDC z = -5/w, monotone in distance from the
+        // actor camera. Without ANY z row every proxied vertex sat at NDC
+        // z = 0, so depth ordering degenerated to painter's order -- fine
+        // for CH/moon (painter's by design), fatal for the yarg scene,
+        // whose transparent track draws AFTER the notes and relies on
+        // LEQUAL: at equal depth it painted over frets and notes ("under
+        // the highway"), and fret meshes self-overdrew into dark slivers.
+        // Magnitude 5: discrimination is 5*dw/w^2 -- a 0.07-world note-
+        // over-track gap at the strikeline (w~690 at 480p targets) clears
+        // ~440 ulps of 24-bit depth; -0.5 left only ~44. Clipping would
+        // need w < 5 pixel units, already degenerate for x/y.
+        projection.m[14] = -5.0f;
         projection.m[15] = cameraDistance;
     } else {
         projection.m[0] = 1.0f / targetHalfW;
         projection.m[5] = -invertY / targetHalfH;
         projection.m[12] = -1.0f;
         projection.m[13] = invertY;
+        // Ortho: w is constant 1, so a constant z restores no ordering.
+        // Put actor-space z in the numerator instead; nearer vertices have
+        // larger z_actor (cameraToActor maps distance to decreasing z), so
+        // -1e-4 keeps LEQUAL = nearer-wins. +-1000 px of depth spans only
+        // +-0.1 NDC -- no clipping short of |z| > 10^4 px.
+        projection.m[10] = -1e-4f;
         projection.m[15] = 1.0f;
     }
 
@@ -5054,7 +5072,6 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
         mat_mul(actorModel,
                 mat_mul(engineLaneFit,
                         mat_mul(engineCameraToActor,sourceEngineView))));
-
     const float oldTint[4] = {
         fieldTint_[0], fieldTint_[1], fieldTint_[2], fieldTint_[3]
     };
