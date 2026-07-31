@@ -2065,7 +2065,13 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         }
         glBindFramebuffer(GL_FRAMEBUFFER,moonSceneMsaaFbo_);
         glViewport(0,0,targetW,targetH);
-        glClearColor(0,0,0,1);
+        // Direct path: opaque black -- the rect IS this field's window.
+        // Proxy path (mvpOverride): alpha 0, content only. The composite
+        // blends premultiplied over the shared target, so an opaque clear
+        // there makes the SECOND moon proxy erase the first player's field
+        // (Testify both-moon: one highway vanished); yarg proxies never
+        // suffered this because their scene clear is already alpha 0.
+        glClearColor(0,0,0, mvpOverride ? 0.0f : 1.0f);
         glDepthMask(GL_TRUE);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     }
