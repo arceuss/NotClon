@@ -6692,7 +6692,19 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         gh3Proj.m[10] = gh3Proj.m[15] = 1.0f;
         gh3Proj.m[12] = -1.0f + 2.0f * float(vpX) / float(W);
         gh3Proj.m[13] = 1.0f;
-        const Mat4 gh3DrawMvp = mat_mul(gh3Proj, gh3FieldLocal(mods, beat));
+        // Whole-field movex/movey (mx/my, world units -- the offsets the CH
+        // field adds through its uOffset uniform) ride the field matrix,
+        // converted at the strike line's scale: 1 world unit = 64/0.1935 SM
+        // px, x1.6 into the vscreen. World +y is up, the vscreen's is down.
+        // movez has no axis here, like the rest of the field's flat-2D
+        // exceptions.
+        const float w2v = 1.6f / pxToUnits(1.0f);
+        Mat4 gh3Move{};
+        gh3Move.m[0] = gh3Move.m[5] = gh3Move.m[10] = gh3Move.m[15] = 1.0f;
+        gh3Move.m[12] = (o.px + mx) * w2v;
+        gh3Move.m[13] = -(o.py + my) * w2v;
+        const Mat4 gh3DrawMvp =
+            mat_mul(gh3Proj, mat_mul(gh3Move, gh3FieldLocal(mods, beat)));
         drawGh3(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
                 gh3DrawMvp);
     }
