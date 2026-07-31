@@ -4590,7 +4590,9 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
                                bool clearZ, float u0, float v0,
                                float u1, float v1, GLuint customProgram,
                                const std::vector<ActorShaderBinding>* customUniforms,
-                               int imageW, int imageH, bool textureGlow,
+                               int imageW, int imageH,
+                               int imageBackingW, int imageBackingH,
+                               bool textureGlow,
                                const std::vector<ActorPolygonVertex>* polygon,
                                bool polygonTriangles, int cullMode,
                                float polygonZoomZ) {
@@ -4803,8 +4805,19 @@ void Renderer::drawActorQuad3D(float cx, float cy, float cz,
     glBindTexture(GL_TEXTURE_2D, tex);
     if (customProgram) {
         glUniform1i(glGetUniformLocation(actorProgram, "sampler0"), 0);
+        // NotITG convention: textureSize is the pow2 BACKING, imageSize the
+        // content rect. Custom shaders convert with
+        // img2tex(v) = v / textureSize * imageSize; binding both to the
+        // content size makes that identity, so coords meant for the content
+        // rect span the whole padded texture and feedback chains (Testify's
+        // datamosh) accumulate the padding -- the pink L above and right of
+        // the content (1 - 1920/2048, 1 - 1080/2048 of the frame).
+        const float backingW = imageBackingW > 0 ? float(imageBackingW)
+                                                 : float(imageW);
+        const float backingH = imageBackingH > 0 ? float(imageBackingH)
+                                                 : float(imageH);
         glUniform2f(glGetUniformLocation(actorProgram, "textureSize"),
-                    float(imageW), float(imageH));
+                    backingW, backingH);
         glUniform2f(glGetUniformLocation(actorProgram, "imageSize"),
                     float(imageW), float(imageH));
         GLint viewport[4] = {};

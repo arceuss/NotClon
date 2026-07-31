@@ -305,6 +305,7 @@ public:
                           GLuint customProgram = 0,
                           const std::vector<ActorShaderBinding>* customUniforms = nullptr,
                           int imageW = 0, int imageH = 0,
+                          int imageBackingW = 0, int imageBackingH = 0,
                           bool textureGlow = false,
                           const std::vector<ActorPolygonVertex>* polygon = nullptr,
                           bool polygonTriangles = true, int cullMode = 0,

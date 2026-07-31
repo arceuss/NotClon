@@ -2251,7 +2251,9 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
                               a.tex.id, st.blend, st.zWrite, st.zTest, st.clearZ,
                               0, 0, 1, 1, customProgram,
                               customProgram ? &shaderBindings : nullptr,
-                              a.tex.w, a.tex.h, false, &a.polygonVertices,
+                              a.tex.w, a.tex.h,
+                              a.textureBackingW, a.textureBackingH,
+                              false, &a.polygonVertices,
                               a.polygonTriangles, a.cullMode, w.zoomZ);
         } else {
             R.drawActorQuad3D(w.x, w.y, w.z, ox, oy, sw, sh,
@@ -2264,7 +2266,8 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
                               a.tex.id, st.blend, st.zWrite, st.zTest, st.clearZ,
                               su0, sv0, su1, sv1, customProgram,
                               customProgram ? &shaderBindings : nullptr,
-                              a.tex.w, a.tex.h);
+                              a.tex.w, a.tex.h,
+                              a.textureBackingW, a.textureBackingH);
             if (w.glowA > 0.0001f) {
                 R.drawActorQuad3D(w.x, w.y, w.z, ox, oy, sw, sh,
                                   w.rotX, w.rotY, w.rotZ, w.skewX,
@@ -2275,7 +2278,9 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
                                   w.glowR, w.glowG, w.glowB, w.glowA,
                                   a.tex.id, st.blend, st.zWrite, st.zTest, false,
                                   su0, sv0, su1, sv1, 0, nullptr,
-                                  a.tex.w, a.tex.h, true);
+                                  a.tex.w, a.tex.h,
+                                  a.textureBackingW, a.textureBackingH,
+                                  true);
             }
         }
     }
