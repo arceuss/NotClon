@@ -2946,6 +2946,31 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
                                          v_.begin(),v_.end());
             drawLayer(texMoonHighway_.id, ch::BLEND_NECK);
         } else {
+            // Track FIRST: its shader sits in render queue 1950 (before the
+            // default transparent queue), so YARG itself draws it before the
+            // frets and notes. Drawing it last made it replace anything the
+            // mods pushed below the track plane -- a per-lane negative movey
+            // sank a fret under the surface and the track's LEQUAL pass
+            // painted over it (moon never had this: it is painter's order
+            // throughout). Track.shadergraph is SurfaceType TRANSPARENT with
+            // ZWriteControl Auto -> depth writes OFF (the old "opaque,
+            // depth-written" reading was wrong -- pixels matched over the
+            // black clear, but the phantom track depth z-killed every
+            // coplanar transparent layer above it, most visibly the
+            // beatlines 0.002 up). Keep the colour path as-is; just do not
+            // write depth, like YARG.
+            const Mat4 track = engineModel(0.0f,-0.001f,15.0f,
+                                           -0.000002f,0.7071068f,0.7071068f,
+                                           0.000002f,1.01f,6.0f,1.0f);
+            glDisable(GL_BLEND);
+            glDepthMask(GL_FALSE);
+            drawEngineMesh(yargTrack_,camera,track,6,white,alpha,
+                           texYargTrackFade_.id,texYargTrackSmall_.id,
+                           texYargTrackSide_.id,
+                           scrollNow*noteSpeed*0.15f);
+            glDepthMask(GL_TRUE);
+            glEnable(GL_BLEND);
+            yargMaskDraws.push_back({&yargTrack_,track});
             for (int side : {-1, 1}) {
                 const float trimQx = side < 0 ? 0.00073294336f : 0.0f;
                 const float trimQy = side < 0 ? -0.99999976f : -1.0f;
@@ -3343,26 +3368,6 @@ void Renderer::drawEngine(const Chart& chart, double beat, const RenderOpts& o,
         };
 
         if (!o.playfield && mods.hideboard == 0.0f) {
-            const Mat4 track = engineModel(0.0f,-0.001f,15.0f,
-                                           -0.000002f,0.7071068f,0.7071068f,
-                                           0.000002f,1.01f,6.0f,1.0f);
-            // Track.shadergraph is SurfaceType TRANSPARENT with
-            // ZWriteControl Auto -> depth writes OFF (the old "opaque,
-            // depth-written" reading was wrong -- pixels matched over the
-            // black clear, but the phantom track depth z-killed every
-            // coplanar transparent layer above it, most visibly the
-            // beatlines 0.002 up). Keep the colour path as-is; just do not
-            // write depth, like YARG.
-            glDisable(GL_BLEND);
-            glDepthMask(GL_FALSE);
-            drawEngineMesh(yargTrack_,camera,track,6,white,alpha,
-                           texYargTrackFade_.id,texYargTrackSmall_.id,
-                           texYargTrackSide_.id,
-                           scrollNow*noteSpeed*0.15f);
-            glDepthMask(GL_TRUE);
-            glEnable(GL_BLEND);
-            yargMaskDraws.push_back({&yargTrack_,track});
-
             // Beatlines (queue 2975) sit between the track and the solo
             // overlays (2979).
             setupYargQuadProg(yargBeatline_);
