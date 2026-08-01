@@ -268,7 +268,8 @@ public:
                    float songTime, double nowSec, float bpm,
                    const Mat4* mvpOverride = nullptr,
                    const Mat4* piuMvpOverride = nullptr,
-                   const Mat4* engineMvpOverride = nullptr);
+                   const Mat4* engineMvpOverride = nullptr,
+                   const Mat4* gh3MvpOverride = nullptr);
 
     // Requires a current GL context. assetDir must end with a separator.
     bool init(int w, int h, const std::string& assetDir);
@@ -483,6 +484,9 @@ private:
     void drawPiuLayer(GLuint tex, int blend);
     void drawGh3Layer(GLuint tex, int blend, bool fade = false);
     void drawGh3Whammy(GLuint tex, bool glow);
+    void gh3CamVtx(ch::Vtx& t) const;
+    bool gh3CamOn_ = false;
+    float gh3Cam_[12] = {};             // 3x3 rot/scale + translation
     // The pump playfield -- a wholly separate field, not a reskin. See the
     // comment on the definition.
     void drawPiu(const Chart& chart, double beat, const RenderOpts& o,

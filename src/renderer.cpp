@@ -4367,38 +4367,34 @@ static Mat4 piuFieldLocal(const Mods& mods, double beat, float centerX) {
     return mat_mul(effect, local);
 }
 
-// The GH3 field's whole-field transform: tilt/wag/mini exactly as
-// piuFieldLocal does them, but conjugated about the strike line's centre
-// (640, 655) in the vscreen -- the point the player watches -- and with the
-// re-translation folded in because the GH3 projection carries no placement
-// step of its own.
-static Mat4 gh3FieldLocal(const Mods& mods, double beat) {
-    const float tilt = -30.0f * mods.tilt * 3.14159265f / 180.0f;
-    const float wag = mods.wag * 21.0f * sinf(float(beat) * 3.14159265f) *
-                      3.14159265f / 180.0f;
-    float zoom = 1.0f - 0.5f * mods.mini;
-    if (mods.tilt > 0.0f)      zoom *= 1.0f - 0.1f * mods.tilt;
-    else if (mods.tilt < 0.0f) zoom *= 1.0f + 0.1f * mods.tilt;
-
-    const float cx = cosf(tilt), sx = sinf(tilt);
-    const float cz = cosf(wag),  sz = sinf(wag);
-    Mat4 effect{};
-    effect.m[0]  = zoom *  cz;
-    effect.m[1]  = zoom *  sz * cx;
-    effect.m[2]  = zoom * -sz * sx;
-    effect.m[4]  = zoom * -sz;
-    effect.m[5]  = zoom *  cz * cx;
-    effect.m[6]  = zoom * -cz * sx;
-    effect.m[9]  = zoom *  sx;
-    effect.m[10] = zoom *  cx;
-    effect.m[15] = 1.0f;
-
-    Mat4 fwd{}, back{};
-    fwd.m[0] = fwd.m[5] = fwd.m[10] = fwd.m[15] = 1.0f;
-    fwd.m[12] = -640.0f; fwd.m[13] = -655.0f;
-    back.m[0] = back.m[5] = back.m[10] = back.m[15] = 1.0f;
-    back.m[12] = 640.0f; back.m[13] = 655.0f;
-    return mat_mul(back, mat_mul(effect, fwd));
+// The GH3 field's camera mods, in real 3D. The 2D layout embeds LOSSLESSLY
+// into a perspective view: every vertex's depth follows from its screen y
+// alone (sprite scale is linear in the geometric fraction g and projective
+// scale is 1/depth, so depth = 0.8/s(g), normalised to 1 at the strike
+// line). Each vertex is unprojected into that view, rotated/zoomed about
+// the strike line's centre, and reprojected. FOV 68 is GH3's own choice --
+// the highway_prepass companion camera bakes tan 34 deg into its trapezoid
+// params. With the mods neutral the map is SKIPPED, so the 2D render stays
+// bit-identical: the embed is exact by construction, never an
+// approximation of the 2D look.
+void Renderer::gh3CamVtx(ch::Vtx& t) const {
+    const float T = 0.67451f;             // tan(34 deg) -- FOV 68
+    const float A = 1280.0f / 720.0f;
+    float g = (t.y - 305.0f) / 350.0f;
+    // s(g) hits zero at the lanes' own vanishing point (y ~ 146); clamp a
+    // hair below so sidebar/string tips keep a finite depth.
+    if (g < -0.40f) g = -0.40f;
+    const float w = 0.8f / (0.25f + 0.55f * g);
+    const float p[3] = { (t.x - 640.0f) / 640.0f * T * A * w,
+                         (360.0f - t.y) / 360.0f * T * w,
+                         -w };
+    float q[3];
+    for (int i = 0; i < 3; ++i)
+        q[i] = gh3Cam_[i*3+0]*p[0] + gh3Cam_[i*3+1]*p[1] + gh3Cam_[i*3+2]*p[2]
+             + gh3Cam_[9+i];
+    const float d = q[2] < -0.05f ? -q[2] : 0.05f;
+    t.x = 640.0f + q[0] / d / (T * A) * 640.0f;
+    t.y = 360.0f - q[1] / d / T * 360.0f;
 }
 
 // The PIU playfield.
@@ -4758,6 +4754,7 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
 
 void Renderer::drawGh3Layer(GLuint tex, int blend, bool fade) {
     if (v_.empty()) return;
+    if (gh3CamOn_) for (auto& t : v_) gh3CamVtx(t);
     applyFieldTint();
     glUseProgram(gh3Sprite_);
     glBlendFunc(blend == ch::BLEND_ADD ? GL_ONE : GL_ONE,
@@ -4783,6 +4780,7 @@ void Renderer::drawGh3Layer(GLuint tex, int blend, bool fade) {
 // premultiplying shader turns into ONE/ONE).
 void Renderer::drawGh3Whammy(GLuint tex, bool glow) {
     if (v_.empty()) return;
+    if (gh3CamOn_) for (auto& t : v_) gh3CamVtx(t);
     applyFieldTint();
     glUseProgram(gh3Whammy_);
     glBlendFunc(GL_ONE, glow ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
@@ -4822,6 +4820,36 @@ void Renderer::drawGh3(const Chart& chart, double beat, const RenderOpts& o,
     const float gh3T = mods.gh3 < 0.0f ? 0.0f : (mods.gh3 > 1.0f ? 1.0f : mods.gh3);
     if (gh3T <= 0.0f) return;
     gh3Mvp_ = mvp;
+
+    // Camera mods (tilt/wag/mini) as a REAL camera about the strike line's
+    // centre, applied per vertex in gh3CamVtx. Angles and zoom shaping match
+    // piuFieldLocal so the knobs feel identical across fields; the signs
+    // flip because gh3CamVtx works in a y-up view space where piuFieldLocal's
+    // matrix was written y-down. Neutral mods leave gh3CamOn_ false and the
+    // map is skipped entirely -- the 2D render is bit-identical.
+    gh3CamOn_ = mods.tilt != 0.0f || mods.wag != 0.0f || mods.mini != 0.0f;
+    if (gh3CamOn_) {
+        const float T = 0.67451f;
+        const float tilt = 30.0f * mods.tilt * 3.14159265f / 180.0f;
+        const float wag = -mods.wag * 21.0f * sinf(float(beat) * 3.14159265f) *
+                          3.14159265f / 180.0f;
+        float zoom = 1.0f - 0.5f * mods.mini;
+        if (mods.tilt > 0.0f)      zoom *= 1.0f - 0.1f * mods.tilt;
+        else if (mods.tilt < 0.0f) zoom *= 1.0f + 0.1f * mods.tilt;
+        const float cx = cosf(tilt), sx = sinf(tilt);
+        const float cz = cosf(wag),  sz = sinf(wag);
+        // Rz(wag) * Rx(tilt), rows of the row-major 3x3, all scaled by zoom.
+        const float M[9] = {
+            zoom *  cz, zoom * -sz * cx, zoom *  sz * sx,
+            zoom *  sz, zoom *  cz * cx, zoom * -cz * sx,
+            0.0f,       zoom *  sx,      zoom *  cx };
+        // Conjugate about the strike line's view-space point (0, yc, -1).
+        const float pc[3] = { 0.0f, (360.0f - 655.0f) / 360.0f * T, -1.0f };
+        for (int i = 0; i < 9; ++i) gh3Cam_[i] = M[i];
+        for (int i = 0; i < 3; ++i)
+            gh3Cam_[9 + i] = pc[i] - (M[i*3+0]*pc[0] + M[i*3+1]*pc[1] +
+                                      M[i*3+2]*pc[2]);
+    }
 
     // guitar_tweaks.q, *1 suffix. Derived values follow generate_pos_table:
     // the tweak-file gem_end_scale is dead there, and so is fretbar's -- both
@@ -5252,16 +5280,17 @@ void Renderer::drawGh3(const Chart& chart, double beat, const RenderOpts& o,
                 strip(*glowOut, lane < 0 ? 1.0f : 3.5f, g);
             }
         };
-        // whammy_shorten: the tail is 0.25 beats shorter than the charted
-        // sustain, and sustains of half a beat or less get NO tail at all
-        // (SetUpSustains -- this feeds both scoring and unitLengthTime, the
-        // visual length).
+        // Tail length is CH's, by user choice: the full charted sustain,
+        // ending at the exact point the CH ribbons end. GH3's authentic
+        // whammy_shorten (every tail 0.25 beats short, nothing at or under
+        // half a beat -- the famously stubby Neversoft tails) is
+        // deliberately NOT applied; see AGENTS.md if it is ever wanted back.
         for (const auto& n : chart.notes) {
             const double tHit = chart.beatToSec(n.beat);
             for (int lane = 0; lane < 5; ++lane) {
-                if (!(n.frets & (1 << lane)) || n.sustain[lane] <= 0.5) continue;
+                if (!(n.frets & (1 << lane)) || n.sustain[lane] <= 0.0) continue;
                 const double tEnd =
-                    chart.beatToSec(n.beat + n.sustain[lane] - 0.25);
+                    chart.beatToSec(n.beat + n.sustain[lane]);
                 if (songTime >= tEnd) continue;
                 const bool held = !o.noBot && songTime >= tHit;
                 const bool dead = o.noBot &&
@@ -5270,9 +5299,9 @@ void Renderer::drawGh3(const Chart& chart, double beat, const RenderOpts& o,
                           dead ? vWhamDead : vWham[lane],
                           dead ? nullptr : &vWhamGlow[lane]);
             }
-            if (n.open && n.openSustain > 0.5) {
+            if (n.open && n.openSustain > 0.0) {
                 const double tEnd =
-                    chart.beatToSec(n.beat + n.openSustain - 0.25);
+                    chart.beatToSec(n.beat + n.openSustain);
                 if (songTime < tEnd) {
                     const bool held = !o.noBot && songTime >= tHit;
                     const bool dead = o.noBot &&
@@ -5952,6 +5981,17 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
         projection,
         mat_mul(actorModel,
                 piuFieldLocal(actorFields_[pn - 1]->mods, actorBeat_, sourceHalfW)));
+    // GH3's 1280x720 vscreen into the actor source's 480-tall frame: scaled
+    // by 2/3 (1280 maps onto the full 853 logical width) and centred, the
+    // same role piuFieldLocal's translate plays for the pump pad. The
+    // field's own tilt/wag/mini and whole-field moves compose inside
+    // drawGh3's path from this player's mods.
+    Mat4 gh3Local{};
+    gh3Local.m[0] = gh3Local.m[5] = 480.0f / 720.0f;
+    gh3Local.m[10] = gh3Local.m[15] = 1.0f;
+    gh3Local.m[12] = -640.0f * (480.0f / 720.0f);
+    gh3Local.m[13] = -360.0f * (480.0f / 720.0f);
+    const Mat4 gh3Mvp = mat_mul(projection, mat_mul(actorModel, gh3Local));
     const Mods& playerMods = actorFields_[pn - 1]->mods;
     const int engineStyle = playerMods.moonscraper >= playerMods.yarg ? 1 : 2;
     const Mat4 sourceEngineView = engineView(engineStyle);
@@ -5990,7 +6030,7 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
     fieldTint_[2] = b; fieldTint_[3] = a;
     drawField(*actorChart_, actorBeat_, *actorOpts_, *actorFields_[pn - 1],
               0, W, actorScrollNow_, actorSongTime_, actorNowSec_, actorBpm_,
-              &actorMvp, &piuMvp, &engineMvp);
+              &actorMvp, &piuMvp, &engineMvp, &gh3Mvp);
     for (int i = 0; i < 4; ++i) fieldTint_[i] = oldTint[i];
 }
 
@@ -6172,7 +6212,8 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                          float songTime, double nowSec, float bpm,
                          const Mat4* mvpOverride,
                          const Mat4* piuMvpOverride,
-                         const Mat4* engineMvpOverride) {
+                         const Mat4* engineMvpOverride,
+                         const Mat4* gh3MvpOverride) {
     Mods& mods = E.mods;
     float& mx = E.mx; float& my = E.my; float& mz = E.mz;
     const float noteSpeed = E.noteSpeed;
@@ -6686,11 +6727,19 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         // GH3's authored space is 1280x720, y down (strike line at y=655,
         // screen centre x=640). Map it across this player's viewport strip,
         // the same shape as the PIU projection above.
+        // Square pixels regardless of the strip: the vscreen maps at the
+        // FULL framebuffer's scale and x=640 lands on the strip's centre --
+        // fe76165's rule that two-player fields keep single-player pixel
+        // proportions, the same shape as the PIU projection above. The old
+        // vpW/W factor squeezed the whole vscreen into the half strip, which
+        // is exactly the 2P stretch the engine styles once had. Reduces to
+        // the old matrix verbatim when the strip is the whole screen.
         Mat4 gh3Proj{};
-        gh3Proj.m[0] = 2.0f / 1280.0f * (float(vpW) / float(W));
+        gh3Proj.m[0] = 2.0f / 1280.0f;
         gh3Proj.m[5] = -2.0f / 720.0f;
         gh3Proj.m[10] = gh3Proj.m[15] = 1.0f;
-        gh3Proj.m[12] = -1.0f + 2.0f * float(vpX) / float(W);
+        gh3Proj.m[12] = 2.0f * (float(vpX) + float(vpW) * 0.5f) / float(W)
+                        - 1.0f - 640.0f * (2.0f / 1280.0f);
         gh3Proj.m[13] = 1.0f;
         // Whole-field movex/movey (mx/my, world units -- the offsets the CH
         // field adds through its uOffset uniform) ride the field matrix,
@@ -6703,8 +6752,11 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         gh3Move.m[0] = gh3Move.m[5] = gh3Move.m[10] = gh3Move.m[15] = 1.0f;
         gh3Move.m[12] = (o.px + mx) * w2v;
         gh3Move.m[13] = -(o.py + my) * w2v;
+        // An actor player source supplies its own projection*model*local (the
+        // piuMvp treatment). tilt/wag/mini are no longer a matrix here --
+        // they are the real 3D camera applied per vertex in gh3CamVtx.
         const Mat4 gh3DrawMvp =
-            mat_mul(gh3Proj, mat_mul(gh3Move, gh3FieldLocal(mods, beat)));
+            mat_mul(gh3MvpOverride ? *gh3MvpOverride : gh3Proj, gh3Move);
         drawGh3(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
                 gh3DrawMvp);
     }
