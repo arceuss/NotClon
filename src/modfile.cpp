@@ -494,6 +494,7 @@ bool ModDoc::load(const std::string& path) {
     entries.clear();
     keys_.clear();
     chartDir.clear();
+    background.clear();
 
     char line[512];
     int lineNo = 0;
@@ -513,6 +514,9 @@ bool ModDoc::load(const std::string& path) {
         }
         else if (s.compare(0, 10, "#fxshader ") == 0) {
             fxShaders.push_back(nc_trim(s.substr(10))); continue;
+        }
+        else if (s.compare(0, 12, "#background ") == 0) {
+            background = nc_trim(s.substr(12)); continue;
         }
         else if (s.compare(0, 9, "#fxchain ") == 0) {
             fxChain = nc_trim(s.substr(9)); continue;
@@ -570,6 +574,8 @@ bool ModDoc::save(const std::string& path) const {
     for (const auto& p : bgShaders) fprintf(f, "#bgshader %s%c", p.c_str(), 10);
     for (const auto& p : fxShaders) fprintf(f, "#fxshader %s%c", p.c_str(), 10);
     if (!fxChain.empty()) fprintf(f, "#fxchain %s%c", fxChain.c_str(), 10);
+    if (!background.empty())
+        fprintf(f, "#background %s%c", background.c_str(), 10);
     if (players == 2) fprintf(f, "#players 2%c", 10);
     fprintf(f, "# tick   *approach   percent   mod%c%c", 10, 10);
     // The "#! " prefix is folded into the tick field's width so muted lines

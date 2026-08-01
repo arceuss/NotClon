@@ -737,6 +737,14 @@ int main(int argc, char** argv) {
         { const size_t sl = modPath.find_last_of("/\\");
           const std::string mdir = sl == std::string::npos ? std::string()
                                                            : modPath.substr(0, sl);
+          // A `#background` still/movie the document names, resolved against
+          // the .ncmod's folder ONLY. Added before the shader layers so they
+          // draw over it; after any .sm media, so the more specific source
+          // covers the generic one.
+          if (!doc.background.empty()) {
+              const auto b = doc.shaderPaths({doc.background}, mdir);
+              if (!b.empty()) bg.loadMedia(b[0], float(bgScale));
+          }
           for (const auto& fp : doc.shaderPaths(doc.bgShaders, mdir))
               bg.addShader(fp, true);
           for (const auto& fp : doc.shaderPaths(doc.fxShaders, mdir))

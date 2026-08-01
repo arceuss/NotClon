@@ -235,6 +235,12 @@ int main(int argc, char** argv) {
         // Relative to the .ncmod, so a modchart and its shaders/ folder travel
         // together and reopening the document restores the whole effect.
         const std::string mdir = modPath.empty() ? dir : dirName(modPath);
+        // `#background`: the document's own still/movie, .ncmod-relative
+        // only, under the shader layers like the encoder does it.
+        if (!doc.background.empty()) {
+            const auto b = doc.shaderPaths({doc.background}, mdir);
+            if (!b.empty()) bg->loadMedia(b[0], float(bgScale));
+        }
         for (const auto& fp : doc.shaderPaths(doc.bgShaders, mdir))
             bg->addShader(fp, true);
         for (const auto& fp : doc.shaderPaths(doc.fxShaders, mdir))

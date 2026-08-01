@@ -27,6 +27,7 @@ Lines starting with `#` are comments. A few of them mean something:
 | `#bgshader <path>` | load a background shader, registering its uniforms as `bg.<name>` knobs. Repeatable. |
 | `#fxshader <path>` | load a playfield shader, registering `fx.<name>` knobs. Repeatable. |
 | `#fxchain <path>` | load a multi-pass shader chain. |
+| `#background <path>` | a still image or movie drawn as the background, under any shader layers. The path resolves against the `.ncmod`'s own folder **only** — never the chart's. |
 
 Shader paths resolve against the **`.ncmod`'s own folder**, so a modchart and
 its `shaders/` folder move together. Carrying the pointer is what makes the

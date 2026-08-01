@@ -312,6 +312,57 @@ bool Background::loadFromSm(const std::string& smPath, const std::string& songDi
     return true;
 }
 
+bool Background::loadMedia(const std::string& mediaPath, float videoScale) {
+    videoScale_ = videoScale;
+    const std::string ext = lowerExtOf(mediaPath);
+    if (!isBitmapExt(ext) && !isMovieExt(ext)) {
+        log_.push_back("#background: '" + mediaPath + "' (." + ext +
+                       ") is not a supported still or movie");
+        return false;
+    }
+    FILE* probe = fopen(mediaPath.c_str(), "rb");
+    if (!probe) {
+        log_.push_back("#background: '" + mediaPath +
+                       "' not found (paths resolve against the .ncmod's "
+                       "folder only)");
+        return false;
+    }
+    fclose(probe);
+    Layer L;
+    SmBgChange c;
+    c.file1 = mediaPath;
+    c.path1 = mediaPath;
+    c.media = isMovieExt(ext) ? BgMedia::Video : BgMedia::Still;
+    c.startBeat = 0.0;
+    c.startSec = 0.0;
+    L.list.changes.push_back(c);
+    ensureGL();
+    L.stills.resize(1);
+    L.videoIdx.assign(1, -1);
+    if (c.media == BgMedia::Still) {
+        L.stills[0] = gl_loadTex(mediaPath, /*repeat*/ false, /*flipY*/ false);
+        if (!L.stills[0].id) {
+            log_.push_back("#background: cannot decode '" + mediaPath + "'");
+            return false;
+        }
+    } else {
+        auto vs = std::make_unique<VideoStream>();
+        if (!vs->open(mediaPath, videoScale_)) {
+            log_.push_back("#background: cannot open movie '" + mediaPath + "'");
+            return false;
+        }
+        char m[256];
+        snprintf(m, sizeof m, "movie %s: decoding %dx%d @ %.3f fps, %.2fs",
+                 mediaPath.c_str(), vs->texW(), vs->texH(),
+                 vs->fps(), vs->duration());
+        log_.push_back(m);
+        L.videoIdx[0] = int(videos_.size());
+        videos_.push_back(std::move(vs));
+    }
+    layers_.push_back(std::move(L));
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // The two synthetic knobs, read back. Undriven means fully on at identity
 // scale -- a shader named on the command line with no modchart entry behaves

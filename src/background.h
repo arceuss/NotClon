@@ -35,6 +35,12 @@ public:
     bool loadFromSm(const std::string& smPath, const std::string& songDir,
                     float videoScale);
 
+    // A single still or movie named directly (a .ncmod's `#background`
+    // line), shown from second 0 for the whole render: a one-change media
+    // layer through the same drawing machinery as #BGCHANGES. The caller
+    // resolves the path (against the .ncmod's folder, nothing else).
+    bool loadMedia(const std::string& mediaPath, float videoScale);
+
     // A GLSL fragment-shader layer (--bgshader), drawn over any media layer in
     // the order added. Compile failure logs and returns false; nothing is
     // added. Uniforms beyond the built-in set register as bg.<name> knobs a

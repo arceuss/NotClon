@@ -231,6 +231,13 @@ public:
     std::vector<std::string> bgShaders, fxShaders;
     std::string fxChain;
 
+    // A background still or movie the modchart names itself, written as a
+    // `#background <path>` line. Resolves against the .ncmod's OWN folder
+    // only -- deliberately never against the chart's or the CWD -- so a
+    // modchart and its media travel together the way its shaders do. Drawn
+    // under every shader layer. Empty if the file did not name one.
+    std::string background;
+
     // The above, made absolute against `dir` (the folder the .ncmod was loaded
     // from). Empty entries are skipped.
     std::vector<std::string> shaderPaths(const std::vector<std::string>& rel,
