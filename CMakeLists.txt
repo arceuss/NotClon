@@ -69,6 +69,10 @@ add_executable(sm-timing-test devtools/tests/sm_timing_test.cpp)
 target_include_directories(sm-timing-test PRIVATE src)
 add_test(NAME sm-timing COMMAND sm-timing-test)
 
+add_executable(audio-clock-test editor/audio_clock_test.cpp)
+target_include_directories(audio-clock-test PRIVATE editor)
+add_test(NAME audio-clock COMMAND audio-clock-test)
+
 add_executable(chart-phrase-test devtools/tests/chart_phrase_test.cpp)
 target_include_directories(chart-phrase-test PRIVATE src)
 add_test(NAME chart-phrase COMMAND chart-phrase-test)
@@ -147,7 +151,7 @@ target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${SDL3_ROOT}/include)
 add_executable(notclon-editor editor/main.cpp editor/audio.cpp)
 add_dependencies(notclon-editor notclon_assets)
 target_link_libraries(notclon-editor PRIVATE notclon_core imgui
-                      ${SDL3_ROOT}/lib/x64/SDL3.lib)
+                      ${SDL3_ROOT}/lib/x64/SDL3.lib ole32 avrt)
 target_include_directories(notclon-editor PRIVATE ${SDL3_ROOT}/include)
 
 # SDL3 is shipped as a DLL; put it next to the exe so the editor just runs.
@@ -155,7 +159,7 @@ add_custom_command(TARGET notclon-editor POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${SDL3_ROOT}/lib/x64/SDL3.dll $<TARGET_FILE_DIR:notclon-editor>)
 
-foreach(t notclon_core notclon notclon-editor imgui notclon_lua lua-cmd-test sm-timing-test chart-phrase-test lua-message-test actor-runtime-test)
+foreach(t notclon_core notclon notclon-editor imgui notclon_lua lua-cmd-test sm-timing-test audio-clock-test chart-phrase-test lua-message-test actor-runtime-test)
   if(MSVC)
     target_compile_options(${t} PRIVATE /O2)
   else()

@@ -1,44 +1,39 @@
 // Song playback for the editor.
 //
 // Decoding is delegated to ffmpeg, which this project already requires to
-// encode. That covers every container Clone Hero accepts -- ogg, opus, mp3,
-// wav -- instead of the one format a vendored decoder would give us, and costs
-// no new dependency. The whole song is pulled into memory as s16 stereo once
-// (about 45 MB for four minutes), because scrubbing wants random access and
-// streaming a seekable decode would be far more machinery than this needs.
-//
-// THE AUDIO DEVICE IS THE CLOCK while playing. The obvious arrangement -- run
-// the playhead off frame delta time and nudge audio to match -- does not work:
-// a free-running visual clock and a crystal-timed audio device drift apart
-// continuously, so the correction fires every second or so, and each
-// correction is a buffer flush, which is an audible click. Reading the
-// playhead out of the device instead makes drift structurally impossible.
-// time() therefore reports what the listener has actually heard, and the
-// caller derives the tick from it.
-//
-// Chart seconds and song seconds are the same timeline (Chart::tickToSec
-// already folds in Offset), so nothing extra lines them up.
+// encode. The whole song is held as s16 stereo because scrubbing needs random
+// access. Playback itself uses WASAPI: the stream's IAudioClock reports the
+// sample currently reaching the speakers, so the preview follows heard audio
+// rather than bytes that SDL has merely handed to the endpoint buffer.
 #pragma once
-
-#include <SDL3/SDL.h>
 
 #include <string>
 #include <vector>
 
 namespace nce {
 
+namespace detail {
+
+inline double sourceFrameAt(double sourceAnchor, double clockAnchor,
+                            double clockNow, double clockFrequency,
+                            double sourceRate, double playbackRate) {
+    if (clockFrequency <= 0.0) return sourceAnchor;
+    return sourceAnchor + (clockNow - clockAnchor) / clockFrequency
+                        * sourceRate * playbackRate;
+}
+
+}  // namespace detail
+
 class Audio {
 public:
     ~Audio() { close(); }
 
-    // False if the file is missing or ffmpeg is not on PATH. Not fatal: the
-    // editor is perfectly usable silent, so callers just report it.
+    // False if the file is missing, ffmpeg is unavailable, or the playback
+    // endpoint cannot be opened. Audio remains optional in the editor.
     bool load(const std::string& path);
-    void close();
-    // Decode-and-mix several stems into one stereo buffer, the way CH plays
-    // every stem it finds at once. One path behaves exactly like load().
     bool loadMix(const std::vector<std::string>& paths);
-    bool ok() const { return stream_ != nullptr; }
+    void close();
+    bool ok() const;
 
     double duration() const {
         return pcm_.empty() ? 0.0 : double(pcm_.size() / CH) / double(RATE);
@@ -47,53 +42,30 @@ public:
     void setPlaying(bool on);
     void setRate(float rate);
 
-    // Song seconds the listener has actually heard, interpolated between
-    // device updates. Not const: it carries the smoothing state.
+    // Song seconds corresponding to the sample currently reaching the
+    // speakers. The latest IAudioClock reading is QPC-interpolated between
+    // audio-thread updates.
     double time();
-
-    // True once the song has run out -- the caller must fall back to its own
-    // clock, because time() has stopped advancing.
     bool exhausted() const;
 
-    // Refill the device. Call once a frame while playing.
-    void pump();
-
-    // Hard cut. Use when the user scrubs or jumps -- NOT on a plain
-    // unpause: SDL_ResumeAudioStreamDevice continues bit-perfectly from the
-    // paused sample, while a seek here flushes the stream and restarts at
-    // the write-side clock, audibly lurching off the heard position.
+    // Hard cut. WASAPI Stop + Reset discards the endpoint buffer before the
+    // new position is primed, so stale audio cannot survive a scrub.
     void seek(double sec);
-
-    // True once seek() has primed the stream; a plain play toggle needs no
-    // reseek after that.
     bool primed() const { return primed_; }
 
 private:
     static const int RATE = 48000;
     static const int CH   = 2;
 
+    struct Wasapi;
+    bool openDevice();
+
     std::vector<short> pcm_;           // interleaved stereo
-    SDL_AudioStream*   stream_ = nullptr;
-    size_t             cursor_ = 0;    // next sample frame to queue
+    Wasapi*            out_ = nullptr;
     bool               playing_ = false;
+    bool               primed_ = false;
     float              speed_ = 1.0f;
-    // Song seconds handed to the device so far. Starts wherever seek() put it,
-    // which may be NEGATIVE: a chart with a negative offset has beats before
-    // the audio file starts, and those are played as silence rather than
-    // clamped away. Clamping them was what made the playhead lurch forward by
-    // the whole lead-in the moment the song proper began -- the caller had been
-    // free-running on frame delta through the negative region while the device
-    // was already several seconds into the file.
-    double             writeSec_ = 0.0;
-
-    size_t queuedFrames() const;
-    double rawTime() const;
-
-    // The device drains in chunks of a thousand-odd frames, so rawTime()
-    // moves in ~21 ms steps. time() advances on the wall clock and pulls
-    // toward rawTime() proportionally, absorbing the steps.
-    double smooth_ = 0.0, lastWall_ = 0.0;
-    bool   primed_ = false;
+    double             lastTime_ = 0.0;
 };
 
 }  // namespace nce

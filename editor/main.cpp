@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
     bool haveChart = false;
     int  lastTick = chart.resolution * 16;
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "SDL_Init: %s%c", SDL_GetError(), 10);
         return 1;
     }
@@ -460,7 +460,6 @@ int main(int argc, char** argv) {
         // at the right speed instead of at a fixed ticks-per-second. The clock
         // is the audio device wherever it can be -- see audio.h.
         if (playing) {
-            audio.pump();
             double sec;
             // No `tickToSec(tick) >= 0` term here any more. It used to hand the
             // clock from frame delta to the device the instant the song proper
@@ -994,18 +993,13 @@ int main(int argc, char** argv) {
 
         audio.setRate(rate);
         // A jump needs the device refilled from the new position. A plain
-        // unpause does NOT: the stream still holds the paused sample and
-        // resumes bit-perfectly, while a reseek here flushed the queue and
-        // restarted at the write-side clock -- the "unpausing lags you back"
-        // lurch. Only the first-ever play (nothing primed yet) still seeks.
+        // unpause does NOT: WASAPI still holds the paused samples and resumes
+        // them bit-perfectly. Only the first-ever play (nothing primed yet)
+        // still seeks.
         if (tick != advancedTick ||
             (playing && !wasPlaying && !audio.primed()))
             audio.seek(chart.tickToSec(tick));
         audio.setPlaying(playing);
-        // Refill every frame, playing or not: pump() is position-gated, so
-        // while paused this keeps the stream buffered at the current (or
-        // freshly sought) position for an instant, artifact-free resume.
-        audio.pump();
         wasPlaying = playing;
 
         ImGui::Render();
