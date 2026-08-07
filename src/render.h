@@ -160,19 +160,22 @@ inline void buildSustainBody(std::vector<Vtx>& out, const nc::Mods& mods,
                              int lane, float zStart, float len,
                              float halfW, int frame, const float tint[3],
                              float songTime, float songBeat, float bpm,
-                             std::vector<Vtx>* glowOut = nullptr) {
+                             std::vector<Vtx>* glowOut = nullptr,
+                             bool openStrip = false) {
     const float zEnd = zStart + len;
     const float zLo  = fmaxf(zStart, 0.0f);
     const float zHi  = fminf(zEnd, SUS_FAR_LIMIT);
     if (zHi <= zLo) return;
 
-    const float border = fminf(SUS_TOP_BORDER, len);
+    const float border =
+        fminf(openStrip ? SUS_OPEN_TOP_BORDER : SUS_TOP_BORDER, len);
     const float zB     = zEnd - border;
     // The 9-slice seam, the start of the far-fade cubic, and the ribbon end.
     const float hard[3] = { zB, SUS_FAR_LIMIT - 1.0f, zEnd };
 
     float u0, u1, v0, vB, v1;
-    sustainFrameUV(frame, u0, u1, v0, vB, v1);
+    if (openStrip) openSustainFrameUV(u0, u1, v0, vB, v1);
+    else           sustainFrameUV(frame, u0, u1, v0, vB, v1);
 
     float zr[192];
     const int n = sustainRows(zLo, zHi, hard, 3, zr, 192);
@@ -369,7 +372,8 @@ inline void buildFret(std::vector<Vtx>& oBase, std::vector<Vtx>& oLift,
                       std::vector<Vtx>& oCover, std::vector<Vtx>& oHead,
                       std::vector<Vtx>& oHeadCover, std::vector<Vtx>& oLight,
                       std::vector<Vtx>& oHalf,
-                      int lane, float headDy, bool held, float flip) {
+                      int lane, float headDy, bool held, float flip,
+                      std::vector<Vtx>* oOpenHead = nullptr) {
     const FretLane& F = FRETS[lane];
     float x = FRET_X[lane];
     const int opposite = 4 - lane;
@@ -402,12 +406,26 @@ inline void buildFret(std::vector<Vtx>& oBase, std::vector<Vtx>& oLift,
 
     // Fret_Animator moves ONLY the head transform; headCover is its child and
     // inherits the translation. base/lift/cover/halfCover never move.
-    frameU6(F.head6, u0, u1); U(u0, u1, a, b);
-    quadUp(oHead, x - hw, y0 + headDy, x + hw, y1 + headDy, z, a, 0.0f, b, 1.0f,
-           1, 1, 1, 1);
-    frameU6(F.headCover6, u0, u1); U(u0, u1, a, b);
-    quadUp(oHeadCover, x - hw, y0 + headDy, x + hw, y1 + headDy, z,
-           a, 0.0f, b, 1.0f, F.headCover[0], F.headCover[1], F.headCover[2], 1);
+    if (oOpenHead) {
+        // An open note swaps the head for a dedicated open-fret sprite and
+        // hides the headCover entirely (Fret_Animator: `head.sprite =
+        // openFret; headCover.enabled = false`). Which sprite is already in
+        // this table -- head6 is 0,1,2,1,0, exactly the open sprite's index
+        // (green/orange share one, red/blue the mirrored other, yellow its
+        // own) -- and the mirroring is the same F.flip the head uses, so the
+        // whole assignment falls out of what is already here. Each open
+        // sprite is its own 128x64 file, hence the full 0..1 span.
+        U(0.0f, 1.0f, a, b);
+        quadUp(*oOpenHead, x - hw, y0 + headDy, x + hw, y1 + headDy, z,
+               a, 0.0f, b, 1.0f, 1, 1, 1, 1);
+    } else {
+        frameU6(F.head6, u0, u1); U(u0, u1, a, b);
+        quadUp(oHead, x - hw, y0 + headDy, x + hw, y1 + headDy, z, a, 0.0f, b, 1.0f,
+               1, 1, 1, 1);
+        frameU6(F.headCover6, u0, u1); U(u0, u1, a, b);
+        quadUp(oHeadCover, x - hw, y0 + headDy, x + hw, y1 + headDy, z,
+               a, 0.0f, b, 1.0f, F.headCover[0], F.headCover[1], F.headCover[2], 1);
+    }
 
     // headLight (-995) -- Head_Lights.png, ADDITIVE (Additive.mat), tinted with
     // the head-group colour. Drawn iff the button is held; Fret_Animator.cs:117

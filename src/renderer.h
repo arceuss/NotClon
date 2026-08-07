@@ -354,6 +354,7 @@ private:
     void makeFbos();
     void destroyFbos();
     double lastHit(int lane, double now) const;
+    double lastOpenHit(double now) const;
 
     Mat4 view_{}, mvp_{}, mvp2_{}, piuMvp_{}, gh3Mvp_{};
     GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0;
@@ -426,6 +427,12 @@ private:
     // GH3 board art (assets/engine/gh3_*, see gh3.SOURCE.txt). The highway
     // surface itself is a flat black fill -- GH3's fretboard art is venue
     // geometry, not in global.pak, and black is the chosen stand-in.
+    // Open notes: the animated highlight layer every open carries (the SP
+    // variant is texSpOpen_), and the open ribbon's own sustain sheets.
+    Tex texOpenAnim_, texOpenSustain_;
+    // The head sprite a fret wears while popped by an OPEN note; indexed by
+    // FretLane::head6, which already pairs green/orange and red/blue.
+    Tex texFretOpen_[3];
     Tex texGh3Fretbar_[3];              // small, medium, large
     Tex texGh3String_, texGh3Sidebar_;
     // Nowbar pieces, lane order green..orange. down is the held-state head
@@ -474,6 +481,7 @@ private:
     std::vector<ch::Vtx> v_;
     float fieldTint_[4] = {1, 1, 1, 1};
     std::vector<double>  hitTimes_[5];
+    std::vector<double>  hitTimesOpen_;   // opens pop every fret, light none
 
     // glow > 0 re-draws the same quad as a flat-white silhouette on top, which
     // is ITG's second sprite pass (see NOTE_GLOW_FS). 0 skips it entirely.

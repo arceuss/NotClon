@@ -74,6 +74,11 @@ static const float SUS_FAR_LIMIT  = 7.75f;       // Sustains.mat / SustainGlow.m
 static const float SUS_LEN_OFFSET = 0.27142857f; // (border.w/2)/rect.height = (38/2)/70, :60
 static const float SUS_Z_OFFSET   = 0.30f;       // unheld: noteZPosition + 0.3f, :497
 static const float SUS_TOP_BORDER = 0.38f;       // border.w 38 px / PPU 100
+// The open ribbon's own 9-slice: border.w 73 px of an 85 px sprite, so its cap
+// is far deeper than a lane ribbon's and its length offset correspondingly
+// bigger ((73/2)/85 against (38/2)/70).
+static const float SUS_OPEN_TOP_BORDER = 0.73f;
+static const float SUS_OPEN_LEN_OFFSET = (73.0f * 0.5f) / 85.0f;
 static const float SUS_GLOW_EDGE  = 0.45f;       // SustainGlow.shader EDGE_LENGTH
 
 // Port of OpenITG's fYStep (NoteDisplay.cpp:983): 16 screen pixels, the
@@ -93,6 +98,11 @@ static const int SUS_FRAME_HELD  = 0;   // Sustains[3], :581
 
 // NoteColors.Sustains (NoteContainer.cs:29-36), used only while HELD. Differs
 // from NOTE_TINT on blue and orange only -- both get brighter when held.
+// NoteColors.OpenSustain (NoteContainer.cs:41). Unlike the lane ribbons, an
+// open sustain wears this whether it is held or not -- there is no separate
+// unheld/held pair for opens.
+static const float OPEN_SUSTAIN_TINT[3] = {0.86f, 0.2f, 0.98f};
+
 static const float SUSTAIN_TINT[5][3] = {
     {0.0f, 1.0f,   0.0f},
     {1.0f, 0.0f,   0.0f},
@@ -111,6 +121,19 @@ inline void sustainFrameUV(int f, float& u0, float& u1,
     v0 =  1.0f / 72.0f;
     vB = 33.0f / 72.0f;
     v1 = 71.0f / 72.0f;
+}
+
+// An open sustain is NOT a frame of the strip above: Sustains[4] resolves to
+// spr_open_sustain_strip2's first sprite, its own 512x85 texture (rect
+// 0,0,512,85, top border 73). Same two-segment 9-slice as the lane ribbons,
+// so the seam sits `height - border` up from the gem end.
+inline void openSustainFrameUV(float& u0, float& u1,
+                               float& v0, float& vB, float& v1) {
+    u0 = 0.0f;
+    u1 = 1.0f;
+    v0 =  0.0f;
+    vB = (85.0f - 73.0f) / 85.0f;
+    v1 =  1.0f;
 }
 
 static const float PPU_NOTES = 575.0f;   // spr_newnotes_strip4, note_anim, open

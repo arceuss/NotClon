@@ -1840,10 +1840,15 @@ bool Renderer::init(int w, int h, const std::string& A) {
     texStarBodyTap_ = gl_loadTex(A + "notes/spr_star_notes_strip2.png", false);
     texStarBottom_  = gl_loadTex(A + "notes/spr_star_notes_strip4.png", false);
     texSpOpen_      = gl_loadTex(A + "notes/spr_sp_highlight_strip16.png", false);
+    texOpenAnim_    = gl_loadTex(A + "notes/spr_highlight_strip16.png", false);
+    texOpenSustain_ = gl_loadTex(A + "notes/spr_open_sustain_strip2.png", false);
     texFretB_   = gl_loadTex(A + "frets/spr_newtargets_bottom_strip12.png", false);
     texFretH_   = gl_loadTex(A + "frets/spr_newtargets_head_strip6.png", false);
     texLift_    = gl_loadTex(A + "frets/spr_targets_lift.png", false);
     texHLight_  = gl_loadTex(A + "frets/Head_Lights.png", false);
+    texFretOpen_[0] = gl_loadTex(A + "frets/1_Open.png", false);
+    texFretOpen_[1] = gl_loadTex(A + "frets/2_Open.png", false);
+    texFretOpen_[2] = gl_loadTex(A + "frets/3_Open.png", false);
     // YARG is a Linear-colorspace Unity project: albedo textures import with
     // sRGBTexture 1 and Unity decodes them to linear before the BRDF. Match
     // the .meta flag per texture -- data masks (Fade/Solo/effect trim) are 0.
@@ -4270,11 +4275,28 @@ void Renderer::resize(int w, int h) {
 
 void Renderer::buildHitTimes(const Chart& chart) {
     for (int i = 0; i < 5; ++i) hitTimes_[i].clear();
+    hitTimesOpen_.clear();
     for (const auto& n : chart.notes) {
         double t = chart.beatToSec(n.beat);
         for (int lane = 0; lane < 5; ++lane)
             if (n.frets & (1 << lane)) hitTimes_[lane].push_back(t);
+        // An open note pops EVERY fret -- NeckController's open branch runs
+        // `for (i=0..4) FretAnimators[i].Play(false, true)` -- but it is not a
+        // hit on any lane, so it is kept apart from hitTimes_. That
+        // separation is the point: the head LIGHT follows the button state
+        // (Fret_Animator: `if (isHeld) headLight.enabled = true`), and an
+        // open note is played holding no frets at all. So opens raise the
+        // buttons and light nothing, on both fields.
+        if (n.open) hitTimesOpen_.push_back(t);
     }
+}
+
+double Renderer::lastOpenHit(double now) const {
+    const auto& v = hitTimesOpen_;
+    size_t lo = 0, hi = v.size();
+    while (lo < hi) { size_t m = (lo + hi) / 2; if (v[m] <= now) lo = m + 1; else hi = m; }
+    const double best = (lo > 0) ? v[lo - 1] : -1e9;
+    return now - best;
 }
 
 double Renderer::lastHit(int lane, double now) const {
@@ -5093,13 +5115,20 @@ void Renderer::drawGh3(const Chart& chart, double beat, const RenderOpts& o,
             // decays it by (button_up_pixels * dt) / button_sink_time. A
             // sustain is the exception -- CheckNoteHoldPerFrame re-slams the
             // full 20 every frame it runs, so a held lane never sinks.
-            const float dt = float(lastHit(lane, songTime));
+            // Opens raise every button here too, and GH3 has no open-note hit
+            // effect of its own -- the buttons simply pop, unlit, which falls
+            // out of leaving the open time out of heldL below.
+            const float dtLane = float(lastHit(lane, songTime));
+            const float dt = fminf(dtLane, float(lastOpenHit(songTime)));
             if (laneSus[lane]) pxL[lane] = 20.0f;
             else if (dt >= 0.0f && dt < 0.1f)
                 pxL[lane] = 20.0f * (1.0f - dt / 0.1f);
             // "held" is the fret being fingered. The bot frets a lane to hit
-            // it, so it is held for the pop and for the whole of a sustain.
-            heldL[lane] = laneSus[lane] || pxL[lane] > 0.0f;
+            // it, so it is held for the pop and for the whole of a sustain --
+            // but an open note is played holding nothing, so only the LANE's
+            // own hit counts here.
+            heldL[lane] = laneSus[lane] ||
+                          (dtLane >= 0.0f && dtLane < 0.1f);
         }
         // The whole button jumps z 3.6-3.9 -> 4.6-4.9 while raised, which is
         // what puts a popped fret in front of the gems.
@@ -5892,9 +5921,15 @@ void Renderer::drawActorPlayerSource(int pn, float x, float y, float z,
     const float viewZ0 = view_.m[14];
     if (fabsf(viewZ0) < 1e-5f) return;
     const float sceneCot = 1.0f / tanf(ch::CAM_FOV * 3.14159265f / 360.0f);
-    const float sceneAspect = actorOpts_->doc2
-                            ? float(W) * 0.5f / float(H)
-                            : float(W) / float(H);
+    // ALWAYS the full aspect, even with two fields. The halved one belongs to
+    // the DIRECT two-player layout, where each field is rendered with the
+    // full-screen camera and then squeezed into half the width by drawField's
+    // placement matrix -- mvp2_ pre-compensates for that squeeze. A proxied
+    // field supplies its own MVP, so drawField skips the placement step
+    // entirely and the field is drawn at full proportions for the actor to
+    // position. Carrying the halved aspect into this path stretched every
+    // proxied playfield to twice its width.
+    const float sceneAspect = float(W) / float(H);
 
     Mat4 cameraToActor{};
     cameraToActor.m[0] = -sourceHalfW * sceneCot / (sceneAspect * -viewZ0);
@@ -6318,6 +6353,7 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // for a bot that hits on time, so the integration telescopes to
     // `tEnd - songTime` and no history is needed.
     std::vector<ch::Vtx> susBodyV, susBodyGlowV, susGlowV;
+    std::vector<ch::Vtx> susOpenV, susOpenBodyGlowV, susOpenGlowV;
     bool laneSustaining[5] = {false, false, false, false, false};
     // ITG draws a hold body twice, exactly like a tap: a diffuse pass whose
     // alpha is the binary GetAlpha cut, and a white-silhouette glow pass
@@ -6364,20 +6400,60 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                                      songTime, float(beat), bpm);
             }
         }
+        // Open sustains. A separate pool in CH with its own prefab, sprite
+        // sheet and widths -- which is why walking only the five lanes above
+        // drew nothing for them at all. Centred on the highway (lane 2's x is
+        // 0, and lane 2 is also the mod column an open note uses), Sustains[4]
+        // = the open strip's own sprite, no +0.3 unheld z nudge (the open
+        // prefab is placed at noteZPosition flat), and NoteColors.OpenSustain
+        // whether held or not.
+        if (n.open && n.openSustain > 0.0) {
+            const double tEnd = chart.beatToSec(n.beat + n.openSustain);
+            if (songTime < tEnd) {
+                const bool  held = !o.noBot && songTime >= tHit;
+                const float gemZ = float(ssec(tHit) - scrollNow) * noteSpeed;
+                const float len = float(held ? (ssec(tEnd) - scrollNow)
+                                             : (ssec(tEnd) - ssec(tHit))) * noteSpeed
+                                + ch::SUS_OPEN_LEN_OFFSET;
+                const float zStart = held ? 0.0f : gemZ;
+                ch::buildSustainBody(susOpenV, mods, 2, zStart, len,
+                                     ch::SUS_OPEN_W * 0.5f, 0,
+                                     ch::OPEN_SUSTAIN_TINT,
+                                     songTime, float(beat), bpm,
+                                     susNeedsGlow ? &susOpenBodyGlowV : nullptr,
+                                     /*openStrip*/ true);
+                if (held)
+                    ch::buildSustainGlow(susOpenGlowV, mods, 2, len,
+                                         ch::SUS_OPEN_GLOW_W * 0.5f,
+                                         ch::OPEN_SUSTAIN_TINT,
+                                         songTime, float(beat), bpm);
+            }
+        }
     }
-    if (hidePlayfield) { susBodyV.clear(); susBodyGlowV.clear(); susGlowV.clear(); }
+    if (hidePlayfield) {
+        susBodyV.clear(); susBodyGlowV.clear(); susGlowV.clear();
+        susOpenV.clear(); susOpenBodyGlowV.clear(); susOpenGlowV.clear();
+    }
+    // Open ribbons share the lane ribbons' -1000 order; they cannot overlap
+    // (an open note is exclusive with fretted ones), so within-layer order
+    // between them never matters.
+    v_ = susOpenV;      drawLayer(texOpenSustain_.id, ch::BLEND_SPRITE);
+    v_ = susOpenBodyGlowV; drawGlowLayer(texOpenSustain_.id);
     v_ = susBodyV;      drawLayer(texSustain_.id, ch::BLEND_SPRITE);   // -1000
     v_ = susBodyGlowV;  drawGlowLayer(texSustain_.id);                  // the bGlow pass
 
     struct FretBuckets {
         std::vector<ch::Vtx> base, lift, cover, head, headCover, light, half;
+        std::vector<ch::Vtx> openHead[3];   // by FretLane::head6
     };
     FretBuckets low, top;
     for (int lane = 0; lane < (hidePlayfield ? 0 : 5); ++lane) {
         float popY = 0.0f;
         bool held = false;
+        bool openPop = false;
         if (!o.noBot) {
             const float dt = float(lastHit(lane, songTime));
+            const float dtOpen = float(lastOpenHit(songTime));
             // Fret_Animator.cs:34-38 -- Play(isSustainNote) sets isSustaining
             // and snaps to maxHeight, and :70's `if (!isSustaining)` gates the
             // descent, so a fret holding a sustain stays FROZEN at the top for
@@ -6388,10 +6464,17 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
             // behaviour, not an artifact. And isHeld is what gates the
             // headLight (:110), so the light stays on too.
             const bool sustaining = laneSustaining[lane];
-            popY = ch::fretPopY(dt, sustaining, sustaining);
+            // An open note raises this fret too, so the pop takes whichever
+            // happened more recently. `held` below deliberately does NOT --
+            // see buildHitTimes.
+            popY = ch::fretPopY(fminf(dt, dtOpen), sustaining, sustaining);
             // The bot must hold the lane to hit the note at all, so the
             // headLight is lit for the duration of the pop.
             held = sustaining || (dt >= 0.0f && dt < ch::POP_T1);
+            // The open head shows while THIS pop is the open one and the fret
+            // is not otherwise held -- `if (isHeld) openNotePlayed = false`.
+            openPop = !held && dtOpen >= 0.0f && dtOpen < ch::POP_T1 &&
+                      dtOpen <= dt;
         }
         FretBuckets& B = ch::fretOnTop(popY) ? top : low;
         std::vector<ch::Vtx>* bk[7] = {&B.base, &B.lift, &B.cover, &B.head,
@@ -6399,7 +6482,8 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         size_t n0[7];
         for (int i = 0; i < 7; ++i) n0[i] = bk[i]->size();
         ch::buildFret(B.base, B.lift, B.cover, B.head, B.headCover,
-                       B.light, B.half, lane, popY, held, mods.flip);
+                       B.light, B.half, lane, popY, held, mods.flip,
+                       openPop ? &B.openHead[ch::FRETS[lane].head6] : nullptr);
         // The receptor rule, ReceptorArrowRow.cpp:46-54: a receptor is an
         // arrow evaluated at fYOffset = 0. Which mods move frets is a
         // CONSEQUENCE: tornado's term is identically 0 there (cos(acos(b))==b)
@@ -6476,12 +6560,17 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         v_ = B.lift;      drawLayer(texLift_.id,  ch::BLEND_SPRITE);
         v_ = B.cover;     drawLayer(texFretB_.id, ch::BLEND_SPRITE);
         v_ = B.head;      drawLayer(texFretH_.id, ch::BLEND_SPRITE);
+        // Same slot as the head it replaces; no headCover follows it.
+        for (int i = 0; i < 3; ++i) {
+            v_ = B.openHead[i]; drawLayer(texFretOpen_[i].id, ch::BLEND_SPRITE);
+        }
         v_ = B.headCover; drawLayer(texFretH_.id, ch::BLEND_SPRITE);
         v_ = B.light;     drawLayer(texHLight_.id, ch::BLEND_ADD);
         v_ = B.half;      drawLayer(texFretB_.id, ch::BLEND_SPRITE);
     };
     drawFretBase(low);
     v_ = susGlowV;  drawSustainGlow();          // -999, additive, held only
+    v_ = susOpenGlowV; drawSustainGlow();       // the open ribbon's, same pass
     drawFretRest(low);
 
     // Notes, far -> near. Body -> Anim -> Head live in different atlases, so
@@ -6557,11 +6646,14 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                           ch::NOTE_TINT[5][0], ch::NOTE_TINT[5][1],
                           ch::NOTE_TINT[5][2], alpha);
             drawLayer(texOpen_.id, ch::BLEND_SPRITE, noteGlow);
-            if (isSP) {
-                // The highlight sheet is a 4x4 grid of 512x64 frames, same
-                // pivot as everything else in the note family. Frame i sits at
-                // column i%4; rows run TOP-DOWN in sprite order, and with
-                // flipY loading the top PNG row is v=1 -- hence 0.75 - row.
+            // Anim: EVERY open note carries an animated highlight, not just
+            // starpower ones (SetOpenNoteState assigns openBodyAnimationSprites
+            // unconditionally and only SWAPS in the SP sheet inside the
+            // IsStarPower branch). Both sheets are a 4x4 grid of 512x64 frames
+            // on the same 16-frame 20fps clock as the note anim. Frame i sits
+            // at column i%4; rows run TOP-DOWN in sprite order, and with flipY
+            // loading the top PNG row is v=1 -- hence 0.75 - row.
+            {
                 const int col = animFrame % 4, row = animFrame / 4;
                 const float u0 = col * 0.25f, v0 = 0.75f - row * 0.25f;
                 ch::quadUpRot(v_, dx, 0.0f, zDraw,
@@ -6569,8 +6661,26 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                                OW*0.5f, (1.0f-ch::NOTE_PIVOT_Y)*NH,
                               rotX, rotY, rotZ, noteZoom,
                               u0, v0, u0 + 0.25f, v0 + 0.25f,
-                              0.0f, 1.0f, 1.0f, alpha);
-                drawLayer(texSpOpen_.id, ch::BLEND_SPRITE, noteGlow);
+                              isSP ? 0.0f : 1.0f, 1.0f, 1.0f, alpha);
+                // The two sheets blend differently and the art says so: the SP
+                // one carries real alpha (mean 0.08) and composites, while the
+                // plain one is fully opaque black with a bright streak (mean
+                // alpha 1) -- an additive glow. Alpha-blending that one paints
+                // a black bar over the note.
+                drawLayer((isSP ? texSpOpen_ : texOpenAnim_).id,
+                          isSP ? ch::BLEND_SPRITE : ch::BLEND_ADD, noteGlow);
+            }
+            // Open_HOPO: a FOURTH layer, on top of the anim, drawn only for a
+            // pure HOPO -- frame 3 of the open strip (bodySprites[8]). Without
+            // it an open HOPO is indistinguishable from an open strum.
+            if (n.openType == NoteType::Hopo) {
+                ch::quadUpRot(v_, dx, 0.0f, zDraw,
+                              -OW*0.5f, -ch::NOTE_PIVOT_Y*NH,
+                               OW*0.5f, (1.0f-ch::NOTE_PIVOT_Y)*NH,
+                              rotX, rotY, rotZ, noteZoom,
+                              0.6f,0.0f,0.8f,1.0f,
+                              1.0f, 1.0f, 1.0f, alpha);
+                drawLayer(texOpen_.id, ch::BLEND_SPRITE, noteGlow);
             }
             }
         }

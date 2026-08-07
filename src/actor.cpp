@@ -2086,7 +2086,18 @@ void drawActor(Renderer& R, Actor& a, double sec, double beat,
         const int previousTargetW = R.actorTargetWidth();
         const int previousTargetH = R.actorTargetHeight();
         R.setActorTargetYInverted(true);
-        R.setActorTargetSize(a.aftW, a.aftH);
+        // An AFT changes RESOLUTION, not the coordinate space. Its children
+        // keep drawing in the screen's virtual space (SCREEN_WIDTH x 480);
+        // only the viewport above is the AFT's pixel size, so the same scene
+        // is simply rendered finer. Charts rely on this: the canonical idiom
+        // sizes an AFT to the display and then scales the sprite showing it
+        // by SCREEN_WIDTH/displayWidth, which only composes back to a
+        // full-screen image if what was captured was the full virtual screen.
+        // Setting the space to the AFT's pixels instead left the children
+        // laid out in an 854x480 world inside a 1920x1080 one -- everything
+        // in the wrong place and the wrong shape. 0 means "inherit the
+        // screen's", which is also correct for a nested AFT.
+        R.setActorTargetSize(0, 0);
         glFrontFace(GL_CW);
         drawActorChildren(R, a, sec, beat, targetRoot);
         glFrontFace(GLenum(previousFrontFace));
@@ -2786,7 +2797,13 @@ void LuaHost::aftCreate(Actor& a) {
         tree_->namedTextures()[a.aftName] = {
             a.aftTex, a.aftW, a.aftH, a.aftTexW, a.aftTexH
         };
-    note("ActorFrameTexture '" + a.aftName + "' created");
+    // The dimensions matter enough to log: an AFT sets the actor virtual
+    // space while its children draw, so a wrong size here shows up as
+    // everything inside it being the wrong shape.
+    note("ActorFrameTexture '" + a.aftName + "' created " +
+         std::to_string(a.aftW) + "x" + std::to_string(a.aftH) +
+         " (backing " + std::to_string(a.aftTexW) + "x" +
+         std::to_string(a.aftTexH) + ")");
 }
 
 int LuaHost::actorIndex(lua_State* L) {
