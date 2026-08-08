@@ -58,8 +58,8 @@ static void usage() {
 "  --randmods            generate a random modchart (motion mods only, at\n"
 "                        -100%..100%, re-rolled at each chart section)\n"
 "  --randengine          generate a random ENGINE VISUAL modchart: one of\n"
-"                        CH / piu / moonscraper / yarg / gh3 / taiko per\n"
-"                        chart section, always 100%, never two at once\n"
+"                        CH / piu / moonscraper / yarg / gh3 / taiko / bms\n"
+"                        per chart section, always 100%, never two at once\n"
 "  --randseed <n>        seed for --randmods/--randengine; same seed = same\n"
 "                        modchart\n"
 "  --randcount <n>       how many mods at once (default 3)\n"
@@ -244,7 +244,7 @@ static nc::ModDoc randomEngineModchart(const nc::Chart& chart, unsigned seed) {
     static const int POOL[] = {
         -1,                       // CH -- the stock field, no knob at all
         nc::MOD_PIU, nc::MOD_MOONSCRAPER, nc::MOD_YARG,
-        nc::MOD_GH3, nc::MOD_TAIKO,
+        nc::MOD_GH3, nc::MOD_TAIKO, nc::MOD_BMS,
     };
     const int NPOOL = int(sizeof(POOL) / sizeof(POOL[0]));
 
@@ -673,6 +673,7 @@ int main(int argc, char** argv) {
                     case nc::MOD_YARG:        which = "yarg";        break;
                     case nc::MOD_GH3:         which = "gh3";         break;
                     case nc::MOD_TAIKO:       which = "taiko";       break;
+                    case nc::MOD_BMS:         which = "bms";         break;
                     default: break;
                 }
             }

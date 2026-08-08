@@ -88,6 +88,11 @@ enum ModId {
     // colours; this renders full grybo, so a chord FANS its notes about the
     // line instead of stacking them invisibly.
     MOD_TAIKO,
+    // BMS display mode: the chart as an LR2 beatmania lane -- narrow vertical
+    // keys, notes falling onto a judge line at the bottom. Keeps beatmania's
+    // OWN colours (scratch red, white keys white, black keys blue) rather than
+    // grybo: colouring by lane type is the look. Open notes take the scratch.
+    MOD_BMS,
     // Appearance offsets. The formula already carries them (mods.h
     // GetPercentVisible, SM5 ArrowEffects.cpp:1044-1071 GetHidden/SuddenLine);
     // these are the knobs that were missing, not the maths.

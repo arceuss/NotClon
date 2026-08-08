@@ -1858,6 +1858,27 @@ bool Renderer::init(int w, int h, const std::string& A) {
         texTaikoDrumKa_    = gl_loadTex(A + "taiko/taiko_drum_ka.png", false);
         texTaikoBar_       = gl_loadTex(A + "taiko/taiko_bar.png", false);
     }
+
+    // BMS art. Three kinds, indexed by ch::BMS_LANE_ART.
+    {
+        const char* kind[3] = {"scratch", "white", "black"};
+        for (int i = 0; i < 3; ++i) {
+            const std::string k = kind[i];
+            texBmsNote_[i]    = gl_loadTex(A + "bms/bms_note_" + k + ".png", false);
+            texBmsLnStart_[i] = gl_loadTex(A + "bms/bms_ln_start_" + k + ".png", false);
+            texBmsLnBody_[i]  = gl_loadTex(A + "bms/bms_ln_body_" + k + ".png", false);
+            texBmsLnEnd_[i]   = gl_loadTex(A + "bms/bms_ln_end_" + k + ".png", false);
+            texBmsBeam_[i]    = gl_loadTex(A + "bms/bms_beam_" + k + ".png", false);
+        }
+        texBmsJudge_   = gl_loadTex(A + "bms/bms_judgeline.png", false);
+        texBmsMeasure_ = gl_loadTex(A + "bms/bms_measure.png", false);
+        texBmsLaneGlow_ = gl_loadTex(A + "bms/bms_lane_glow.png", false);
+        texBmsKeyboard_ = gl_loadTex(A + "bms/bms_keyboard.png", false);
+        texBmsLeftCol_  = gl_loadTex(A + "bms/bms_leftcol.png", false);
+        texBmsTurntable_ = gl_loadTex(A + "bms/bms_turntable.png", false);
+        texBmsKeyFlash_[0] = gl_loadTex(A + "bms/bms_keyflash_white.png", false);
+        texBmsKeyFlash_[1] = gl_loadTex(A + "bms/bms_keyflash_black.png", false);
+    }
     texAnim_    = gl_loadTex(A + "notes/spr_note_anim_strip16.png", false);
     texOpen_    = gl_loadTex(A + "notes/spr_open_notes_strip5.png", false);
     // Starpower sheets share the note strip's geometry exactly: every one is
@@ -5169,6 +5190,370 @@ void Renderer::drawTaiko(const Chart& chart, double beat, const RenderOpts& o,
                                   ch::BLEND_SPRITE);
 }
 
+void Renderer::drawBmsLayer(GLuint tex, int blend) {
+    if (v_.empty()) return;
+    applyFieldTint();
+    glUseProgram(piu_);
+    glBlendFunc(GL_ONE,
+                blend == ch::BLEND_ADD ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(piu_, "uTex"), 0);
+    glUniformMatrix4fv(glGetUniformLocation(piu_, "uMVP"), 1, GL_FALSE,
+                       bmsMvp_.m);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(v_.size() * sizeof(ch::Vtx)),
+                 v_.data(), GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, GLsizei(v_.size()));
+    v_.clear();
+    glUseProgram(prog_);
+}
+
+// The LR2 beatmania lane.
+//
+// A flat 2D field on the drawPiu-shaped path. Where drawTaiko turned the axes a
+// quarter turn, this one keeps them and flips only the scroll: BMS is
+// DOWNSCROLL natively -- notes fall from the top of the lane onto a judge line
+// at the bottom -- so the baseline direction is negative and `reverse` buys
+// upscroll rather than the other way round. Everything is in LR2's own 640x480
+// vscreen, y down, with every rect quoted from the default skin's CSV in
+// ch::BMS_* (src/highway.h).
+//
+// beatmania colours notes by lane TYPE, not by lane: the scratch is red, white
+// keys are white, black keys are blue. That is deliberately kept -- no grybo
+// recolouring -- so three sprites cover all six lanes. NotClon's five frets map
+// onto LR2 lanes 1..5 and an OPEN note takes the SCRATCH, which is the natural
+// fit rather than a workaround: BMS's sixth lane is the one that is not a key.
+void Renderer::drawBms(const Chart& chart, double beat, const RenderOpts& o,
+                       const Mods& mods, float songTime, float scrollNow,
+                       float noteSpeed, float bpm, const Mat4& mvp) {
+    const float bmsT =
+        mods.bms < 0.0f ? 0.0f : (mods.bms > 1.0f ? 1.0f : mods.bms);
+    if (bmsT <= 0.0f) return;
+    bmsMvp_ = mvp;
+
+    // Scroll direction. -1 is BMS's own downscroll, so `reverse` runs it the
+    // other way -- the opposite sign convention to drawPiu, whose ITG baseline
+    // is upscroll precisely because StepMania spends `reverse` ON downscroll.
+    auto dirFor = [&](int lane) {
+        return nc::scale(ReversePercentForCol(mods, lane), 0.0f, 1.0f,
+                         -1.0f, 1.0f);
+    };
+    // The judge line mirrors to the top of the field when the scroll flips, so
+    // the notes always have the full lane to travel down.
+    auto judgeYFor = [&](int lane) {
+        const float rev = ReversePercentForCol(mods, lane);
+        float y = nc::scale(rev, 0.0f, 1.0f, ch::BMS_JUDGE_Y, 0.0f);
+        // `centered` pulls it to mid-field, the same use drawTaiko puts it to.
+        return nc::scale(mods.centered, 0.0f, 1.0f, y, ch::BMS_JUDGE_Y * 0.5f);
+    };
+    auto noteY = [&](int lane, float yPx) {
+        return judgeYFor(lane) + yPx * dirFor(lane) * ch::BMS_SCALE +
+               GetYPosOffset(mods, lane, yPx, float(beat), bpm) * ch::BMS_SCALE;
+    };
+    // Lane centre plus ArrowEffects' lateral term.
+    auto noteX = [&](int lane, int lr2Lane, float yPx) {
+        const float cx = ch::BMS_LANE_X[lr2Lane] + ch::BMS_LANE_W[lr2Lane] * 0.5f;
+        return cx + GetXPos(mods, lane, yPx, songTime, float(beat), bpm) *
+                        ch::BMS_SCALE;
+    };
+
+    const bool hasStops = !chart.stops.empty();
+    auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
+
+    auto quad = [&](std::vector<ch::Vtx>& out, float cx, float cy,
+                    float hw, float hh, float rotDeg, float a,
+                    float cr = 1.0f, float cg = 1.0f, float cb = 1.0f,
+                    float vTop = 1.0f, float vBot = 0.0f) {
+        const float th = rotDeg * 3.14159265f / 180.0f;
+        const float c = cosf(th), sn = sinf(th);
+        auto P = [&](float dx, float dy, float u, float v) {
+            ch::Vtx t;
+            t.x = cx + dx * c - dy * sn;
+            t.y = cy + dx * sn + dy * c;
+            t.z = 0.0f; t.u = u; t.v = v;
+            t.r = cr; t.g = cg; t.b = cb; t.a = a;
+            return t;
+        };
+        // Textures load flipY, so the sprite's top row is v = 1.
+        const ch::Vtx q0 = P(-hw, -hh, 0.0f, vTop), q1 = P(hw, -hh, 1.0f, vTop),
+                      q2 = P( hw,  hh, 1.0f, vBot), q3 = P(-hw, hh, 0.0f, vBot);
+        out.push_back(q0); out.push_back(q1); out.push_back(q2);
+        out.push_back(q0); out.push_back(q2); out.push_back(q3);
+    };
+    auto rect = [&](std::vector<ch::Vtx>& out, float x, float y,
+                    float w, float h, float a,
+                    float cr = 1.0f, float cg = 1.0f, float cb = 1.0f,
+                    float vTop = 1.0f, float vBot = 0.0f) {
+        quad(out, x + w * 0.5f, y + h * 0.5f, w * 0.5f, h * 0.5f, 0.0f, a,
+             cr, cg, cb, vTop, vBot);
+    };
+
+    std::vector<ch::Vtx> vBg, vJudge, vMeasure, vGlow, vKb, vLeft, vTt;
+    std::vector<ch::Vtx> vKeyFlash[2];
+    std::vector<ch::Vtx> vBeam[3], vNote[3], vLnBody[3], vLnStart[3], vLnEnd[3];
+
+    const bool board = !o.playfield && mods.hideboard == 0.0f;
+
+    if (board) {
+        // The lane surface, per lane -- NOT one flat black rect. White-key
+        // lanes are lighter than the scratch and the black keys, the 2px gaps
+        // between the lane rects carry a grey divider, and the strip is
+        // bracketed in white. That is what makes a keyboard out of it; drawing
+        // the whole strip in one black fill leaves a bare judge line with
+        // nothing under it. Values in ch::BMS_LANE_FILL / BMS_DIVIDER.
+        for (int L = 0; L < 6; ++L) {
+            const float f = ch::BMS_LANE_FILL[L];
+            rect(vBg, ch::BMS_LANE_X[L], 0.0f, ch::BMS_LANE_W[L],
+                 ch::BMS_JUDGE_Y, bmsT, f, f, f);
+        }
+        for (int L = 0; L < 5; ++L) {
+            const float gx = ch::BMS_LANE_X[L] + ch::BMS_LANE_W[L];
+            rect(vBg, gx, 0.0f, ch::BMS_LANE_X[L + 1] - gx, ch::BMS_JUDGE_Y,
+                 bmsT, ch::BMS_DIVIDER[0], ch::BMS_DIVIDER[1],
+                 ch::BMS_DIVIDER[2]);
+        }
+        rect(vBg, ch::BMS_FIELD_X - ch::BMS_BORDER_W, 0.0f, ch::BMS_BORDER_W,
+             ch::BMS_JUDGE_Y, bmsT, 1.0f, 1.0f, 1.0f);
+        rect(vBg, ch::BMS_FIELD_X + ch::BMS_FIELD_W, 0.0f, ch::BMS_BORDER_W,
+             ch::BMS_JUDGE_Y, bmsT, 1.0f, 1.0f, 1.0f);
+
+        // The blue glow on the last stretch of lane before the judge line. It
+        // follows the line when the scroll flips, and its gradient turns over
+        // with it.
+        {
+            const bool down = dirFor(0) < 0.0f;
+            const float jy = judgeYFor(0);
+            rect(vGlow, ch::BMS_FIELD_X, down ? jy - ch::BMS_GLOW_H : jy,
+                 ch::BMS_FIELD_W, ch::BMS_GLOW_H, bmsT,
+                 1.0f, 1.0f, 1.0f, down ? 1.0f : 0.0f, down ? 0.0f : 1.0f);
+        }
+
+        // Measure bars. #SRC_LINE is 151x1 spanning the whole strip, and BMS
+        // draws measures only -- the two finer beat styles are dropped rather
+        // than thinned.
+        for (const BeatLine& bl : chart.beatlines) {
+            if (bl.style != 0) continue;
+            const float z = float(ssec(bl.sec) - scrollNow) * noteSpeed;
+            const float my = noteY(0, z * nc::ARROW_SIZE * 1.6f);
+            if (my < -2.0f || my > ch::BMS_JUDGE_Y + 2.0f) continue;
+            rect(vMeasure, ch::BMS_FIELD_X, my, ch::BMS_FIELD_W, 1.0f, bmsT);
+        }
+
+        // Key beams: the lane lights from the judge line back up the field
+        // while it is being hit. The art is the full 315px of lane height at
+        // the lane's own width, anchored on the line and running against the
+        // scroll (#SRC_IMAGE,0,0,201,0,41,315 -> 33,321,41,-320).
+        if (!o.noBot) {
+            const float LIFE = 0.12f;
+            for (int lane = 0; lane < 6; ++lane) {
+                // The scratch is driven by OPEN notes, so it takes the open
+                // clock -- lastOpenHit, which buildHitTimes keeps apart from
+                // the per-fret ones precisely because an open is not a hit on
+                // any lane. Reading lastHit(0) here instead lit the scratch
+                // every time a GREEN note was hit.
+                const int fret = lane == 0 ? 0 : lane - 1;
+                const float dt = lane == 0
+                    ? float(lastOpenHit(songTime))
+                    : float(lastHit(fret, songTime));
+                if (dt < 0.0f || dt >= LIFE) continue;
+                const float a = (1.0f - dt / LIFE) * bmsT;
+                const float d = dirFor(fret);
+                const float jy = judgeYFor(fret);
+                const float top = d < 0.0f ? jy - ch::BMS_JUDGE_Y : jy;
+                rect(vBeam[ch::BMS_LANE_ART[lane]], ch::BMS_LANE_X[lane], top,
+                     ch::BMS_LANE_W[lane], ch::BMS_JUDGE_Y, a);
+            }
+        }
+
+        // The judge line, evaluated at yOffset 0 -- a receptor is an arrow that
+        // never moved, so whichever mods displace it do so as a consequence.
+        rect(vJudge, ch::BMS_FIELD_X, judgeYFor(0) - ch::BMS_NOTE_H * 0.5f,
+             ch::BMS_FIELD_W, ch::BMS_NOTE_H, bmsT);
+
+        // The controller under the line: the left frame edge with the
+        // turntable housing, the disc, and the keyboard panel.
+        rect(vLeft, ch::BMS_LEFT_X, ch::BMS_LEFT_Y,
+             ch::BMS_LEFT_W, ch::BMS_LEFT_H, bmsT);
+        rect(vTt, ch::BMS_TT_X, ch::BMS_TT_Y,
+             ch::BMS_TT_W, ch::BMS_TT_H, bmsT);
+        rect(vKb, ch::BMS_KB_X, ch::BMS_KB_Y,
+             ch::BMS_KB_W, ch::BMS_KB_H, bmsT);
+
+        // The keys light on the same press that raises the lane beam, so this
+        // shares the beam's clock and lifetime. The scratch is absent by
+        // design: its press timer drives the beam, and the keyboard has no
+        // scratch key -- the turntable is the scratch.
+        if (!o.noBot) {
+            const float LIFE = 0.12f;
+            for (int k = 0; k < 5; ++k) {
+                const float dt = float(lastHit(k, songTime));
+                if (dt < 0.0f || dt >= LIFE) continue;
+                rect(vKeyFlash[ch::BMS_KEYFLASH_ART[k]],
+                     ch::BMS_KEYFLASH_X[k], ch::BMS_KEYFLASH_Y[k],
+                     ch::BMS_KEYFLASH_W[k], ch::BMS_KEYFLASH_H[k],
+                     (1.0f - dt / LIFE) * bmsT);
+            }
+        }
+    }
+
+    // ---- notes -------------------------------------------------------------
+    const float noteZoom = GetZoom(mods);
+    for (int i = int(chart.notes.size()) - 1; i >= 0; --i) {
+        const Note& n = chart.notes[i];
+        const double tHit = chart.beatToSec(n.beat);
+        const float z0 = float(ssec(tHit) - scrollNow) * noteSpeed;
+        const float yRaw = z0 * nc::ARROW_SIZE * 1.6f;
+
+        const bool consumed = !o.noBot && yRaw <= 0.0f;
+        double tLast = tHit;
+        for (int L = 0; L < 5; ++L)
+            if ((n.frets & (1 << L)) && n.sustain[L] > 0.0) {
+                const double e = chart.beatToSec(n.beat + n.sustain[L]);
+                if (e > tLast) tLast = e;
+            }
+        if (n.open && n.openSustain > 0.0) {
+            const double e = chart.beatToSec(n.beat + n.openSustain);
+            if (e > tLast) tLast = e;
+        }
+        if (consumed && songTime >= tLast) continue;
+
+        // An open note is the scratch and nothing else; otherwise every fret
+        // in the mask draws in its own key lane.
+        int lanes[5], nLanes = 0;
+        if (n.open) { lanes[0] = 0; nLanes = 1; }
+        else for (int L = 0; L < 5; ++L)
+            if (n.frets & (1 << L)) lanes[nLanes++] = L;
+
+        for (int idx = 0; idx < nLanes; ++idx) {
+            const int lane = lanes[idx];
+            const int lr2 = ch::bmsLaneFor(lane, n.open);
+            const int art = ch::BMS_LANE_ART[lr2];
+            const double sus = n.open ? n.openSustain : n.sustain[lane];
+
+            const float yOff = ApplyYMods(mods, lane, yRaw, float(beat));
+            const float baseAlpha = GetAlpha(mods, yOff, songTime);
+            const float baseGlow  = GetGlow(mods, yOff, songTime);
+            if (sus <= 0.0 && baseAlpha <= 0.0f && baseGlow <= 0.0f) continue;
+
+            const float rotZ = GetRotationZ(mods, float(n.beat), float(beat));
+            const float rotX = GetRotationX(mods, yOff);
+            const float rotY = GetRotationY(mods, yOff);
+            const float fx = fabsf(cosf(rotY * 3.14159265f / 180.0f));
+            const float fy = fabsf(cosf(rotX * 3.14159265f / 180.0f));
+            // bumpy is a depth term and a flat field has no depth, so it is
+            // mapped to a small zoom, the same call drawPiu and drawTaiko make.
+            const float zoomB = 1.0f +
+                GetZPos(mods, lane, yOff, float(beat), bpm) / 512.0f;
+            const float hw = ch::BMS_LANE_W[lr2] * 0.5f * noteZoom * zoomB * fx;
+            const float hh = ch::BMS_NOTE_H * 0.5f * noteZoom * zoomB * fy;
+
+            const float sx = noteX(lane, lr2, yOff);
+            const float sy = noteY(lane, yOff);
+            const bool headOff = sy < -ch::BMS_NOTE_H * 4.0f ||
+                                 sy > ch::BMS_JUDGE_Y + ch::BMS_NOTE_H * 4.0f;
+
+            // ---- the long note, drawn BEFORE the head so the head caps it ---
+            if (sus > 0.0) {
+                const double tEnd = chart.beatToSec(n.beat + sus);
+                if (songTime < tEnd) {
+                    const float zEnd = float(ssec(tEnd) - scrollNow) * noteSpeed;
+                    const float yEndRaw = zEnd * nc::ARROW_SIZE * 1.6f;
+                    // A held LN anchors at the judge line, as CH sustains do.
+                    const float yStart =
+                        (!o.noBot && songTime >= tHit) ? 0.0f : yRaw;
+                    const float span = yEndRaw - yStart;
+                    if (span > 0.0f) {
+                        // ITG's own 16px walk, so the ribbon follows every
+                        // per-row mod instead of being a straight bar through
+                        // a curve.
+                        const int STEPS = 96;
+                        const int nseg = int(span / 16.0f) + 1;
+                        const int use = nseg > STEPS ? STEPS : nseg;
+                        for (int k = 0; k < use; ++k) {
+                            const float ya = yStart + span * float(k) / float(use);
+                            const float yb = yStart + span * float(k + 1) / float(use);
+                            const float ym = 0.5f * (ya + yb);
+                            const float my = ApplyYMods(mods, lane, ym, float(beat));
+                            const float sa = noteY(lane,
+                                ApplyYMods(mods, lane, ya, float(beat)));
+                            const float sb = noteY(lane,
+                                ApplyYMods(mods, lane, yb, float(beat)));
+                            const float lo = sa < sb ? sa : sb;
+                            const float hi = sa < sb ? sb : sa;
+                            if (hi < -ch::BMS_NOTE_H ||
+                                lo > ch::BMS_JUDGE_Y + ch::BMS_NOTE_H) continue;
+                            const float bz = 1.0f +
+                                GetZPos(mods, lane, my, float(beat), bpm) / 512.0f;
+                            quad(vLnBody[art], noteX(lane, lr2, my),
+                                 0.5f * (lo + hi),
+                                 ch::BMS_LANE_W[lr2] * 0.5f * noteZoom * bz * fx,
+                                 0.5f * (hi - lo) + 0.5f, 0.0f,
+                                 GetAlpha(mods, my, songTime) * bmsT);
+                        }
+                    }
+                    // The tail cap, at its own fixed height.
+                    {
+                        const float myEnd =
+                            ApplyYMods(mods, lane, yEndRaw, float(beat));
+                        const float syT = noteY(lane, myEnd);
+                        if (syT >= -ch::BMS_NOTE_H * 4.0f &&
+                            syT <= ch::BMS_JUDGE_Y + ch::BMS_NOTE_H * 4.0f) {
+                            const float cz = 1.0f +
+                                GetZPos(mods, lane, myEnd, float(beat), bpm) / 512.0f;
+                            quad(vLnEnd[art], noteX(lane, lr2, myEnd), syT,
+                                 ch::BMS_LANE_W[lr2] * 0.5f * noteZoom * cz * fx,
+                                 ch::BMS_NOTE_H * 0.5f * noteZoom * cz * fy, 0.0f,
+                                 GetAlpha(mods, myEnd, songTime) * bmsT);
+                        }
+                    }
+                }
+            }
+
+            // ---- the head ---------------------------------------------------
+            if (consumed || headOff) continue;
+            // An LN's head is its own sprite in this skin, unlike pump's, which
+            // redirects hold heads to the tap art.
+            std::vector<ch::Vtx>& bucket = sus > 0.0 ? vLnStart[art] : vNote[art];
+            if (baseAlpha > 0.0f)
+                quad(bucket, sx, sy, hw, hh, rotZ, baseAlpha * bmsT);
+            if (baseGlow > 0.0f)
+                quad(bucket, sx, sy, hw, hh, rotZ, baseGlow * bmsT);
+        }
+    }
+
+    // ---- draw, back to front -----------------------------------------------
+    v_ = vBg;      drawBmsLayer(texWhite_.id, ch::BLEND_SPRITE);
+    v_ = vGlow;    drawBmsLayer(texBmsLaneGlow_.id, ch::BLEND_ADD);
+    for (int i = 0; i < 3; ++i) {
+        v_ = vBeam[i];    drawBmsLayer(texBmsBeam_[i].id, ch::BLEND_ADD);
+    }
+    v_ = vMeasure; drawBmsLayer(texBmsMeasure_.id, ch::BLEND_SPRITE);
+    for (int i = 0; i < 3; ++i) {
+        v_ = vLnBody[i];  drawBmsLayer(texBmsLnBody_[i].id, ch::BLEND_SPRITE);
+    }
+    for (int i = 0; i < 3; ++i) {
+        v_ = vLnEnd[i];   drawBmsLayer(texBmsLnEnd_[i].id, ch::BLEND_SPRITE);
+    }
+    for (int i = 0; i < 3; ++i) {
+        v_ = vLnStart[i]; drawBmsLayer(texBmsLnStart_[i].id, ch::BLEND_SPRITE);
+    }
+    for (int i = 0; i < 3; ++i) {
+        v_ = vNote[i];    drawBmsLayer(texBmsNote_[i].id, ch::BLEND_SPRITE);
+    }
+    v_ = vJudge;   drawBmsLayer(texBmsJudge_.id, ch::BLEND_SPRITE);
+    // The hardware sits in front of everything -- it is the frame, not part of
+    // the field it borders.
+    v_ = vLeft;    drawBmsLayer(texBmsLeftCol_.id, ch::BLEND_SPRITE);
+    v_ = vTt;      drawBmsLayer(texBmsTurntable_.id, ch::BLEND_SPRITE);
+    v_ = vKb;      drawBmsLayer(texBmsKeyboard_.id, ch::BLEND_SPRITE);
+    // blend=2 on their DST rows: additive, over the keyboard.
+    for (int i = 0; i < 2; ++i) {
+        v_ = vKeyFlash[i]; drawBmsLayer(texBmsKeyFlash_[i].id, ch::BLEND_ADD);
+    }
+}
+
 void Renderer::drawGh3Layer(GLuint tex, int blend, bool fade) {
     if (v_.empty()) return;
     if (gh3CamOn_) for (auto& t : v_) gh3CamVtx(t);
@@ -6657,10 +7042,13 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // highway that fades out underneath it.
     const float taikoT = mods.hide == 0.0f
         ? fminf(1.0f, fmaxf(0.0f, mods.taiko)) : 0.0f;
+    const float bmsT = mods.hide == 0.0f
+        ? fminf(1.0f, fmaxf(0.0f, mods.bms)) : 0.0f;
     const float originalTint[4] = {
         fieldTint_[0], fieldTint_[1], fieldTint_[2], fieldTint_[3]
     };
-    const float fieldSwapT = fmaxf(fmaxf(engineT, gh3T), taikoT);
+    const float fieldSwapT =
+        fmaxf(fmaxf(engineT, gh3T), fmaxf(taikoT, bmsT));
     if (fieldSwapT > 0.0f) fieldTint_[3] *= 1.0f - fieldSwapT;
     Mat4& mvpEff = E.mvpEff;
     Mat4 drawMvp = mvpOverride ? *mvpOverride : mvpEff;
@@ -6711,10 +7099,10 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // for that is applied further up, before the matrices). Only a full 100%
     // drops the highway entirely.
     const bool piuMode = piuT > 0.0f && mods.hide == 0.0f && engineT < 1.0f &&
-                         gh3T < 1.0f && taikoT < 1.0f;
+                         gh3T < 1.0f && taikoT < 1.0f && bmsT < 1.0f;
     const bool hidePlayfield = mods.hide != 0.0f || piuT >= 1.0f ||
                                engineT >= 1.0f || gh3T >= 1.0f ||
-                               taikoT >= 1.0f;
+                               taikoT >= 1.0f || bmsT >= 1.0f;
 
     // Board layers. --playfield drops all four, leaving only frets and notes.
     // `hideboard` is the --playfield flag as a knob: the board goes, the notes
@@ -7306,6 +7694,43 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         const Mat4 tDrawMvp = mat_mul(tProj, tMove);
         drawTaiko(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
                   tDrawMvp);
+    }
+
+    if (bmsT > 0.0f) {
+        for (int i = 0; i < 4; ++i) fieldTint_[i] = originalTint[i];
+        // LR2's authored space is 640x480, y down, mapped across this player's
+        // viewport strip at the FULL framebuffer's scale -- the same shape as
+        // the PIU, GH3 and taiko projections. The lane strip sits at the LEFT
+        // of that vscreen in the real game, which would put it off in the
+        // margin here, so the field is centred on the strip instead: its own
+        // midpoint (BMS_FIELD_X + BMS_FIELD_W/2) lands on the strip's centre.
+        const float BCX = ch::BMS_FIELD_X + ch::BMS_FIELD_W * 0.5f;
+        // SQUARE PIXELS. LR2's vscreen is 640x480, which is 4:3; mapping 640
+        // across the full framebuffer width AND 480 across its full height
+        // stretches that 4:3 layout onto a 16:9 frame, and the lane comes out
+        // visibly squashed. StepMania's convention -- which drawPiu already
+        // uses -- fixes the HEIGHT at 480 and lets the virtual width be
+        // whatever the output aspect calls for, so one vscreen pixel is H/480
+        // framebuffer pixels on both axes. BMS_VW is therefore the authored
+        // 4:3 width, used for placement, never as the projection's x span.
+        const float virtW = logicalScreenWidth(W, H);
+        Mat4 bProj{};
+        bProj.m[0] = 2.0f / virtW;
+        bProj.m[5] = -2.0f / ch::BMS_VH;
+        bProj.m[10] = bProj.m[15] = 1.0f;
+        bProj.m[12] = 2.0f * (float(vpX) + float(vpW) * 0.5f) / float(W)
+                      - 1.0f - BCX * (2.0f / virtW);
+        bProj.m[13] = 1.0f;
+        // Whole-field movex/movey in world units, converted at the judge
+        // line's scale the way the gh3 and taiko fields do it. World +y is up,
+        // the vscreen's is down; movez has no axis on a flat field.
+        const float w2v = ch::BMS_SCALE / pxToUnits(1.0f);
+        Mat4 bMove{};
+        bMove.m[0] = bMove.m[5] = bMove.m[10] = bMove.m[15] = 1.0f;
+        bMove.m[12] = (o.px + mx) * w2v;
+        bMove.m[13] = -(o.py + my) * w2v;
+        drawBms(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
+                mat_mul(bProj, bMove));
     }
 
 }

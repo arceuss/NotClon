@@ -61,6 +61,7 @@ const ModInfo MODS[] = {
     {"yarg",       0.0f},
     {"gh3",        0.0f},
     {"taiko",      0.0f},
+    {"bms",        0.0f},
     {"suddenoffset", 0.0f},
     {"hiddenoffset", 0.0f},
     {"split",      0.0f},
@@ -384,6 +385,7 @@ void modValuesToState(const float* v, float beat, Mods& m, PostFx& fx,
     m.yarg      = v[MOD_YARG];
     m.gh3       = v[MOD_GH3];
     m.taiko     = v[MOD_TAIKO];
+    m.bms       = v[MOD_BMS];
     m.suddenOffset = v[MOD_SUDDENOFFSET];
     m.hiddenOffset = v[MOD_HIDDENOFFSET];
     m.split     = v[MOD_SPLIT];

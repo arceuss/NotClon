@@ -96,6 +96,9 @@ struct Mods {
     // left into a target ring, in full grybo rather than taiko's red/blue. A
     // 2D field like gh3 (drawTaiko), not a drawEngine style.
     float taiko = 0;
+    // BMS display mode: an LR2 beatmania lane, downscroll, in beatmania's own
+    // per-lane-type colours rather than grybo. A 2D field (drawBms).
+    float bms = 0;
     float sudden = 0, hidden = 0;
     float suddenOffset = 0, hiddenOffset = 0;
     // Per-column reverse contributions (PlayerOptions.cpp:1313-1332

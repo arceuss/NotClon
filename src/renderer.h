@@ -356,7 +356,7 @@ private:
     double lastHit(int lane, double now) const;
     double lastOpenHit(double now) const;
 
-    Mat4 view_{}, mvp_{}, mvp2_{}, piuMvp_{}, gh3Mvp_{}, taikoMvp_{};
+    Mat4 view_{}, mvp_{}, mvp2_{}, piuMvp_{}, gh3Mvp_{}, taikoMvp_{}, bmsMvp_{};
     GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0;
     GLuint cover_ = 0, piu_ = 0, gh3Sprite_ = 0, gh3Whammy_ = 0, engine_ = 0;
     GLuint engineGlow_ = 0, yargEffect_ = 0;
@@ -431,6 +431,14 @@ private:
     Tex texTaikoJudge_, texTaikoLane_, texTaikoLaneGogo_, texTaikoLaneFlash_;
     Tex texTaikoFrame_, texTaikoDrumBg_, texTaikoDrum_, texTaikoBar_;
     Tex texTaikoDrumDon_, texTaikoDrumKa_;
+    // BMS mode (assets/bms/*, see bms.SOURCE.txt). Three arts, indexed by
+    // ch::BMS_LANE_ART: 0 scratch, 1 white key, 2 black key. No recolouring --
+    // beatmania colours by lane TYPE and that is the look.
+    Tex texBmsNote_[3], texBmsLnStart_[3], texBmsLnBody_[3], texBmsLnEnd_[3];
+    Tex texBmsBeam_[3];
+    Tex texBmsJudge_, texBmsMeasure_, texBmsLaneGlow_;
+    Tex texBmsKeyboard_, texBmsLeftCol_, texBmsTurntable_;
+    Tex texBmsKeyFlash_[2];             // 0 white key, 1 black key
     // GH3 board art (assets/engine/gh3_*, see gh3.SOURCE.txt). The highway
     // surface itself is a flat black fill -- GH3's fretboard art is venue
     // geometry, not in global.pak, and black is the chosen stand-in.
@@ -498,6 +506,7 @@ private:
     void drawGlowLayer(GLuint tex);
     void drawPiuLayer(GLuint tex, int blend);
     void drawTaikoLayer(GLuint tex, int blend);
+    void drawBmsLayer(GLuint tex, int blend);
     void drawGh3Layer(GLuint tex, int blend, bool fade = false);
     void drawGh3Whammy(GLuint tex, bool glow);
     void gh3CamVtx(ch::Vtx& t) const;
@@ -517,6 +526,10 @@ private:
     void drawTaiko(const Chart& chart, double beat, const RenderOpts& o,
                    const Mods& mods, float songTime, float scrollNow,
                    float noteSpeed, float bpm, const Mat4& mvp);
+    // The LR2 beatmania lane -- flat, downscroll. See the definition.
+    void drawBms(const Chart& chart, double beat, const RenderOpts& o,
+                 const Mods& mods, float songTime, float scrollNow,
+                 float noteSpeed, float bpm, const Mat4& mvp);
     void loadEngineMesh(EngineGpu& gpu, const std::string& path);
     void drawEngineMesh(const EngineGpu& gpu, const Mat4& camera,
                         const Mat4& model, int kind, const float* color,

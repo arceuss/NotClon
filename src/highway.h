@@ -299,6 +299,99 @@ inline int taikoNoteFrame(double beat, bool starPower) {
     return (int(floor(beat)) % 2) ? 2 : 1;
 }
 
+// --- BMS display mode (LR2 default skin) ----------------------------------
+//
+// beatmania, by way of LR2. Another flat 2D field on the drawPiu-shaped path,
+// but where taiko turned the axes a quarter turn this one keeps them and only
+// flips the scroll: BMS is DOWNSCROLL natively, notes falling from the top of
+// the lane onto a judge line at the bottom.
+//
+// LR2's own source is long lost. Ground truth is therefore the LR2 default
+// SKIN, which survives as data in OpenLR2 (github.com/OpenLR2/OpenLR2) --
+// resources/LR2files/Theme/LR2/Play/5keys/5_LL0.csv, a declarative CSV whose
+// rects are quoted verbatim below -- plus OpenLR2's own note-scroll code for
+// the maths. Sprites: devtools/bms_extract.py, provenance in
+// assets/bms/bms.SOURCE.txt.
+static const float BMS_VW = 640.0f, BMS_VH = 480.0f;
+
+// #DST_NOTE,<lane>,0,<x>,315,<w>,6 -- lane 0 is the SCRATCH and lanes 1..5
+// alternate white key / black key. The strip runs x 33..184.
+static const float BMS_LANE_X[6] = {33.0f, 76.0f, 100.0f, 119.0f, 143.0f, 162.0f};
+static const float BMS_LANE_W[6] = {41.0f, 22.0f,  17.0f,  22.0f,  17.0f,  22.0f};
+// Which of the three arts each lane wears: 0 scratch, 1 white key, 2 black key.
+static const int   BMS_LANE_ART[6] = {0, 1, 2, 1, 2, 1};
+static const float BMS_FIELD_X = 33.0f, BMS_FIELD_W = 151.0f;
+
+// The lane surface, measured off the skin's own screenshot (ss_5.png, the
+// mid-field scanline at y=200). The lanes are NOT one flat black rect: the
+// white-key lanes are #181818 and the scratch and black-key lanes are pure
+// black, which is what makes the keyboard legible with no notes on it. The 2px
+// GAPS between the lane rects above are a #636162 divider, and the whole strip
+// is bracketed by 2px of white. Without these the field is black on black and
+// reads as a bare judge line.
+static const float BMS_LANE_FILL[6] = {
+    0.0f, 24.0f/255.0f, 0.0f, 24.0f/255.0f, 0.0f, 24.0f/255.0f
+};
+static const float BMS_DIVIDER[3] = {99.0f/255.0f, 97.0f/255.0f, 98.0f/255.0f};
+static const float BMS_BORDER_W = 2.0f;
+// #SRC_IMAGE,0,0,0,2007,194,29 -> 33,286,151,29 -- the blue glow on the last
+// 29px of lane before the judge line. It ADDS over the lane fill.
+static const float BMS_GLOW_H = 29.0f;
+
+// The controller, below the judge line: the keyboard panel (3 white + 2 black
+// keys in their housing) and the turntable. These come from the SECOND
+// #DST_IMAGE keyframe of their group -- LR2 lists several per #SRC_IMAGE and
+// the first is the off-screen slide-in state, so reading only the first puts
+// the keyboard at x=-174 and it never appears at all.
+//   #SRC_IMAGE,0,0,711,0,174,59    -> (70,322,174,59)
+//   #SRC_IMAGE,0,0,119,579,75,384  -> (1,0,75,384)   left edge + TT housing
+//   #IMAGE turntable\*.tga         -> (30,335,32,32)
+// They are the hardware, not part of the scrolling field, so they stay put
+// when `reverse` throws the judge line to the top.
+static const float BMS_KB_X = 70.0f,  BMS_KB_Y = 322.0f;
+static const float BMS_KB_W = 174.0f, BMS_KB_H = 59.0f;
+static const float BMS_LEFT_X = 1.0f,  BMS_LEFT_Y = 0.0f;
+static const float BMS_LEFT_W = 75.0f, BMS_LEFT_H = 384.0f;
+static const float BMS_TT_X = 30.0f, BMS_TT_Y = 335.0f;
+static const float BMS_TT_W = 32.0f, BMS_TT_H = 32.0f;
+
+// The key press flashes, drawn ADDITIVELY over the keyboard. Their #DST_IMAGE
+// rows carry timer=101..107, LR2's per-key press timers -- the SAME press that
+// raises the lane beam, so a hit lights both. The 5-key layout uses the first
+// five of the CSV's seven slots, and the flash is wider and taller than the key
+// it lights because it is a glow. Timer 100 is the scratch, and its element is
+// the lane beam itself: the scratch has no keyboard twin.
+//
+// NOTE the DST column layout -- x,y,w,h are 3..6 but blend is 12 and the TIMER
+// is 17. Reading 12 as the timer says every one of these is "timer 2"; it is
+// really blend 2, additive, which is separately worth knowing.
+static const float BMS_KEYFLASH_X[5] = {70.0f, 92.0f, 113.0f, 135.0f, 156.0f};
+static const float BMS_KEYFLASH_Y[5] = {324.0f, 317.0f, 324.0f, 317.0f, 324.0f};
+static const float BMS_KEYFLASH_W[5] = {34.0f, 33.0f, 34.0f, 33.0f, 34.0f};
+static const float BMS_KEYFLASH_H[5] = {52.0f, 48.0f, 52.0f, 48.0f, 52.0f};
+// 0 = the white-key flash art, 1 = the black-key one.
+static const int   BMS_KEYFLASH_ART[5] = {0, 1, 0, 1, 0};
+
+// #DST_NOTE y and #DST_JUDGELINE agree: the judge line sits at y=315 and the
+// notes fall onto it. OpenLR2's Scene04_Play.cpp:439 normalises a note's
+// position by `dst_NOTE[key].draw->y`, so that same 315 IS the lane height --
+// the field runs from y=0 down to the line.
+static const float BMS_JUDGE_Y = 315.0f;
+static const float BMS_NOTE_H  = 6.0f;      // every #SRC_NOTE/#SRC_LN_* is 6 tall
+
+// Time axis is CH's, the same call the gh3 and taiko fields make: the window is
+// NOTE_CULL_FAR / noteSpeed, so the chart pours at the same perceived rate as
+// the CH field at any speed. LR2's own scroll is
+// `(now - noteTime) * hispeed / 600` (Scene04_Play.cpp:434) and is deliberately
+// NOT the mapping -- it is keyed to LR2's hispeed setting, which NotClon has no
+// equivalent of. One arrow-space pixel is this many vscreen px.
+static const float BMS_SCALE = BMS_JUDGE_Y / (NOTE_CULL_FAR * 64.0f * 1.6f);
+
+// NotClon lane 0..4 -> LR2 lane 1..5, and an OPEN note takes the SCRATCH.
+// That is not a workaround, it is the natural fit: BMS's sixth lane is the one
+// that is not a key, which is exactly what an open note is.
+inline int bmsLaneFor(int lane, bool open) { return open ? 0 : lane + 1; }
+
 // --- sidebars (sidebar.png 64x512, PPU 600) -------------------------------
 // transform pos (+-0.52, 0.01, 3.52) euler (90,0,0) scale (1,10,1);
 // right side has scale.x = -1, which mirrors U only.
