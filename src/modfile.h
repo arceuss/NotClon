@@ -82,6 +82,12 @@ enum ModId {
     // Neversoft drew gems/frets/tails as screen elements over a static
     // perspective quad, so it rides the drawPiu-shaped path.
     MOD_GH3,
+    // Taiko display mode: the chart as a taiko no Tatsujin lane -- one
+    // horizontal line, notes scrolling right-to-left into a target ring. A 2D
+    // field like PIU and GH3, rotated a quarter turn. Taiko has two note
+    // colours; this renders full grybo, so a chord FANS its notes about the
+    // line instead of stacking them invisibly.
+    MOD_TAIKO,
     // Appearance offsets. The formula already carries them (mods.h
     // GetPercentVisible, SM5 ArrowEffects.cpp:1044-1071 GetHidden/SuddenLine);
     // these are the knobs that were missing, not the maths.

@@ -1830,6 +1830,34 @@ bool Renderer::init(int w, int h, const std::string& A) {
         }
         texPiuFlash_   = gl_loadTex(A + "pump/flash.png", false);
     }
+
+    // Taiko art, same rule. Lane order is ch::NOTE_TINT's -- green, red,
+    // yellow, blue, orange -- with purple in slot 5 for open notes. Red and
+    // blue are the skin's own don and ka; the other four are recolours
+    // (devtools/taiko_extract.py).
+    {
+        const char* taikoLane[6] = {"green", "red", "yellow",
+                                    "blue", "orange", "purple"};
+        for (int i = 0; i < 6; ++i) {
+            const std::string c = taikoLane[i];
+            texTaikoNote_[i] = gl_loadTex(
+                A + "taiko/taiko_note_" + c + "_strip4.png", false);
+            texTaikoBig_[i]  = gl_loadTex(
+                A + "taiko/taiko_big_" + c + "_strip4.png", false);
+            texTaikoRoll_[i] = gl_loadTex(
+                A + "taiko/taiko_roll_" + c + "_strip3.png", false);
+        }
+        texTaikoJudge_     = gl_loadTex(A + "taiko/taiko_judge.png", false);
+        texTaikoLane_      = gl_loadTex(A + "taiko/taiko_lane.png", false);
+        texTaikoLaneGogo_  = gl_loadTex(A + "taiko/taiko_lane_gogo.png", false);
+        texTaikoLaneFlash_ = gl_loadTex(A + "taiko/taiko_lane_flash.png", false);
+        texTaikoFrame_     = gl_loadTex(A + "taiko/taiko_frame.png", false);
+        texTaikoDrumBg_    = gl_loadTex(A + "taiko/taiko_drum_bg.png", false);
+        texTaikoDrum_      = gl_loadTex(A + "taiko/taiko_drum.png", false);
+        texTaikoDrumDon_   = gl_loadTex(A + "taiko/taiko_drum_don.png", false);
+        texTaikoDrumKa_    = gl_loadTex(A + "taiko/taiko_drum_ka.png", false);
+        texTaikoBar_       = gl_loadTex(A + "taiko/taiko_bar.png", false);
+    }
     texAnim_    = gl_loadTex(A + "notes/spr_note_anim_strip16.png", false);
     texOpen_    = gl_loadTex(A + "notes/spr_open_notes_strip5.png", false);
     // Starpower sheets share the note strip's geometry exactly: every one is
@@ -4774,6 +4802,373 @@ void Renderer::drawPiu(const Chart& chart, double beat, const RenderOpts& o,
     for (int i = 0; i < 3; ++i) { v_ = vExpl[i];  drawPiuLayer(texPiuTap_[i].id, ch::BLEND_ADD); }
 }
 
+void Renderer::drawTaikoLayer(GLuint tex, int blend) {
+    if (v_.empty()) return;
+    applyFieldTint();
+    glUseProgram(piu_);
+    glBlendFunc(GL_ONE,
+                blend == ch::BLEND_ADD ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+    glBindVertexArray(vao_);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glUniform1i(glGetUniformLocation(piu_, "uTex"), 0);
+    glUniformMatrix4fv(glGetUniformLocation(piu_, "uMVP"), 1, GL_FALSE,
+                       taikoMvp_.m);
+    glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(v_.size() * sizeof(ch::Vtx)),
+                 v_.data(), GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, GLsizei(v_.size()));
+    v_.clear();
+    glUseProgram(prog_);
+}
+
+// The taiko lane.
+//
+// drawPiu turned a quarter turn. Taiko is a FLAT field like pump's -- no neck,
+// no vanishing point -- but its notes run right to left along one horizontal
+// line into a target ring, so the axes swap: ArrowEffects' scroll offset drives
+// screen X and its lateral GetXPos drives screen Y. Everything is computed in
+// the skin's own authored 1920x1080 space, y down (ch::TAIKO_*, lifted from the
+// skin's GameConfig.ini), and nothing is converted to world units and back, so
+// the mods land the way ITG intends rather than being translated twice.
+//
+// Taiko has two note colours, red don and blue ka. This renders full grybo, so
+// three things differ from the real game by design: green/yellow/orange/purple
+// note art is generated (devtools/taiko_extract.py), a CHORD fans its notes
+// about the line rather than stacking them into one invisible pile, and star
+// power notes borrow the big-note art that taiko spends on finishers.
+void Renderer::drawTaiko(const Chart& chart, double beat, const RenderOpts& o,
+                         const Mods& mods, float songTime, float scrollNow,
+                         float noteSpeed, float bpm, const Mat4& mvp) {
+    const float taikoT =
+        mods.taiko < 0.0f ? 0.0f : (mods.taiko > 1.0f ? 1.0f : mods.taiko);
+    if (taikoT <= 0.0f) return;
+    taikoMvp_ = mvp;
+
+    const float HALF = ch::TAIKO_NOTE * 0.5f;
+
+    // --- the axis map -------------------------------------------------------
+    // Reverse still means "scroll the other way", so it flips the SCROLL axis,
+    // which here is X: notes arrive from the left instead of the right. Per
+    // column reverse (split/cross/alternate) still resolves per lane even
+    // though the lanes share a line -- a chord can genuinely have half its
+    // notes coming from each side, which is the honest reading of those mods
+    // on a one-lane field rather than a special case.
+    auto revScaleFor = [&](int lane) {
+        return nc::scale(ReversePercentForCol(mods, lane), 0.0f, 1.0f,
+                         1.0f, -1.0f);
+    };
+    // `centered` has no second axis to centre on here -- the line already is
+    // the centre -- so it is spent on the target ring's X, sliding the strike
+    // point to mid-lane and giving the notes the full width on both sides.
+    auto judgeXFor = [&](int lane) {
+        const float mid = ch::TAIKO_LANE_X + ch::TAIKO_LANE_W * 0.5f;
+        const float base = ch::TAIKO_JUDGE_X;
+        const float x = nc::scale(mods.centered, 0.0f, 1.0f, base, mid);
+        // Under reverse the ring mirrors about the lane's midpoint, so the
+        // notes still have the long side of the lane to travel down.
+        return revScaleFor(lane) < 0.0f ? (2.0f * mid - x) : x;
+    };
+    // Screen X for a note at arrow-space offset yPx. GetYPosOffset carries
+    // tipsy/beaty/movey, which ITG adds AFTER reverse -- so they do not flip
+    // with the scroll direction, exactly as in drawPiu.
+    auto noteX = [&](int lane, float yPx) {
+        return judgeXFor(lane) + yPx * revScaleFor(lane) * ch::TAIKO_SCALE +
+               GetYPosOffset(mods, lane, yPx, float(beat), bpm) *
+                   ch::TAIKO_SCALE;
+    };
+    // Screen Y: the line, the chord's fan, then ArrowEffects' lateral term.
+    auto noteY = [&](int lane, float yPx, float fan) {
+        return ch::TAIKO_JUDGE_Y + fan +
+               GetXPos(mods, lane, yPx, songTime, float(beat), bpm) *
+                   ch::TAIKO_SCALE;
+    };
+
+    const bool hasStops = !chart.stops.empty();
+    auto ssec = [&](double t) { return hasStops ? chart.scrollSec(t) : t; };
+
+    auto quad = [&](std::vector<ch::Vtx>& out, float cx, float cy,
+                    float hw, float hh, float rotDeg,
+                    float u0, float u1, float a,
+                    float vTop = 1.0f, float vBot = 0.0f) {
+        const float th = rotDeg * 3.14159265f / 180.0f;
+        const float c = cosf(th), sn = sinf(th);
+        auto P = [&](float dx, float dy, float u, float v) {
+            ch::Vtx t;
+            t.x = cx + dx * c - dy * sn;
+            t.y = cy + dx * sn + dy * c;
+            t.z = 0.0f; t.u = u; t.v = v;
+            t.r = 1.0f; t.g = 1.0f; t.b = 1.0f; t.a = a;
+            return t;
+        };
+        // Textures load flipY, so the sprite's top row is v = 1.
+        const ch::Vtx q0 = P(-hw, -hh, u0, vTop), q1 = P(hw, -hh, u1, vTop),
+                      q2 = P( hw,  hh, u1, vBot), q3 = P(-hw, hh, u0, vBot);
+        out.push_back(q0); out.push_back(q1); out.push_back(q2);
+        out.push_back(q0); out.push_back(q2); out.push_back(q3);
+    };
+    // An axis-aligned rect given in top-left/size form, which is how every
+    // constant in the skin's GameConfig.ini is written.
+    auto rect = [&](std::vector<ch::Vtx>& out, float x, float y,
+                    float w, float h, float a,
+                    float vTop = 1.0f, float vBot = 0.0f) {
+        quad(out, x + w * 0.5f, y + h * 0.5f, w * 0.5f, h * 0.5f, 0.0f,
+             0.0f, 1.0f, a, vTop, vBot);
+    };
+
+    // Frame `f` of a 1 x n horizontal strip.
+    auto stripU = [](int n, int f, float& u0, float& u1) {
+        u0 = float(f) / float(n);
+        u1 = float(f + 1) / float(n);
+    };
+
+    std::vector<ch::Vtx> vLane, vGogo, vFlash, vBar, vJudge, vDrumBg, vFrame,
+                         vDrum, vDrumHit;
+    std::vector<ch::Vtx> vRollBody[6], vRollCap[6], vNote[6], vBig[6];
+
+    const bool board = !o.playfield && mods.hideboard == 0.0f;
+    // Ticks are beats * resolution (Chart.cs's own scaling, the inverse of the
+    // sustain conversion at load), which is all phraseAt wants.
+    const bool inSp = chart.phraseAt(
+        PhraseType::StarPower, int(beat * double(chart.resolution))) != nullptr;
+
+    // ---- board -------------------------------------------------------------
+    if (board) {
+        rect(vFrame,  ch::TAIKO_FRAME_X,  ch::TAIKO_FRAME_Y,
+                      ch::TAIKO_FRAME_W,  ch::TAIKO_FRAME_H,  taikoT);
+        rect(vLane,   ch::TAIKO_LANE_X,   ch::TAIKO_LANE_Y,
+                      ch::TAIKO_LANE_W,   ch::TAIKO_LANE_H,   taikoT);
+        // Taiko's kiai lane, spent on the chart's star power phrases -- the
+        // one thing in either game that means "this stretch is the payoff".
+        if (inSp)
+            rect(vGogo, ch::TAIKO_LANE_X, ch::TAIKO_LANE_Y,
+                        ch::TAIKO_LANE_W, ch::TAIKO_LANE_H, taikoT);
+        rect(vDrumBg, ch::TAIKO_DRUMBG_X, ch::TAIKO_DRUMBG_Y,
+                      ch::TAIKO_DRUMBG_W, ch::TAIKO_DRUMBG_H, taikoT);
+
+        // Bar lines, straight off chart.beatlines. Taiko draws measures only,
+        // so the two beat styles are dropped rather than thinned.
+        for (const BeatLine& bl : chart.beatlines) {
+            if (bl.style != 0) continue;
+            const float z = float(ssec(bl.sec) - scrollNow) * noteSpeed;
+            const float yRaw = z * nc::ARROW_SIZE * 1.6f;
+            const float bx = noteX(0, yRaw);
+            if (bx < ch::TAIKO_LANE_X - ch::TAIKO_BAR_W ||
+                bx > ch::TAIKO_VW + ch::TAIKO_BAR_W) continue;
+            // Bar.png is 270 tall but the game CROPS it to the note cell
+            // rather than scaling: source rect (0, 0, width, Game_Notes_Size[1])
+            // drawn top-left at the scroll origin (CStage演奏ドラム画面.cs:1168).
+            // So only the top 195 rows are ever seen, and the bar spans the
+            // note cell -- which is the lane exactly.
+            rect(vBar, bx - ch::TAIKO_BAR_W * 0.5f, ch::TAIKO_SCROLL_Y,
+                 ch::TAIKO_BAR_W, ch::TAIKO_NOTE, taikoT,
+                 1.0f, 1.0f - ch::TAIKO_NOTE / ch::TAIKO_BAR_H);
+        }
+
+        // The lane flash, and the drum's lit half. The bot's hit drives both:
+        // Don (the drum's face) for an ordinary note, Ka (its rim) inside a
+        // star power phrase, which is the taiko idiom for a note that wants
+        // both hands.
+        float sinceHit = -1.0f;
+        if (!o.noBot)
+            for (int lane = 0; lane < 5; ++lane) {
+                const float dt = float(lastHit(lane, songTime));
+                if (dt >= 0.0f && (sinceHit < 0.0f || dt < sinceHit))
+                    sinceHit = dt;
+            }
+        const float HIT_LIFE = 0.18f;
+        if (sinceHit >= 0.0f && sinceHit < HIT_LIFE) {
+            const float k = 1.0f - sinceHit / HIT_LIFE;
+            rect(vFlash, ch::TAIKO_LANE_X, ch::TAIKO_LANE_Y,
+                 ch::TAIKO_LANE_W, ch::TAIKO_LANE_H, taikoT * k * 0.7f);
+            rect(vDrumHit, ch::TAIKO_DRUM_X, ch::TAIKO_DRUM_Y,
+                 ch::TAIKO_DRUM_W, ch::TAIKO_DRUM_H, taikoT * k);
+        }
+        rect(vDrum, ch::TAIKO_DRUM_X, ch::TAIKO_DRUM_Y,
+                    ch::TAIKO_DRUM_W, ch::TAIKO_DRUM_H, taikoT);
+
+        // The target ring, evaluated at yOffset 0 -- a receptor is an arrow
+        // that never moved (ReceptorArrowRow.cpp:46-54), so whichever mods
+        // displace it do so as a consequence rather than a special case.
+        quad(vJudge, noteX(0, 0.0f), noteY(0, 0.0f, 0.0f), HALF, HALF, 0.0f,
+             0.0f, 1.0f, taikoT);
+    }
+
+    // ---- notes -------------------------------------------------------------
+    const float noteZoom = GetZoom(mods);
+    float u0, u1;
+    for (int i = int(chart.notes.size()) - 1; i >= 0; --i) {
+        const Note& n = chart.notes[i];
+        const double tHit = chart.beatToSec(n.beat);
+        const float z0 = float(ssec(tHit) - scrollNow) * noteSpeed;
+        const float yRaw = z0 * nc::ARROW_SIZE * 1.6f;
+        const bool big = chart.phraseAt(PhraseType::StarPower, n.tick) != nullptr;
+
+        // The bot consumes the HEAD at the strike point, not the note: a roll
+        // stays on screen for as long as its tail does. Same shape as drawPiu,
+        // which folds head and body into one pass.
+        const bool consumed = !o.noBot && yRaw <= 0.0f;
+        double tLast = tHit;
+        for (int L = 0; L < 5; ++L)
+            if ((n.frets & (1 << L)) && n.sustain[L] > 0.0) {
+                const double e = chart.beatToSec(n.beat + n.sustain[L]);
+                if (e > tLast) tLast = e;
+            }
+        if (n.open && n.openSustain > 0.0) {
+            const double e = chart.beatToSec(n.beat + n.openSustain);
+            if (e > tLast) tLast = e;
+        }
+        if (consumed && songTime >= tLast) continue;
+
+        // The fan. A lone note rides the line; a chord spreads its members
+        // evenly about it so five colours stay five colours. An open note is
+        // the whole lane's note, so it takes the line by itself.
+        int lanes[5], nLanes = 0;
+        if (!n.open)
+            for (int L = 0; L < 5; ++L)
+                if (n.frets & (1 << L)) lanes[nLanes++] = L;
+        if (n.open) { lanes[0] = 0; nLanes = 1; }
+
+        for (int idx = 0; idx < nLanes; ++idx) {
+            const int lane = lanes[idx];
+            const int art = n.open ? 5 : lane;
+            const float fan = n.open ? 0.0f
+                : (float(idx) - float(nLanes - 1) * 0.5f) * ch::TAIKO_FAN;
+            const double sus = n.open ? n.openSustain : n.sustain[lane];
+
+            const float yOff = ApplyYMods(mods, lane, yRaw, float(beat));
+            const float baseAlpha = GetAlpha(mods, yOff, songTime);
+            const float baseGlow  = GetGlow(mods, yOff, songTime);
+            if (sus <= 0.0 && baseAlpha <= 0.0f && baseGlow <= 0.0f) continue;
+
+            // Already in a y-down screen space, so ArrowEffects' rotation
+            // signs are used directly, as in drawPiu.
+            const float rotZ = GetRotationZ(mods, float(n.beat), float(beat));
+            const float rotX = GetRotationX(mods, yOff);
+            const float rotY = GetRotationY(mods, yOff);
+            const float fx = fabsf(cosf(rotY * 3.14159265f / 180.0f));
+            const float fy = fabsf(cosf(rotX * 3.14159265f / 180.0f));
+            // bumpy is a depth term and a flat field has no depth, so it is
+            // mapped to a small zoom -- nearer reads as bigger. drawPiu makes
+            // the same call and for the same reason.
+            const float zoomB = 1.0f +
+                GetZPos(mods, lane, yOff, float(beat), bpm) / 512.0f;
+            const float hw = HALF * noteZoom * zoomB * fx;
+            const float hh = HALF * noteZoom * zoomB * fy;
+
+            const float sx = noteX(lane, yOff);
+            const float sy = noteY(lane, yOff, fan);
+            const bool headOff = sx < -ch::TAIKO_NOTE ||
+                                 sx > ch::TAIKO_VW + ch::TAIKO_NOTE;
+
+            // ---- the roll, drawn BEFORE the head so the head caps it -------
+            if (sus > 0.0) {
+                const double tEnd = chart.beatToSec(n.beat + sus);
+                if (songTime < tEnd) {
+                    const float zEnd = float(ssec(tEnd) - scrollNow) * noteSpeed;
+                    const float yEndRaw = zEnd * nc::ARROW_SIZE * 1.6f;
+                    // A held roll anchors at the ring, exactly as CH sustains
+                    // and PIU holds do.
+                    const float yStart =
+                        (!o.noBot && songTime >= tHit) ? 0.0f : yRaw;
+                    const float span = yEndRaw - yStart;
+                    if (span > 0.0f) {
+                        // Walk in ITG's own 16px step so the ribbon follows
+                        // every per-row mod instead of being a straight bar
+                        // drawn through a curve.
+                        const int STEPS = 96;
+                        const int nseg = int(span / 16.0f) + 1;
+                        const int use = nseg > STEPS ? STEPS : nseg;
+                        for (int k = 0; k < use; ++k) {
+                            const float ya = yStart + span * float(k) / float(use);
+                            const float yb = yStart + span * float(k + 1) / float(use);
+                            const float ym = 0.5f * (ya + yb);
+                            const float my = ApplyYMods(mods, lane, ym, float(beat));
+                            const float xa = noteX(lane,
+                                ApplyYMods(mods, lane, ya, float(beat)));
+                            const float xb = noteX(lane,
+                                ApplyYMods(mods, lane, yb, float(beat)));
+                            const float lo = xa < xb ? xa : xb;
+                            const float hi = xa < xb ? xb : xa;
+                            if (hi < -ch::TAIKO_NOTE ||
+                                lo > ch::TAIKO_VW + ch::TAIKO_NOTE) continue;
+                            const float bodyZoom = 1.0f +
+                                GetZPos(mods, lane, my, float(beat), bpm) / 512.0f;
+                            stripU(3, 1, u0, u1);      // the body cell
+                            quad(vRollBody[art],
+                                 0.5f * (lo + hi), noteY(lane, my, fan),
+                                 0.5f * (hi - lo) + 0.5f,
+                                 HALF * noteZoom * bodyZoom * fy, 0.0f,
+                                 u0, u1, GetAlpha(mods, my, songTime) * taikoT);
+                        }
+                    }
+                    // The tail cap, at its own fixed size one cell past the
+                    // end -- a cap that shrank with the remaining roll would
+                    // squash into a stub as it ran out.
+                    {
+                        const float myEnd =
+                            ApplyYMods(mods, lane, yEndRaw, float(beat));
+                        const float xT = noteX(lane, myEnd);
+                        if (xT >= -ch::TAIKO_NOTE * 2.0f &&
+                            xT <= ch::TAIKO_VW + ch::TAIKO_NOTE * 2.0f) {
+                            const float capZoom = 1.0f +
+                                GetZPos(mods, lane, myEnd, float(beat), bpm) / 512.0f;
+                            // Away from the ring, which flips with the scroll.
+                            const float dir = revScaleFor(lane);
+                            stripU(3, 2, u0, u1);      // the tail cell
+                            quad(vRollCap[art],
+                                 xT + HALF * noteZoom * capZoom * dir * 0.5f,
+                                 noteY(lane, myEnd, fan),
+                                 HALF * noteZoom * capZoom * 0.5f,
+                                 HALF * noteZoom * capZoom * fy, 0.0f,
+                                 dir < 0.0f ? u1 : u0, dir < 0.0f ? u0 : u1,
+                                 GetAlpha(mods, myEnd, songTime) * taikoT);
+                        }
+                    }
+                }
+            }
+
+            // ---- the head --------------------------------------------------
+            // A roll's head is the tap sprite, the same one-path treatment
+            // pump's noteskin gives its hold heads.
+            if (consumed || headOff) continue;
+            std::vector<ch::Vtx>& bucket = big ? vBig[art] : vNote[art];
+            stripU(ch::TAIKO_NOTE_FRAMES, ch::taikoNoteFrame(beat, big),
+                   u0, u1);
+            if (baseAlpha > 0.0f)
+                quad(bucket, sx, sy, hw, hh, rotZ, u0, u1, baseAlpha * taikoT);
+            if (baseGlow > 0.0f)
+                quad(bucket, sx, sy, hw, hh, rotZ, u0, u1, baseGlow * taikoT);
+        }
+    }
+
+    // ---- draw, back to front -----------------------------------------------
+    v_ = vFrame;   drawTaikoLayer(texTaikoFrame_.id,     ch::BLEND_SPRITE);
+    v_ = vLane;    drawTaikoLayer(texTaikoLane_.id,      ch::BLEND_SPRITE);
+    v_ = vGogo;    drawTaikoLayer(texTaikoLaneGogo_.id,  ch::BLEND_SPRITE);
+    v_ = vFlash;   drawTaikoLayer(texTaikoLaneFlash_.id, ch::BLEND_ADD);
+    v_ = vBar;     drawTaikoLayer(texTaikoBar_.id,       ch::BLEND_SPRITE);
+    v_ = vJudge;   drawTaikoLayer(texTaikoJudge_.id,     ch::BLEND_SPRITE);
+    for (int i = 0; i < 6; ++i) {
+        v_ = vRollBody[i]; drawTaikoLayer(texTaikoRoll_[i].id, ch::BLEND_SPRITE);
+    }
+    for (int i = 0; i < 6; ++i) {
+        v_ = vRollCap[i];  drawTaikoLayer(texTaikoRoll_[i].id, ch::BLEND_SPRITE);
+    }
+    for (int i = 0; i < 6; ++i) {
+        v_ = vNote[i];     drawTaikoLayer(texTaikoNote_[i].id, ch::BLEND_SPRITE);
+    }
+    for (int i = 0; i < 6; ++i) {
+        v_ = vBig[i];      drawTaikoLayer(texTaikoBig_[i].id,  ch::BLEND_SPRITE);
+    }
+    v_ = vDrumBg;  drawTaikoLayer(texTaikoDrumBg_.id, ch::BLEND_SPRITE);
+    v_ = vDrum;    drawTaikoLayer(texTaikoDrum_.id,   ch::BLEND_SPRITE);
+    // Don and Ka are opaque lit-state art, not glows: additive over the drum's
+    // cream face blows Don's red out to white and the flash disappears.
+    v_ = vDrumHit; drawTaikoLayer(inSp ? texTaikoDrumKa_.id : texTaikoDrumDon_.id,
+                                  ch::BLEND_SPRITE);
+}
+
 void Renderer::drawGh3Layer(GLuint tex, int blend, bool fade) {
     if (v_.empty()) return;
     if (gh3CamOn_) for (auto& t : v_) gh3CamVtx(t);
@@ -5115,20 +5510,17 @@ void Renderer::drawGh3(const Chart& chart, double beat, const RenderOpts& o,
             // decays it by (button_up_pixels * dt) / button_sink_time. A
             // sustain is the exception -- CheckNoteHoldPerFrame re-slams the
             // full 20 every frame it runs, so a held lane never sinks.
-            // Opens raise every button here too, and GH3 has no open-note hit
-            // effect of its own -- the buttons simply pop, unlit, which falls
-            // out of leaving the open time out of heldL below.
+            // An open lights and raises ALL FIVE buttons here -- GH3 has no
+            // separate open hit effect, so the whole nowbar simply reacts.
+            // (CH differs: there the light is gated on real button state, and
+            // an open is played holding nothing, so it pops unlit.)
             const float dtLane = float(lastHit(lane, songTime));
             const float dt = fminf(dtLane, float(lastOpenHit(songTime)));
             if (laneSus[lane]) pxL[lane] = 20.0f;
             else if (dt >= 0.0f && dt < 0.1f)
                 pxL[lane] = 20.0f * (1.0f - dt / 0.1f);
-            // "held" is the fret being fingered. The bot frets a lane to hit
-            // it, so it is held for the pop and for the whole of a sustain --
-            // but an open note is played holding nothing, so only the LANE's
-            // own hit counts here.
-            heldL[lane] = laneSus[lane] ||
-                          (dtLane >= 0.0f && dtLane < 0.1f);
+            // Lit for the whole raise, opens included.
+            heldL[lane] = laneSus[lane] || pxL[lane] > 0.0f;
         }
         // The whole button jumps z 3.6-3.9 -> 4.6-4.9 while raised, which is
         // what puts a popped fret in front of the gems.
@@ -6261,10 +6653,14 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // field fades in place and the GH3 sprite field draws over it.
     const float gh3T = mods.hide == 0.0f
         ? fminf(1.0f, fmaxf(0.0f, mods.gh3)) : 0.0f;
+    // taiko crossfades exactly like gh3 -- another 2D field drawn over a CH
+    // highway that fades out underneath it.
+    const float taikoT = mods.hide == 0.0f
+        ? fminf(1.0f, fmaxf(0.0f, mods.taiko)) : 0.0f;
     const float originalTint[4] = {
         fieldTint_[0], fieldTint_[1], fieldTint_[2], fieldTint_[3]
     };
-    const float fieldSwapT = fmaxf(engineT, gh3T);
+    const float fieldSwapT = fmaxf(fmaxf(engineT, gh3T), taikoT);
     if (fieldSwapT > 0.0f) fieldTint_[3] *= 1.0f - fieldSwapT;
     Mat4& mvpEff = E.mvpEff;
     Mat4 drawMvp = mvpOverride ? *mvpOverride : mvpEff;
@@ -6315,9 +6711,10 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
     // for that is applied further up, before the matrices). Only a full 100%
     // drops the highway entirely.
     const bool piuMode = piuT > 0.0f && mods.hide == 0.0f && engineT < 1.0f &&
-                         gh3T < 1.0f;
+                         gh3T < 1.0f && taikoT < 1.0f;
     const bool hidePlayfield = mods.hide != 0.0f || piuT >= 1.0f ||
-                               engineT >= 1.0f || gh3T >= 1.0f;
+                               engineT >= 1.0f || gh3T >= 1.0f ||
+                               taikoT >= 1.0f;
 
     // Board layers. --playfield drops all four, leaving only frets and notes.
     // `hideboard` is the --playfield flag as a knob: the board goes, the notes
@@ -6414,7 +6811,10 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                 const float gemZ = float(ssec(tHit) - scrollNow) * noteSpeed;
                 const float len = float(held ? (ssec(tEnd) - scrollNow)
                                              : (ssec(tEnd) - ssec(tHit))) * noteSpeed
-                                + ch::SUS_OPEN_LEN_OFFSET;
+                                // sustainLengthOffset is computed ONCE from
+                                // the lane sprite and reused for every
+                                // ribbon, opens included.
+                                + ch::SUS_LEN_OFFSET;
                 const float zStart = held ? 0.0f : gemZ;
                 ch::buildSustainBody(susOpenV, mods, 2, zStart, len,
                                      ch::SUS_OPEN_W * 0.5f, 0,
@@ -6477,10 +6877,18 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
                       dtOpen <= dt;
         }
         FretBuckets& B = ch::fretOnTop(popY) ? top : low;
-        std::vector<ch::Vtx>* bk[7] = {&B.base, &B.lift, &B.cover, &B.head,
-                                       &B.headCover, &B.light, &B.half};
-        size_t n0[7];
-        for (int i = 0; i < 7; ++i) n0[i] = bk[i]->size();
+        // The open head is a PIECE OF THIS FRET, so it has to ride every
+        // per-lane transform below with the rest of the stack -- the mod
+        // displacement, tiny's zoom and column pull, and dark's fade. Left
+        // out of this list it stayed full-size and full-bright while the
+        // fret it belongs to moved and shrank. Pointing at the bucket even
+        // when openPop is false is harmless: nothing was appended, so every
+        // loop below spans zero vertices.
+        std::vector<ch::Vtx>* bk[8] = {&B.base, &B.lift, &B.cover, &B.head,
+                                       &B.headCover, &B.light, &B.half,
+                                       &B.openHead[ch::FRETS[lane].head6]};
+        size_t n0[8];
+        for (int i = 0; i < 8; ++i) n0[i] = bk[i]->size();
         ch::buildFret(B.base, B.lift, B.cover, B.head, B.headCover,
                        B.light, B.half, lane, popY, held, mods.flip,
                        openPop ? &B.openHead[ch::FRETS[lane].head6] : nullptr);
@@ -6514,7 +6922,7 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
             ? (fx + wdx) * (GetTinyColScale(mods) - 1.0f) : 0.0f;
         if (fzoom != 1.0f || pull != 0.0f ||
             wdx != 0.0f || wdy != 0.0f || wdz != 0.0f)
-            for (int i = 0; i < 7; ++i)
+            for (int i = 0; i < 8; ++i)
                 for (size_t j = n0[i]; j < bk[i]->size(); ++j) {
                     ch::Vtx& vtx = (*bk[i])[j];
                     if (fzoom != 1.0f) {
@@ -6535,7 +6943,7 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
         // an additive layer means. Guarded so 0 never touches a vertex.
         if (mods.dark != 0.0f) {
             const float da = fminf(1.0f, fmaxf(0.0f, 1.0f - mods.dark));
-            for (int i = 0; i < 7; ++i)
+            for (int i = 0; i < 8; ++i)
                 for (size_t j = n0[i]; j < bk[i]->size(); ++j) {
                     if (bk[i] == &B.light) {
                         (*bk[i])[j].r *= da;
@@ -6869,6 +7277,35 @@ void Renderer::drawField(const Chart& chart, double beat, const RenderOpts& o,
             mat_mul(gh3MvpOverride ? *gh3MvpOverride : gh3Proj, gh3Move);
         drawGh3(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
                 gh3DrawMvp);
+    }
+
+    if (taikoT > 0.0f) {
+        for (int i = 0; i < 4; ++i) fieldTint_[i] = originalTint[i];
+        // The skin's authored space is 1920x1080, y down. Mapped across this
+        // player's viewport strip at the FULL framebuffer's scale, with the
+        // lane's own centre x landing on the strip's centre -- fe76165's rule
+        // that two-player fields keep single-player pixel proportions, the
+        // same shape as the PIU and GH3 projections above. Reduces to the
+        // plain 1P matrix when the strip is the whole screen.
+        const float TCX = ch::TAIKO_VW * 0.5f;
+        Mat4 tProj{};
+        tProj.m[0] = 2.0f / ch::TAIKO_VW;
+        tProj.m[5] = -2.0f / ch::TAIKO_VH;
+        tProj.m[10] = tProj.m[15] = 1.0f;
+        tProj.m[12] = 2.0f * (float(vpX) + float(vpW) * 0.5f) / float(W)
+                      - 1.0f - TCX * (2.0f / ch::TAIKO_VW);
+        tProj.m[13] = 1.0f;
+        // Whole-field movex/movey in world units, converted at the strike
+        // line's scale the way the GH3 field does it. World +y is up, the
+        // vscreen's is down; movez has no axis on a flat field.
+        const float w2v = ch::TAIKO_SCALE / pxToUnits(1.0f);
+        Mat4 tMove{};
+        tMove.m[0] = tMove.m[5] = tMove.m[10] = tMove.m[15] = 1.0f;
+        tMove.m[12] = (o.px + mx) * w2v;
+        tMove.m[13] = -(o.py + my) * w2v;
+        const Mat4 tDrawMvp = mat_mul(tProj, tMove);
+        drawTaiko(chart, beat, o, mods, songTime, scrollNow, noteSpeed, bpm,
+                  tDrawMvp);
     }
 
 }

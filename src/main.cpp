@@ -57,7 +57,11 @@ static void usage() {
 "  --nomods              ignore the modchart entirely\n"
 "  --randmods            generate a random modchart (motion mods only, at\n"
 "                        -100%..100%, re-rolled at each chart section)\n"
-"  --randseed <n>        seed for --randmods; same seed = same modchart\n"
+"  --randengine          generate a random ENGINE VISUAL modchart: one of\n"
+"                        CH / piu / moonscraper / yarg / gh3 / taiko per\n"
+"                        chart section, always 100%, never two at once\n"
+"  --randseed <n>        seed for --randmods/--randengine; same seed = same\n"
+"                        modchart\n"
 "  --randcount <n>       how many mods at once (default 3)\n"
 "  --actor <sub[@beat]>  load <dir>/<sub>/default.lua (or legacy XML) as a\n"
 "                        foreground tree at <beat> (default 0). Repeatable.\n"
@@ -206,6 +210,74 @@ static nc::ModDoc randomModchart(const nc::Chart& chart, unsigned seed,
             doc.entries.push_back(nc::ModEntry{tick, id, v, ap, 0, 0, true});
         }
         prev = cur;
+    }
+    doc.rebuild(chart);
+    return doc;
+}
+
+// --randengine -- one engine visual per section, always at 100%.
+//
+// A different animal from --randmods and deliberately so. That one rolls the
+// MOTION knobs, which are continuous, signed and stack: a section can hold six
+// of them at partial strength and the interesting part is the combination.
+// The engine visuals are none of those things. They are mutually exclusive
+// whole-field swaps -- piu, moonscraper, yarg, gh3, taiko each replace the
+// playfield outright -- so there is nothing to combine and nothing a partial
+// value buys. 50% taiko is a crossfade, which is a real feature when a modchart
+// asks for it and just a smeared half-swap when a sampler rolls it by accident.
+// So: exactly one at a time, snapped, at 100%, changing on section boundaries.
+//
+// CH IS IN THE POOL. "No engine mod" is the stock field, which is as much a
+// member of the set as the other five -- a sampler that cannot come home to CH
+// is not sampling the whole set.
+//
+// Immediate repeats are re-rolled. Every section boundary is meant to be a
+// visible change; a roll that lands on what is already showing spends a whole
+// section saying nothing.
+//
+// Deterministic, same xorshift32 as randomModchart and for the same reason:
+// same seed, same sequence, on any machine.
+static nc::ModDoc randomEngineModchart(const nc::Chart& chart, unsigned seed) {
+    unsigned s = seed ? seed : 0x9E3779B9u;
+    auto next = [&]() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s; };
+
+    static const int POOL[] = {
+        -1,                       // CH -- the stock field, no knob at all
+        nc::MOD_PIU, nc::MOD_MOONSCRAPER, nc::MOD_YARG,
+        nc::MOD_GH3, nc::MOD_TAIKO,
+    };
+    const int NPOOL = int(sizeof(POOL) / sizeof(POOL[0]));
+
+    // Section markers, exactly as --randmods does it -- they are where the
+    // music changes, so the field changes with it.
+    std::vector<double> rolls;
+    for (const auto& sec : chart.sections) rolls.push_back(sec.beat);
+    if (rolls.size() < 2) {
+        rolls.clear();
+        const double last = chart.notes.empty() ? 64.0 : chart.notes.back().beat;
+        for (double b = 0.0; b < last; b += 16.0) rolls.push_back(b);
+    }
+
+    nc::ModDoc doc;
+    int prev = -2;                // -2 = nothing rolled yet, -1 = CH is showing
+    for (double b : rolls) {
+        const int tick = int(b * chart.resolution + 0.5);
+        int id;
+        do { id = POOL[next() % unsigned(NPOOL)]; } while (id == prev);
+        // Retire the outgoing field before raising the incoming one. Both land
+        // on the same tick; without the retire they would both be at 100% and
+        // draw over each other.
+        //
+        // Snapped, not approached. Tried it both ways: at the default rate the
+        // swap takes a second, which straddles the boundary instead of landing
+        // on it and draws both fields over each other the whole way across --
+        // two dense fields overlapping is muddy, not a crossfade. A hard cut on
+        // the section boundary is the look.
+        if (prev >= 0)
+            doc.entries.push_back(nc::ModEntry{tick, prev, 0.0f, -1.0f, 0, 0, true});
+        if (id >= 0)
+            doc.entries.push_back(nc::ModEntry{tick, id, 1.0f, -1.0f, 0, 0, true});
+        prev = id;
     }
     doc.rebuild(chart);
     return doc;
@@ -413,6 +485,7 @@ int main(int argc, char** argv) {
     nc::RenderOpts opt;
     bool builtinMods = false;
     bool randMods = false;
+    bool randEngine = false;
     unsigned randSeed = 0;
     int randCount = 3;
     bool noActors = false;
@@ -437,6 +510,7 @@ int main(int argc, char** argv) {
         else if (a == "--mods")    modPath = next();
         else if (a == "--builtin-mods") builtinMods = true;
         else if (a == "--randmods")  randMods = true;
+        else if (a == "--randengine") randEngine = true;
         else if (a == "--randseed")  randSeed = unsigned(strtoul(next().c_str(), nullptr, 10));
         else if (a == "--randcount") randCount = atoi(next().c_str());
         else if (a == "--actor")  actorArgs.push_back(next());
@@ -579,6 +653,31 @@ int main(int argc, char** argv) {
         printf("modchart: RANDOM, seed %u, %d at a time (%zu entries) -- "
                "re-run with --randseed %u for this exact roll%c",
                randSeed, randCount, doc.entries.size(), randSeed, 10);
+    } else if (randEngine) {
+        doc = randomEngineModchart(chart, randSeed);
+        opt.doc = &doc;
+        printf("modchart: RANDOM ENGINE, seed %u (%zu entries) -- "
+               "re-run with --randseed %u for this exact roll%c",
+               randSeed, doc.entries.size(), randSeed, 10);
+        // The roll is the whole point of the flag, so it is printed rather
+        // than left to be inferred from a render. Only the entries that turn
+        // something ON name a field; a section with none of them is CH.
+        for (const auto& sec : chart.sections) {
+            const int tick = int(sec.beat * chart.resolution + 0.5);
+            const char* which = "ch";
+            for (const auto& e : doc.entries) {
+                if (e.tick != tick || e.percent <= 0.0f) continue;
+                switch (e.mod) {
+                    case nc::MOD_PIU:         which = "piu";         break;
+                    case nc::MOD_MOONSCRAPER: which = "moonscraper"; break;
+                    case nc::MOD_YARG:        which = "yarg";        break;
+                    case nc::MOD_GH3:         which = "gh3";         break;
+                    case nc::MOD_TAIKO:       which = "taiko";       break;
+                    default: break;
+                }
+            }
+            printf("  %-24s %s%c", sec.name.c_str(), which, 10);
+        }
     } else if (modPath.empty() && !builtinMods) {
         std::error_code ec;
         std::string found;
@@ -593,7 +692,7 @@ int main(int argc, char** argv) {
     }
     if (!dumpPath.empty()) {
         /* actor runtime is the source */
-    } else if (randMods) {
+    } else if (randMods || randEngine) {
         /* already built */
     } else if (!modPath.empty()) {
         if (!doc.load(modPath)) return 1;

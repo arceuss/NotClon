@@ -356,7 +356,7 @@ private:
     double lastHit(int lane, double now) const;
     double lastOpenHit(double now) const;
 
-    Mat4 view_{}, mvp_{}, mvp2_{}, piuMvp_{}, gh3Mvp_{};
+    Mat4 view_{}, mvp_{}, mvp2_{}, piuMvp_{}, gh3Mvp_{}, taikoMvp_{};
     GLuint prog_ = 0, post_ = 0, glow_ = 0, susGlow_ = 0, actor_ = 0;
     GLuint cover_ = 0, piu_ = 0, gh3Sprite_ = 0, gh3Whammy_ = 0, engine_ = 0;
     GLuint engineGlow_ = 0, yargEffect_ = 0;
@@ -424,6 +424,13 @@ private:
     // PIU mode: three arts each, indexed by ch::PIU_ART (DownLeft/UpLeft/Center).
     Tex texPiuTap_[3], texPiuRecep_[3], texPiuHoldBody_[3], texPiuHoldCap_[3];
     Tex texPiuFlash_;
+    // Taiko mode (assets/taiko/*, see taiko.SOURCE.txt). Note/big/roll art is
+    // indexed by lane 0..4 with slot 5 the purple open note -- the same order
+    // as ch::NOTE_TINT, because that is where the recolours came from.
+    Tex texTaikoNote_[6], texTaikoBig_[6], texTaikoRoll_[6];
+    Tex texTaikoJudge_, texTaikoLane_, texTaikoLaneGogo_, texTaikoLaneFlash_;
+    Tex texTaikoFrame_, texTaikoDrumBg_, texTaikoDrum_, texTaikoBar_;
+    Tex texTaikoDrumDon_, texTaikoDrumKa_;
     // GH3 board art (assets/engine/gh3_*, see gh3.SOURCE.txt). The highway
     // surface itself is a flat black fill -- GH3's fretboard art is venue
     // geometry, not in global.pak, and black is the chosen stand-in.
@@ -490,6 +497,7 @@ private:
     void drawSustainGlow();
     void drawGlowLayer(GLuint tex);
     void drawPiuLayer(GLuint tex, int blend);
+    void drawTaikoLayer(GLuint tex, int blend);
     void drawGh3Layer(GLuint tex, int blend, bool fade = false);
     void drawGh3Whammy(GLuint tex, bool glow);
     void gh3CamVtx(ch::Vtx& t) const;
@@ -505,6 +513,10 @@ private:
     void drawGh3(const Chart& chart, double beat, const RenderOpts& o,
                  const Mods& mods, float songTime, float scrollNow,
                  float noteSpeed, float bpm, const Mat4& mvp);
+    // The taiko lane -- drawPiu rotated a quarter turn. See the definition.
+    void drawTaiko(const Chart& chart, double beat, const RenderOpts& o,
+                   const Mods& mods, float songTime, float scrollNow,
+                   float noteSpeed, float bpm, const Mat4& mvp);
     void loadEngineMesh(EngineGpu& gpu, const std::string& path);
     void drawEngineMesh(const EngineGpu& gpu, const Mat4& camera,
                         const Mat4& model, int kind, const float* color,

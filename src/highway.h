@@ -74,11 +74,12 @@ static const float SUS_FAR_LIMIT  = 7.75f;       // Sustains.mat / SustainGlow.m
 static const float SUS_LEN_OFFSET = 0.27142857f; // (border.w/2)/rect.height = (38/2)/70, :60
 static const float SUS_Z_OFFSET   = 0.30f;       // unheld: noteZPosition + 0.3f, :497
 static const float SUS_TOP_BORDER = 0.38f;       // border.w 38 px / PPU 100
-// The open ribbon's own 9-slice: border.w 73 px of an 85 px sprite, so its cap
-// is far deeper than a lane ribbon's and its length offset correspondingly
-// bigger ((73/2)/85 against (38/2)/70).
-static const float SUS_OPEN_TOP_BORDER = 0.73f;
-static const float SUS_OPEN_LEN_OFFSET = (73.0f * 0.5f) / 85.0f;
+// The open ribbon's own 9-slice. Its sheet is spriteMode SINGLE at
+// spritePixelsToUnits 600 -- NOT the lane strip's 100 -- so the texture-level
+// border (top 80 px) is 80/600 world units, a SIXTH of what reading it at PPU
+// 100 would give. That mistake makes the rounded cap swallow most of the
+// ribbon and the tail read as one long lozenge.
+static const float SUS_OPEN_TOP_BORDER = 80.0f / 600.0f;
 static const float SUS_GLOW_EDGE  = 0.45f;       // SustainGlow.shader EDGE_LENGTH
 
 // Port of OpenITG's fYStep (NoteDisplay.cpp:983): 16 screen pixels, the
@@ -132,7 +133,7 @@ inline void openSustainFrameUV(float& u0, float& u1,
     u0 = 0.0f;
     u1 = 1.0f;
     v0 =  0.0f;
-    vB = (85.0f - 73.0f) / 85.0f;
+    vB = (85.0f - 80.0f) / 85.0f;
     v1 =  1.0f;
 }
 
@@ -222,6 +223,80 @@ inline float piuReceptorGlow(double beat) {
     float part = float(beat - floor(beat));
     if (part > 0.5f) part = 0.5f;
     return 1.0f - part / 0.5f;
+}
+
+// --- TAIKO display mode (Moshir's OpenTaiko Skin) --------------------------
+//
+// The taiko field is the PIU field turned a quarter turn: still flat, still
+// driven by ArrowEffects, but the scroll axis is screen X (right to left into
+// a target ring) and the cross axis is screen Y. Everything below is in the
+// skin's own authored space -- 1920x1080, y down -- and every constant is
+// lifted from its GameConfig.ini rather than eyeballed, the same discipline
+// the GH3 field takes from guitar_tweaks.q. Sprites come from
+// devtools/taiko_extract.py; provenance in assets/taiko/taiko.SOURCE.txt.
+static const float TAIKO_VW = 1920.0f, TAIKO_VH = 1080.0f;
+
+// Game_Lane_X/Y = 499,288 with Background_Main.png at 1420x195.
+static const float TAIKO_LANE_X = 499.0f, TAIKO_LANE_Y = 288.0f;
+static const float TAIKO_LANE_W = 1420.0f, TAIKO_LANE_H = 195.0f;
+
+// Game_ScrollField_X/Y = 523,288. This is the TOP-LEFT of the note cell at the
+// strike point, not its centre: GetNoteOriginX/Y feeds top-left draws
+// (CStage演奏画面共通.cs:624-648, NotesManager.DisplayNote), and the target ring
+// is Notes.png column 0 stamped at the same origin (CActImplLaneTaiko.cs:436).
+// So the line every note rides is half a cell below it -- 385.5, which is the
+// lane's own midpoint exactly.
+static const float TAIKO_SCROLL_X = 523.0f, TAIKO_SCROLL_Y = 288.0f;
+static const float TAIKO_JUDGE_X = TAIKO_SCROLL_X + 195.0f * 0.5f;   // 620.5
+static const float TAIKO_JUDGE_Y = TAIKO_SCROLL_Y + 195.0f * 0.5f;   // 385.5
+
+// Game_Taiko_X/Y = 308,309 (Base.png 180x199), Game_Taiko_Background_Y = 276
+// (1P_Background.png 499x264, hard against the lane's left edge), and
+// Game_Taiko_Frame_X/Y = 494,204 (1P_Frame.png 1426x336).
+static const float TAIKO_DRUM_X = 308.0f, TAIKO_DRUM_Y = 309.0f;
+static const float TAIKO_DRUM_W = 180.0f, TAIKO_DRUM_H = 199.0f;
+static const float TAIKO_DRUMBG_X = 0.0f, TAIKO_DRUMBG_Y = 276.0f;
+static const float TAIKO_DRUMBG_W = 499.0f, TAIKO_DRUMBG_H = 264.0f;
+static const float TAIKO_FRAME_X = 494.0f, TAIKO_FRAME_Y = 204.0f;
+static const float TAIKO_FRAME_W = 1426.0f, TAIKO_FRAME_H = 336.0f;
+
+// Game_Notes_Size = 195,195. Bar.png is 4x270.
+static const float TAIKO_NOTE = 195.0f;
+static const float TAIKO_BAR_W = 4.0f, TAIKO_BAR_H = 270.0f;
+static const int   TAIKO_NOTE_FRAMES = 4;
+
+// Time axis, the same call the GH3 and Moonscraper fields make: the window is
+// CH's own NOTE_CULL_FAR / noteSpeed, NOT OpenTaiko's Game_Notes_Interval, so
+// the chart pours at the same perceived rate as the CH field at any speed and
+// hyperspeed translates exactly. One arrow-space pixel is this many vscreen
+// px, fixed so that a note at the cull distance sits exactly on the right edge.
+static const float TAIKO_SCROLL_PX = TAIKO_VW - TAIKO_JUDGE_X;          // 1299
+static const float TAIKO_SCALE =
+    TAIKO_SCROLL_PX / (NOTE_CULL_FAR * 64.0f * 1.6f);                   // ~1.612
+
+// A chord cannot stack on a one-lane field -- five notes at one x would be one
+// note. They FAN about the line instead, evenly spread at this pitch, so a
+// three-note chord reads as three colours and a lone note still rides dead
+// centre. Notes keep their full size, so a wide chord deliberately overflows
+// the lane onto the background -- a fan sized to keep five notes inside 195px
+// would shrink them to stamps, and the overflow reads better than that.
+static const float TAIKO_FAN = 44.0f;
+
+// The note's four rows are NOT an idle loop. GetPxFaceTextureOffset
+// (CStage演奏ドラム画面.cs:1059-1080) picks row 0 normally and alternates into
+// rows 1 and 2 as the COMBO passes 50, 150 and 300 -- the face gets angrier the
+// longer the player survives. Row 3 is reserved for the flying-note effect.
+//
+// NotClon keeps no combo: it has an autoplay bot and no scoring, so the input
+// that drives this animation does not exist. Rather than leave three quarters
+// of the art dead, the star power phrase stands in for the combo threshold --
+// it is the one span in a CH chart that means the same thing OpenTaiko's high
+// combo means. Outside a phrase the note rests on row 0, which is what the game
+// shows below 50 combo. The `% 2` alternation is the game's own.
+inline int taikoNoteFrame(double beat, bool starPower) {
+    if (!starPower) return 0;
+    if (beat < 0.0) beat = 0.0;
+    return (int(floor(beat)) % 2) ? 2 : 1;
 }
 
 // --- sidebars (sidebar.png 64x512, PPU 600) -------------------------------

@@ -92,6 +92,10 @@ struct Mods {
     // the chart, scroll timing or ArrowEffects position pipeline. gh3 is a 2D
     // field (drawGh3), not a drawEngine style.
     float moonscraper = 0, yarg = 0, gh3 = 0;
+    // Taiko display mode: a single horizontal lane, notes scrolling right to
+    // left into a target ring, in full grybo rather than taiko's red/blue. A
+    // 2D field like gh3 (drawTaiko), not a drawEngine style.
+    float taiko = 0;
     float sudden = 0, hidden = 0;
     float suddenOffset = 0, hiddenOffset = 0;
     // Per-column reverse contributions (PlayerOptions.cpp:1313-1332
